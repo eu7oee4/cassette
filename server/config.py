@@ -1,0 +1,49 @@
+"""cassette 后端配置：全部从环境变量读（见 .env.example），个人配置一律不进仓。"""
+import os
+from pathlib import Path
+from zoneinfo import ZoneInfo
+
+from dotenv import load_dotenv
+
+BASE_DIR = Path(__file__).resolve().parent
+load_dotenv(BASE_DIR / ".env")
+
+# X-Auth 共享密钥：app 与后端各持一份。不配则后端拒绝所有请求（fail closed）。
+AUTH_KEY = os.environ.get("CASSETTE_AUTH_KEY", "")
+
+# claude CLI（需已安装并登录；凭据走 CLI 登录态，后端不碰 API key）
+MODEL = os.environ.get("CLAUDE_MODEL", "opus")
+CLAUDE_TIMEOUT_SEC = int(os.environ.get("CLAUDE_TIMEOUT_SEC", "300"))
+STREAM_PING_SEC = 25   # 流式心跳间隔：工具调用期没有正文可发，定期 ping 撑住连接
+
+# 人设文件：--system-prompt-file 完整替换默认系统提示词（实时读取，改人设不用重启）。
+# 没有 persona.md 就退回 example——克隆下来零配置也能跑。
+PERSONA_PATH = BASE_DIR / os.environ.get("PERSONA_FILE", "persona.md")
+if not PERSONA_PATH.exists():
+    PERSONA_PATH = BASE_DIR / "persona.example.md"
+
+# 时区（时间感知注入用）
+APP_TZ = ZoneInfo(os.environ.get("APP_TZ", "Asia/Shanghai"))
+
+# 名字：app 首次启动引导用户起好、存后端 settings，这里的 env 值只是兜底默认。
+# 用函数不用常量——用户随时可在 app 里改名，每次拼 prompt 现读才能即时生效。
+USER_NAME_DEFAULT = os.environ.get("USER_DISPLAY_NAME", "user")
+AGENT_NAME_DEFAULT = os.environ.get("AGENT_NAME", "cassette")
+
+
+def user_name() -> str:
+    import state_store
+    return (state_store.load_settings().get("user_name") or "").strip() or USER_NAME_DEFAULT
+
+
+def agent_name() -> str:
+    import state_store
+    return (state_store.load_settings().get("agent_name") or "").strip() or AGENT_NAME_DEFAULT
+
+# 可选：Bark 推送（断连补投/主动消息时通知手机；不配则静默跳过）
+BARK_URL = os.environ.get("BARK_URL", "").strip()
+BARK_ICON = os.environ.get("BARK_ICON", "").strip()   # 通知图标（公网可访问的图片 URL），空=Bark 默认
+
+# wake 调度器（主动性）：总开关 + tick 间隔（每 tick 只做本地预判，不叫模型）
+PROACTIVE_ENABLED = os.environ.get("PROACTIVE_ENABLED", "1") != "0"
+WAKE_TICK_SEC = int(os.environ.get("WAKE_TICK_SEC", "300"))

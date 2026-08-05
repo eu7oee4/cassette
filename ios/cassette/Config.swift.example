@@ -1,0 +1,18 @@
+// 后端连接配置模板。复制成同目录的 Config.swift 再填自己的值：
+//   cp Config.swift.example Config.swift
+// Config.swift 已 gitignore，真实地址和密钥不会进仓库。
+import Foundation
+
+enum BackendConfig {
+    /// 后端地址：
+    /// - 模拟器：127.0.0.1 直连本机后端（模拟器和 Mac 共享网络栈）。
+    /// - 真机：换成 Mac 的局域网 IP（同一 Wi-Fi）或 Tailscale IP（在外也能用）。
+    #if targetEnvironment(simulator)
+    static let baseURL = "http://127.0.0.1:8000"
+    #else
+    static let baseURL = "http://192.168.1.100:8000"   // ⚠️ 示例值，换成你 Mac 的 IP
+    #endif
+
+    /// 共享密钥，必须和后端 .env 里的 CASSETTE_AUTH_KEY 完全一致。
+    static let authKey = "change-me"
+}

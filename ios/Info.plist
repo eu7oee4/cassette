@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<!-- 放行明文 http：后端跑在自己 Mac 上（局域网 IP / Tailscale 100.x），个人自用。
+		     注意：不能再加 NSAllowsLocalNetworking，否则 iOS 会忽略 NSAllowsArbitraryLoads。 -->
+		<key>NSAllowsArbitraryLoads</key>
+		<true/>
+	</dict>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>cassette needs local network access to reach the backend running on your Mac.</string>
+</dict>
+</plist>

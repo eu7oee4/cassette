@@ -1,0 +1,62 @@
+# ===== secrets =====
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+**/credentials*
+**/*auth_key*
+
+# ===== 机器生成的本地配置（留 .example 模板入库）=====
+ios/cassette/Config.swift
+codemode.mcp.json
+*.mcp.json
+!*.mcp.example.json
+
+# ===== 运行时数据 / 私密数据 =====
+*.db
+*.sqlite3
+data/
+state/
+chats/
+ombre/
+memory/
+outbox/
+prompts/persona*
+persona.md
+playroom/
+
+# ===== 求职相关 =====
+resumes/
+*.pdf
+
+# ===== Python =====
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+*.egg-info/
+
+# ===== Xcode / iOS =====
+build/
+DerivedData/
+*.xcuserstate
+xcuserdata/
+*.moved-aside
+*.hmap
+*.ipa
+.build/
+
+# ===== 系统 / 编辑器 =====
+.DS_Store
+*.swp
+.idea/
+.vscode/
+.claude/
+
+# ===== 日志 =====
+*.log
+logs/
