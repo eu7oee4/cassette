@@ -104,6 +104,7 @@ def wake_prompt(settings: dict) -> str:
 
     return f"""【这是一次你自己的醒来，不是{u}发来的消息】
 现在是 {now_str}。{gap_line}
+{pipeline.pronoun_hint()}
 
 【最近发生的，按时间顺序——对话 / 你自己醒来时的内心，看时间戳别搞混先后】
 {timeline_block}

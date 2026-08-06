@@ -19,10 +19,16 @@ struct ProactiveSettingsView: View {
                         TextField("user", text: field(\.userName))
                             .multilineTextAlignment(.trailing)
                     }
+                    Picker("提到你时用", selection: field(\.userPronoun)) {
+                        Text("她").tag("她")
+                        Text("他").tag("他")
+                        Text("TA").tag("TA")
+                    }
+                    .pickerStyle(.segmented)
                 } header: {
                     Text("昵称")
                 } footer: {
-                    Text("TA 的昵称也是顶栏标题。")
+                    Text("TA 的昵称也是顶栏标题。人称代词会用在聊天、内心独白和记忆里。")
                 }
 
                 Section {

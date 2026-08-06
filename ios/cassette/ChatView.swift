@@ -10,7 +10,10 @@ struct ChatView: View {
     var onTapChatArea: () -> Void = { }            // 点聊天空白区
     var onTapAvatar: (MessageSender) -> Void = { _ in }   // 点头像：改昵称/换头像
     var onTapImage: (URL) -> Void = { _ in }       // 点图片气泡：全屏查看
+    var onTapImageStack: ([URL], Int) -> Void = { _, _ in }   // 点堆叠卡：从当前图起翻页
     var onTapFile: (URL) -> Void = { _ in }        // 点文件卡片：QuickLook 预览
+    var onTapWebpage: (String, String) -> Void = { _, _ in }  // 点网页卡片：打开网页
+    var onDeleteStack: ([ChatMessage]) -> Void = { _ in }     // 长按堆叠卡：删整组
     var editRefreshTick: Int = 0   // 用户亲手编辑/删除的信号：+1 → 手术式合并进冻结快照
     var scrollTarget: UUID? = nil                  // 外部跳转请求（聊天记录页点行）
     var onScrollTargetHandled: () -> Void = { }    // 跳转消费完通知外面清 nil
@@ -34,35 +37,45 @@ struct ChatView: View {
                         .flippedUpsideDown()
                         .transition(.opacity)
                 }
-                ForEach(shownMessages.reversed()) { message in
+                ForEach(Array(displayRows.reversed())) { row in
                     Group {
-                        if Self.isVisuallyEmpty(message) {
-                            // 空内容行（如断流残留的空文字消息）整行不渲染——
-                            // 不然会剩一条只有时间戳/纯空白的隐形行占位
-                            EmptyView()
-                        } else if message.isSystem || message.isMemoryNote {
-                            SystemMessageRow(text: message.plainText)
+                        switch row {
+                        case .single(let message):
+                            if Self.isVisuallyEmpty(message) {
+                                // 空内容行（如断流残留的空文字消息）整行不渲染——
+                                // 不然会剩一条只有时间戳/纯空白的隐形行占位
+                                EmptyView()
+                            } else if message.isSystem || message.isMemoryNote {
+                                SystemMessageRow(text: message.plainText)
+                                    .contentShape(Rectangle())
+                                    .onLongPressGesture { onDelete(message) }
+                            } else {
+                                MessageRow(message: message,
+                                           contentWidth: geo.size.width - 24,
+                                           onEdit: onEdit,
+                                           onDelete: onDelete,
+                                           onTapAvatar: onTapAvatar,
+                                           onTapImage: onTapImage,
+                                           onTapFile: onTapFile,
+                                           onTapWebpage: onTapWebpage)
+                            }
+                        case .imageStack(let group):
+                            ImageStackRow(messages: group,
+                                          onTapStack: onTapImageStack,
+                                          onTapAvatar: { onTapAvatar(group[0].sender) })
                                 .contentShape(Rectangle())
-                                .onLongPressGesture { onDelete(message) }
-                        } else {
-                            MessageRow(message: message,
-                                       contentWidth: geo.size.width - 24,
-                                       onEdit: onEdit,
-                                       onDelete: onDelete,
-                                       onTapAvatar: onTapAvatar,
-                                       onTapImage: onTapImage,
-                                       onTapFile: onTapFile)
+                                .onLongPressGesture { onDeleteStack(group) }
                         }
                     }
                     .background {
                         // 跳转落地闪高亮：白光、横向占满屏（负 padding 吃掉列表左右边距）
-                        if flashRowId == message.id {
+                        if flashRowId == row.id {
                             Color.white.opacity(0.85)
                                 .padding(.horizontal, -12)
                         }
                     }
                     .flippedUpsideDown()
-                    .id(message.id)
+                    .id(row.id)
                 }
             }
             .padding(.horizontal, 12)
@@ -249,20 +262,20 @@ struct ChatView: View {
     /// 末尾窜一下"）→ 无动画连跳三拍让布局收敛落准；跳完退出跟随模式（人在读旧消息，
     /// 别被流式吸回底）。
     private func jump(to messageId: UUID, proxy: ScrollViewProxy) {
-        guard messages.contains(where: { $0.id == messageId }) else { return }
         followBottom = false
         frozenMessages = nil
         frozenIsWaiting = nil
-        proxy.scrollTo(messageId, anchor: .center)
+        guard let rid = rowId(for: messageId) else { return }   // 目标可能收在堆叠卡里
+        proxy.scrollTo(rid, anchor: .center)
         var attempts = 0
         Timer.scheduledTimer(withTimeInterval: 0.15, repeats: true) { t in
             attempts += 1
-            proxy.scrollTo(messageId, anchor: .center)
+            proxy.scrollTo(rid, anchor: .center)
             if attempts >= 3 { t.invalidate() }
         }
-        withAnimation(.easeIn(duration: 0.2)) { flashRowId = messageId }
+        withAnimation(.easeIn(duration: 0.2)) { flashRowId = rid }
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
-            if flashRowId == messageId {
+            if flashRowId == rid {
                 withAnimation(.easeOut(duration: 0.5)) { flashRowId = nil }
             }
         }
@@ -292,6 +305,52 @@ struct ChatView: View {
     // 在屏内、测高精确）。
     @State private var awayFrozen: [ChatMessage]? = nil
     private var shownMessages: [ChatMessage] { frozenMessages ?? awayFrozen ?? messages }
+
+    /// 展示行：连续 ≥2 张同发送者的图片消息收成一张堆叠照片卡，其余原样单行。
+    private enum ChatRowItem: Identifiable {
+        case single(ChatMessage)
+        case imageStack([ChatMessage])
+        var id: UUID {
+            switch self {
+            case .single(let m):      return m.id
+            case .imageStack(let ms): return ms[0].id   // 组 id=首图 id，追加进组不换行身份
+            }
+        }
+    }
+
+    private var displayRows: [ChatRowItem] {
+        var rows: [ChatRowItem] = []
+        var run: [ChatMessage] = []
+        func flushRun() {
+            if run.count >= 2 { rows.append(.imageStack(run)) }
+            else { run.forEach { rows.append(.single($0)) } }
+            run = []
+        }
+        for m in shownMessages {
+            if case .image = m.kind {
+                if let last = run.last, last.sender != m.sender { flushRun() }
+                run.append(m)
+            } else {
+                flushRun()
+                rows.append(.single(m))
+            }
+        }
+        flushRun()
+        return rows
+    }
+
+    /// 消息 id → 展示行 id（目标可能被收进堆叠卡，行 id=组首图 id）。跳转用。
+    private func rowId(for messageId: UUID) -> UUID? {
+        for row in displayRows {
+            switch row {
+            case .single(let m):
+                if m.id == messageId { return row.id }
+            case .imageStack(let ms):
+                if ms.contains(where: { $0.id == messageId }) { return row.id }
+            }
+        }
+        return nil
+    }
     private var isFrozen: Bool { frozenMessages != nil || awayFrozen != nil }
     // "正在输入"行的可见性也要冻结（与消息快照同生命周期）：它不在 messages 里，
     // 不冻的话冻结期间照样插拔布局。
@@ -414,6 +473,7 @@ private struct MessageRow: View {
     var onTapAvatar: (MessageSender) -> Void = { _ in }
     var onTapImage: (URL) -> Void = { _ in }
     var onTapFile: (URL) -> Void = { _ in }
+    var onTapWebpage: (String, String) -> Void = { _, _ in }
 
     private var isMe: Bool { message.sender == .me }
 
@@ -461,22 +521,18 @@ private struct MessageRow: View {
                 .frame(maxWidth: 160, maxHeight: 160)
                 .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
         case .image(let url):
-            // 聊天图片：等比缩略气泡，点开全屏查看
-            if let img = AppFiles.loadImage(url) {
-                Image(uiImage: img)
-                    .resizable()
-                    .scaledToFit()
-                    .frame(maxWidth: min(240, bubbleMaxWidth), maxHeight: 300)
-                    .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-                    .onTapGesture { onTapImage(url) }
-            } else {
-                Image(systemName: "photo")
-                    .font(.system(size: 32))
-                    .foregroundStyle(.secondary)
-                    .frame(width: 120, height: 90)
-                    .background(Color(.systemGray5),
-                                in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+            // 和堆叠卡同款：160×160 填充裁切 + 16 圆角，聊天里所有照片观感一致
+            Group {
+                if let img = AppFiles.loadImage(url) {
+                    Image(uiImage: img).resizable().scaledToFill()
+                } else {
+                    Color(.systemGray5)
+                        .overlay(Image(systemName: "photo").foregroundStyle(.secondary))
+                }
             }
+            .frame(width: 160, height: 160)
+            .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .onTapGesture { onTapImage(url) }
         case .file(let url, let name):
             // 文件卡片：图标 + 文件名，点开 QuickLook 预览
             HStack(spacing: 10) {
@@ -492,9 +548,33 @@ private struct MessageRow: View {
             .padding(.horizontal, 14)
             .padding(.vertical, 12)
             .frame(maxWidth: min(240, bubbleMaxWidth), alignment: .leading)
-            .background(Color(.secondarySystemBackground),
+            // 实底白卡 + 细描边：聊天背景是 systemGroupedBackground，
+            // secondarySystemBackground 和它几乎同色，看着像透明（真机反馈）
+            .background(Color(.systemBackground),
                         in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .strokeBorder(Color(.systemGray4), lineWidth: 0.5))
             .onTapGesture { onTapFile(url) }
+        case .webpage(let pid, let title):
+            // TA 做的网页：卡片和文件同款质感，点开就是页面
+            HStack(spacing: 10) {
+                Image(systemName: "doc.richtext.fill")
+                    .font(.system(size: 26))
+                    .foregroundStyle(Color.theme)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title).font(.callout.weight(.medium)).lineLimit(2)
+                    Text("网页 · 点开查看")
+                        .font(.caption2).foregroundStyle(.secondary)
+                }
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 12)
+            .frame(maxWidth: min(240, bubbleMaxWidth), alignment: .leading)
+            .background(Color(.systemBackground),
+                        in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .strokeBorder(Color(.systemGray4), lineWidth: 0.5))
+            .onTapGesture { onTapWebpage(pid, title) }
         case .system, .memoryNote:
             EmptyView()
         }
@@ -607,6 +687,145 @@ struct StickerImage: View {
         } else {
             RoundedRectangle(cornerRadius: 16)
                 .fill(Color(.systemGray5))
+                .overlay(Image(systemName: "photo").foregroundStyle(.secondary))
+        }
+    }
+}
+
+/// 连发多图的行：头像 + 堆叠照片卡 + 时间戳（取最后一张的时间）。
+private struct ImageStackRow: View {
+    let messages: [ChatMessage]                       // ≥2，同 sender 的连续图片
+    var onTapStack: ([URL], Int) -> Void = { _, _ in }
+    var onTapAvatar: () -> Void = { }
+
+    private var isMe: Bool { messages[0].sender == .me }
+    private var urls: [URL] {
+        messages.compactMap { m in
+            if case .image(let u) = m.kind { return u }
+            return nil
+        }
+    }
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 8) {
+            if !isMe {
+                Button { onTapAvatar() } label: { AvatarView(sender: .other) }
+                    .buttonStyle(.plain)
+            }
+            VStack(alignment: isMe ? .trailing : .leading, spacing: 5) {
+                PhotoStackCard(urls: urls) { i in onTapStack(urls, i) }
+                Text(Self.timeFormatter.string(from: messages.last?.timestamp ?? Date()))
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 4)
+            }
+            .frame(maxWidth: .infinity, alignment: isMe ? .trailing : .leading)
+            if isMe {
+                Button { onTapAvatar() } label: { AvatarView(sender: .me) }
+                    .buttonStyle(.plain)
+            }
+        }
+    }
+
+    private static let timeFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "yyyy-MM-dd HH:mm"   // 带年月日（翻旧记录要认得出）
+        return f
+    }()
+}
+
+/// 微信风堆叠照片卡（PhotoStack 交互的原生独立实现，手感对齐 mianmian 版）：
+/// 拖动时顶图跟手位移+顺向微旋（~8°封顶），下一张从底下由暗到亮、由小到大浮起；
+/// 松手超半程或快甩 → 顶图飞出、下张升顶（~0.22s 缓出），不够 → 弹簧回位。
+/// 点卡=全屏查看器从当前图开始翻页。
+struct PhotoStackCard: View {
+    let urls: [URL]
+    var onTap: (Int) -> Void = { _ in }
+    @State private var index = 0
+    @State private var dragX: CGFloat = 0
+
+    private let cardW: CGFloat = 160
+    private var current: Int { min(index, max(urls.count - 1, 0)) }
+    /// 本次拖动方向下即将升顶的那张（左滑→下一张，右滑→上一张；未拖动时预览下一张）。
+    private var incoming: Int {
+        guard urls.count > 1 else { return current }
+        return dragX > 0 ? (current - 1 + urls.count) % urls.count
+                         : (current + 1) % urls.count
+    }
+    /// 拖动进度 0~1。
+    private var progress: CGFloat { min(abs(dragX) / cardW, 1) }
+
+    var body: some View {
+        ZStack {
+            // 最底叠影：静态底片，示意"还有更多"
+            if urls.count > 2 {
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .fill(Color(.systemGray4))
+                    .frame(width: 152, height: 152)
+                    .rotationEffect(.degrees(4))
+                    .offset(x: 7, y: 5)
+            }
+            // 升顶中的下层卡：随拖动进度 由小变大、由暗变亮
+            photo(incoming)
+                .frame(width: cardW, height: cardW)
+                .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                .scaleEffect(0.9 + 0.1 * progress)
+                .opacity(urls.count > 1 ? 0.55 + 0.45 * Double(progress) : 0)
+                .rotationEffect(.degrees(Double(1 - progress) * -3))
+            // 顶层卡：跟手位移 + 顺向旋转（~8° 封顶）
+            photo(current)
+                .frame(width: cardW, height: cardW)
+                .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                .overlay(alignment: .topTrailing) {
+                    Text("\(current + 1)/\(urls.count)")
+                        .font(.caption.bold())
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 3)
+                        .background(Capsule().fill(.black.opacity(0.55)))
+                        .padding(6)
+                }
+                .offset(x: dragX)
+                .rotationEffect(.degrees(Double(max(-8, min(8, dragX / 9)))))
+        }
+        .padding(.horizontal, 8)   // 给叠影留探头空间
+        .contentShape(Rectangle())
+        .onTapGesture { onTap(current) }
+        // coordinateSpace 用 .global：行套在翻转布局里（rotation+scale），局部坐标方向会被
+        // 变换搅乱，全局空间拿到的是手指在屏幕上的真实位移。横向占优才认，纵向让给列表滚动。
+        .gesture(
+            DragGesture(minimumDistance: 15, coordinateSpace: .global)
+                .onChanged { v in
+                    guard urls.count > 1,
+                          abs(v.translation.width) > abs(v.translation.height) else { return }
+                    dragX = v.translation.width
+                }
+                .onEnded { v in
+                    guard urls.count > 1, dragX != 0 else { return }
+                    // 判定：过半程，或快甩（预测终点远超实际=有速度）
+                    let fling = abs(v.predictedEndTranslation.width) > cardW * 0.55
+                        && abs(v.translation.width) > 12
+                    if progress > 0.5 || fling {
+                        let target = incoming
+                        let out = dragX < 0 ? -cardW * 1.4 : cardW * 1.4
+                        withAnimation(.easeOut(duration: 0.22)) {
+                            dragX = out
+                        } completion: {
+                            index = target
+                            dragX = 0          // 新顶卡就位，瞬时复位（视觉上是下层升顶完成）
+                        }
+                    } else {
+                        withAnimation(.spring(duration: 0.3)) { dragX = 0 }
+                    }
+                }
+        )
+    }
+
+    @ViewBuilder private func photo(_ i: Int) -> some View {
+        if urls.indices.contains(i), let img = AppFiles.loadImage(urls[i]) {
+            Image(uiImage: img).resizable().scaledToFill()
+        } else {
+            Color(.systemGray5)
                 .overlay(Image(systemName: "photo").foregroundStyle(.secondary))
         }
     }

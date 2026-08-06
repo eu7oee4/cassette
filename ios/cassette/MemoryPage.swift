@@ -117,10 +117,6 @@ struct MemoryPage: View {
         .background(Color(.systemGroupedBackground))
         .navigationTitle("记忆")
         .navigationBarTitleDisplayMode(.inline)
-        .navigationDestination(for: MemoryItem.self) { m in
-            MemoryDetailPage(id: m.id, fallbackTitle: m.title, createdMs: m.created_epoch_ms,
-                             onChanged: { Task { await reload() } })
-        }
         .task { await reload() }
         .refreshable { await reload() }
     }
@@ -170,12 +166,20 @@ struct MemoryPage: View {
         } else {
             List {
                 ForEach(memories) { m in
-                    NavigationLink(value: m) { MemoryRow(item: m, sort: sort) }
-                        .swipeActions(edge: .trailing) {
-                            Button(role: .destructive) {
-                                Task { try? await service.forgetMemory(id: m.id); await reload() }
-                            } label: { Label("删除", systemImage: "trash") }
-                        }
+                    // 直连 NavigationLink：value-based 的 navigationDestination 声明在
+                    // 已被 push 的页面里不触发（真机实测点了没反应），直给 destination 稳
+                    NavigationLink {
+                        MemoryDetailPage(id: m.id, fallbackTitle: m.title,
+                                         createdMs: m.created_epoch_ms,
+                                         onChanged: { Task { await reload() } })
+                    } label: {
+                        MemoryRow(item: m, sort: sort)
+                    }
+                    .swipeActions(edge: .trailing) {
+                        Button(role: .destructive) {
+                            Task { try? await service.forgetMemory(id: m.id); await reload() }
+                        } label: { Label("删除", systemImage: "trash") }
+                    }
                 }
             }
             .listStyle(.plain)
@@ -200,11 +204,6 @@ struct MemoryPage: View {
         catch { errorText = (error as? ChatServiceError)?.errorDescription ?? "搜索失败" }
         loading = false
     }
-}
-
-extension MemoryItem: Hashable {
-    static func == (a: MemoryItem, b: MemoryItem) -> Bool { a.id == b.id }
-    func hash(into h: inout Hasher) { h.combine(id) }
 }
 
 // MARK: - 列表一行

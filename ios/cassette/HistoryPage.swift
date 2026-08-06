@@ -47,6 +47,7 @@ struct HistoryPage: View {
 
     var body: some View {
         VStack(spacing: 0) {
+            searchRow
             quickActions
             capBar
             Divider()
@@ -57,20 +58,36 @@ struct HistoryPage: View {
         .onTapGesture { dismissKeyboards() }
         .navigationTitle("聊天记录")
         .navigationBarTitleDisplayMode(.inline)
-        .searchable(text: $query, placement: .navigationBarDrawer(displayMode: .always),
-                    prompt: "按聊天记录搜索")
-        .sheet(isPresented: $showCodeList) { codeListSheet }
-        .sheet(isPresented: $showImageGrid) { imageGridSheet }
-        .sheet(isPresented: $showFileList) { fileListSheet }
-        .sheet(isPresented: $showWebpages) { WebpagesSheet() }
+        // 五个检索入口都是整屏 push 页（左上标准返回）；查看全文留小弹层。
+        .navigationDestination(isPresented: $showDates) { dateSheet }
+        .navigationDestination(isPresented: $showCodeList) { codeListSheet }
+        .navigationDestination(isPresented: $showImageGrid) { imageGridSheet }
+        .navigationDestination(isPresented: $showFileList) { fileListSheet }
+        .navigationDestination(isPresented: $showWebpages) { WebpagesPage() }
         .sheet(item: $selected) { e in EntryDetail(entry: e, injectCap: $injectCap) }
-        .sheet(isPresented: $showDates) { dateSheet }
         .alert("跳到倒数第几条？", isPresented: $showJump) {
             TextField("如 137", text: $jumpText)
                 .keyboardType(.numberPad)
             Button("跳转") { jumpToNumber() }
             Button("取消", role: .cancel) { }
         }
+    }
+
+    /// 搜索行：普通输入框（不用 .searchable——它聚焦时会收起大标题、整页上移，真机反馈晕）。
+    private var searchRow: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "magnifyingglass")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+            TextField("按聊天记录搜索", text: $query)
+                .textFieldStyle(.plain)
+                .submitLabel(.search)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 7)
+        .background(Color(.tertiarySystemFill), in: Capsule())
+        .padding(.horizontal, 12)
+        .padding(.top, 8)
     }
 
     // MARK: - 快捷检索行 + 窗口设置行（设计规则：图标非按钮不加，文案直给）
@@ -110,6 +127,10 @@ struct HistoryPage: View {
                    over: injectCap > 150, range: "可设 20~1000") { commitCap() }
             capRow(label: "wake 注入窗口", text: $wakeCapText, focus: $wakeCapFocused,
                    over: wakeCap > 100, range: "可设 20~300") { commitWakeCap() }
+            Text("点击消息定位到气泡，长按查看全文 / 把窗口扩到此条")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .padding(.top, 2)
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 8)
@@ -126,31 +147,29 @@ struct HistoryPage: View {
     private func capRow(label: String, text: Binding<String>,
                         focus: FocusState<Bool>.Binding, over: Bool, range: String,
                         commit: @escaping () -> Void) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
-            HStack(spacing: 6) {
-                Text(label)
-                    .font(.subheadline.weight(.medium))
-                TextField("", text: text)
-                    .keyboardType(.numberPad)
-                    .focused(focus)
-                    .multilineTextAlignment(.center)
-                    .font(.subheadline.monospacedDigit().bold())
-                    .frame(width: 56)
-                    .padding(.vertical, 4)
-                    .background(over ? Color.theme : Color(.systemGray5),
-                                in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-                    .foregroundStyle(over ? .white : .primary)
-                    .onSubmit { commit() }
-                    .onChange(of: focus.wrappedValue) { _, focused in
-                        if !focused { commit() }
-                    }
-                Text("条")
-                    .font(.subheadline.weight(.medium))
-                Spacer()
-            }
+        HStack(spacing: 6) {
+            Text(label)
+                .font(.subheadline.weight(.medium))
+            TextField("", text: text)
+                .keyboardType(.numberPad)
+                .focused(focus)
+                .multilineTextAlignment(.center)
+                .font(.subheadline.monospacedDigit().bold())
+                .frame(width: 56)
+                .padding(.vertical, 4)
+                .background(over ? Color.theme : Color(.systemGray5),
+                            in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .foregroundStyle(over ? .white : .primary)
+                .onSubmit { commit() }
+                .onChange(of: focus.wrappedValue) { _, focused in
+                    if !focused { commit() }
+                }
+            Text("条")
+                .font(.subheadline.weight(.medium))
             Text(range)
                 .font(.caption2)
                 .foregroundStyle(.secondary)
+            Spacer()
         }
     }
 
@@ -302,8 +321,7 @@ struct HistoryPage: View {
     }
 
     private var dateSheet: some View {
-        NavigationStack {
-            List(sections, id: \.day) { sec in
+        List(sections, id: \.day) { sec in
                 Button {
                     showDates = false
                     // 关 sheet 后跳转要等列表回来一拍
@@ -320,10 +338,8 @@ struct HistoryPage: View {
                     }
                 }
             }
-            .navigationTitle("日期检索")
-            .navigationBarTitleDisplayMode(.inline)
-        }
-        .presentationDetents([.medium, .large])
+        .navigationTitle("日期检索")
+        .navigationBarTitleDisplayMode(.inline)
     }
 
     // MARK: - 代码块检索
@@ -336,8 +352,7 @@ struct HistoryPage: View {
     }
 
     private var codeListSheet: some View {
-        NavigationStack {
-            ScrollView {
+        ScrollView {
                 LazyVStack(spacing: 0) {
                     ForEach(codeEntries) { e in
                         EntryRow(entry: e, showDate: true)   // 无分组头 → 行内带全日期
@@ -350,11 +365,9 @@ struct HistoryPage: View {
                     }
                 }
             }
-            .scrollDismissesKeyboard(.immediately)
-            .navigationTitle("代码块")
-            .navigationBarTitleDisplayMode(.inline)
-        }
-        .presentationDetents([.medium, .large])
+        .scrollDismissesKeyboard(.immediately)
+        .navigationTitle("代码块")
+        .navigationBarTitleDisplayMode(.inline)
     }
 
     // MARK: - 图片检索（按月九宫格）
@@ -387,8 +400,7 @@ struct HistoryPage: View {
     }
 
     private var imageGridSheet: some View {
-        NavigationStack {
-            ScrollView {
+        ScrollView {
                 let allUrls = imageEntries.map(\.url)
                 LazyVStack(alignment: .leading, spacing: 8, pinnedViews: [.sectionHeaders]) {
                     ForEach(imageMonths, id: \.month) { group in
@@ -428,13 +440,11 @@ struct HistoryPage: View {
                         .font(.footnote).foregroundStyle(.secondary).padding(.top, 40)
                 }
             }
-            .navigationTitle("图片")
-            .navigationBarTitleDisplayMode(.inline)
-            .fullScreenCover(item: $gridViewer) { item in
-                ImageViewerView(urls: item.urls, start: item.start) { gridViewer = nil }
-            }
+        .navigationTitle("图片")
+        .navigationBarTitleDisplayMode(.inline)
+        .fullScreenCover(item: $gridViewer) { item in
+            ImageViewerView(urls: item.urls, start: item.start) { gridViewer = nil }
         }
-        .presentationDetents([.large])
     }
 
     static let monthFmt: DateFormatter = {
@@ -454,8 +464,7 @@ struct HistoryPage: View {
     }
 
     private var fileListSheet: some View {
-        NavigationStack {
-            ScrollView {
+        ScrollView {
                 LazyVStack(spacing: 0) {
                     ForEach(fileEntries) { e in
                         EntryRow(entry: e, showDate: true)
@@ -468,11 +477,9 @@ struct HistoryPage: View {
                     }
                 }
             }
-            .scrollDismissesKeyboard(.immediately)
-            .navigationTitle("文件")
-            .navigationBarTitleDisplayMode(.inline)
-        }
-        .presentationDetents([.medium, .large])
+        .scrollDismissesKeyboard(.immediately)
+        .navigationTitle("文件")
+        .navigationBarTitleDisplayMode(.inline)
     }
 
     // MARK: - 序号直达

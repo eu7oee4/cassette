@@ -40,6 +40,13 @@ def agent_name() -> str:
     import state_store
     return (state_store.load_settings().get("agent_name") or "").strip() or AGENT_NAME_DEFAULT
 
+
+def user_pronoun() -> str:
+    """提到用户时的人称代词（她/他/TA，用户在设置里选）。模型默认会瞎猜性别，必须显式给。"""
+    import state_store
+    p = (state_store.load_settings().get("user_pronoun") or "").strip()
+    return p if p in ("她", "他", "TA") else "TA"
+
 # 可选：Bark 推送（断连补投/主动消息时通知手机；不配则静默跳过）
 BARK_URL = os.environ.get("BARK_URL", "").strip()
 BARK_ICON = os.environ.get("BARK_ICON", "").strip()   # 通知图标（公网可访问的图片 URL），空=Bark 默认

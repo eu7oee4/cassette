@@ -210,6 +210,11 @@ NEXT_MAX_MIN = 720   # 上限 12 小时
 _CHAT_NEXT_RE = re.compile(r"\[\[\s*(?:next[_\- ]?wake|下次醒来)\s*[:：]\s*(.*?)\]\]", re.I)
 
 
+def pronoun_hint() -> str:
+    """人称代词提示（聊天/醒来共用注入）：不给的话模型会自己猜用户性别，猜错很伤。"""
+    return f"【提到{config.user_name()}时，人称代词一律用「{config.user_pronoun()}」——写记忆、内心独白也一样。】"
+
+
 def _chat_next_hint() -> str:
     # 函数不是模块级常量：名字用户随时可改，import 时冻结就换不动了。
     return (f"【可选：如果{config.user_name()}提到要离开/回来/睡觉之类，你可以顺手安排下次主动醒来——"
@@ -267,7 +272,7 @@ def build_prompt(messages: list[Message], catalog: Optional[list[dict]] = None) 
     if gap:
         time_lines.append(f"【距离上一条消息，过了 {gap}】")
 
-    extras = [_chat_next_hint()]
+    extras = [pronoun_hint(), _chat_next_hint()]
     mb = memory_block()
     if mb:
         extras.append(mb)

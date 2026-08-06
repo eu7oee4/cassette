@@ -34,10 +34,11 @@ struct DrawerPanel: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             // 顶部放 TA 的名字——这是 TA 的空间，不是功能列表的标题。
+            // 下沉一段（眠眠真机反馈：贴着状态栏太高），大约落在原第二行菜单的位置。
             Text(agentName)
                 .font(.title3.bold())
                 .padding(.horizontal, 20)
-                .padding(.top, 28)
+                .padding(.top, 120)
                 .padding(.bottom, 14)
             Divider()
             ForEach(DrawerPage.allCases, id: \.self) { page in

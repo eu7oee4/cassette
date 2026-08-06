@@ -476,6 +476,7 @@ class SettingsIn(BaseModel):
     min_interval_min: Optional[int] = None
     quiet_after_user_min: Optional[int] = None
     wake_window_n: Optional[int] = None   # wake 注入窗口条数（None=默认 50；夹 20~300）
+    user_pronoun: str = "TA"  # 提到用户时的人称代词：她 | 他 | TA
 
 
 def _validate_hhmm(s: str) -> None:
@@ -510,6 +511,8 @@ def post_settings(body: SettingsIn, x_auth: Optional[str] = Header(default=None,
     for nm in (body.agent_name, body.user_name):
         if len(nm.strip()) > 20:
             raise HTTPException(status_code=400, detail="名字最长 20 字")
+    if body.user_pronoun not in ("她", "他", "TA"):
+        raise HTTPException(status_code=400, detail="user_pronoun 需为 她/他/TA")
     saved = body.model_dump()
     saved["agent_name"] = saved["agent_name"].strip()
     saved["user_name"] = saved["user_name"].strip()

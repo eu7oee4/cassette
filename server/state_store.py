@@ -33,6 +33,7 @@ DEFAULT_SETTINGS = {
     "min_interval_min": 60,      # null = 关闭最小间隔
     "quiet_after_user_min": 20,  # null = 关闭"刚聊过就别戳"
     "wake_window_n": 50,         # wake 注入最近窗口条数（夹 20~300）
+    "user_pronoun": "TA",        # 提到用户时的人称代词：她 | 他 | TA（用户在设置里选）
 }
 
 

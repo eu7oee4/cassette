@@ -62,7 +62,8 @@ struct ContentView: View {
     @State private var editingMessage: ChatMessage? = nil
     @State private var editingText: String = ""
     @State private var editRefreshTick = 0   // 亲手编辑/删除的信号：ChatView 收到就手术式合并进冻结快照
-    @State private var deleteTarget: ChatMessage? = nil   // 长按气泡 → 删除确认
+    @State private var deleteCandidates: [ChatMessage] = []   // 长按气泡/堆叠卡 → 删除确认（组删多条）
+    @State private var viewingWebpage: WebpageItem? = nil      // 点网页卡片 → 查看
 
     private let chatService = ChatService()
 
@@ -164,11 +165,18 @@ struct ContentView: View {
         ChatView(messages: chatStore.messages,
                  isWaiting: isWaiting || rescueActive,   // 后台生成期间点点不灭，补投到达才熄
                  onEdit: startEdit,
-                 onDelete: { msg in deleteTarget = msg },
+                 onDelete: { msg in deleteCandidates = [msg] },
                  onTapChatArea: { if showStickers { showStickers = false } },
                  onTapAvatar: { sender in dismissKeyboard(); avatarActionTarget = sender },
                  onTapImage: { url in dismissKeyboard(); enlargedImage = EnlargedImage(url: url) },
+                 onTapImageStack: { urls, i in
+                     dismissKeyboard(); enlargedImage = EnlargedImage(urls: urls, start: i)
+                 },
                  onTapFile: { url in dismissKeyboard(); quickLookURL = AppFiles.reanchored(url) },
+                 onTapWebpage: { pid, title in
+                     dismissKeyboard(); viewingWebpage = WebpageItem(id: pid, title: title, ts: 0)
+                 },
+                 onDeleteStack: { msgs in deleteCandidates = msgs },
                  editRefreshTick: editRefreshTick,
                  scrollTarget: chatScrollTarget,
                  onScrollTargetHandled: { chatScrollTarget = nil })
@@ -229,16 +237,17 @@ struct ContentView: View {
                     onCancel: { editingMessage = nil }
                 )
             }
-            // 长按气泡 → 删除确认：从本地历史移除，之后发给后端的历史自然不再包含它。
-            .confirmationDialog("删除这条消息？", isPresented: Binding(
-                get: { deleteTarget != nil },
-                set: { if !$0 { deleteTarget = nil } }
+            // 长按气泡/堆叠卡 → 删除确认（堆叠卡删整组，弹窗写明张数）。
+            .confirmationDialog(deleteCandidates.count > 1
+                                    ? "删除这组 \(deleteCandidates.count) 张照片？"
+                                    : "删除这条消息？",
+                                isPresented: Binding(
+                get: { !deleteCandidates.isEmpty },
+                set: { if !$0 { deleteCandidates = [] } }
             ), titleVisibility: .visible) {
                 Button("删除", role: .destructive) {
-                    if let msg = deleteTarget {
-                        chatStore.remove(id: msg.id)
-                        editRefreshTick += 1   // 离底冻结快照就地撤行，不用滑回底部
-                    }
+                    for msg in deleteCandidates { chatStore.remove(id: msg.id) }
+                    editRefreshTick += 1   // 离底冻结快照就地撤行，不用滑回底部
                 }
                 Button("取消", role: .cancel) { }
             }
@@ -336,6 +345,8 @@ struct ContentView: View {
                 }
             }
             .quickLookPreview($quickLookURL)
+            // 点网页卡片 → 查看 TA 做的页面
+            .sheet(item: $viewingWebpage) { p in WebpageViewer(id: p.id, title: p.title, asSheet: true) }
             // 全屏查看聊天图片；长按可删（删的是那条消息，本地历史移除）。
             .fullScreenCover(item: $enlargedImage) { item in
                 ImageViewerView(urls: item.urls, start: item.start, onDeleteURL: { url in
@@ -530,8 +541,10 @@ struct ContentView: View {
                     // 分清"说完了"和"还在忙"（下一段 .text 一到会自动收起）
                     isWaiting = true
                 case .memory(let tool, _):
-                    // 中途记忆操作 → 就地内联灰字
-                    chatStore.appendMemoryNote(memoryNoteText(tool: tool))
+                    // 中途记忆操作 → 就地内联灰字（网页除外：finalize 会补一张可点的卡片）
+                    if tool != "webpage" {
+                        chatStore.appendMemoryNote(memoryNoteText(tool: tool))
+                    }
                 case .error(let msg):
                     errorText = msg
                 case .done(let resp):
@@ -615,6 +628,20 @@ struct ContentView: View {
         // 他这轮顺手定了下次醒来 → 灰字提示（后端已拼好文案：原话 + 绝对时间点）。
         if let hint = resp.next_wake_hint, !hint.isEmpty {
             chatStore.appendMemoryNote(hint)
+        }
+        // 他这轮做/改的网页 → 网页卡片消息（stored 只有标题，从后端反查 id）。
+        let pages = (resp.stored ?? []).filter { $0.tool == "webpage" }
+        if !pages.isEmpty {
+            Task { @MainActor in
+                guard let list = try? await chatService.getWebpages() else { return }
+                for p in pages {
+                    if let item = list.first(where: { $0.title == p.text }) ?? list.first {
+                        chatStore.append(ChatMessage(sender: .other,
+                                                     kind: .webpage(item.id, item.title),
+                                                     timestamp: Date()))
+                    }
+                }
+            }
         }
     }
 

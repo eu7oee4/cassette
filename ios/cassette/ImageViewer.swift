@@ -95,7 +95,8 @@ struct ImageViewerView: View {
     }
 }
 
-/// 单页：双指缩放 + 双击切换 1x/2x + 单击关闭（换页时缩放各自独立）+ 可选长按（删除入口）。
+/// 单页：双指缩放 + 双击切换 1x/2x + 放大后单指拖拽平移 + 单击关闭 + 可选长按（删除入口）。
+/// 拖拽只在放大时挂（highPriority 抢过 TabView 翻页）；缩回 1x 自动归位。
 private struct ZoomableImage: View {
     let url: URL
     let onTap: () -> Void
@@ -103,6 +104,17 @@ private struct ZoomableImage: View {
 
     @State private var scale: CGFloat = 1
     @GestureState private var pinch: CGFloat = 1
+    @State private var offset: CGSize = .zero
+    @GestureState private var panDelta: CGSize = .zero
+
+    private var panGesture: some Gesture {
+        DragGesture(minimumDistance: 5)
+            .updating($panDelta) { v, state, _ in state = v.translation }
+            .onEnded { v in
+                offset.width += v.translation.width
+                offset.height += v.translation.height
+            }
+    }
 
     var body: some View {
         if let img = AppFiles.loadImage(url) {
@@ -110,14 +122,24 @@ private struct ZoomableImage: View {
                 .resizable()
                 .scaledToFit()
                 .scaleEffect(scale * pinch)
+                .offset(x: offset.width + panDelta.width,
+                        y: offset.height + panDelta.height)
                 .gesture(
                     MagnificationGesture()
                         .updating($pinch) { value, state, _ in state = value }
                         .onEnded { value in
                             scale = min(max(scale * value, 1), 5)   // 限制 1x~5x
+                            if scale <= 1 { withAnimation { offset = .zero } }
                         }
                 )
-                .onTapGesture(count: 2) { withAnimation { scale = scale > 1 ? 1 : 2 } } // 双击切换
+                // 放大才拖拽（mask 关掉时完全不参与）；1x 让给 TabView 翻页
+                .highPriorityGesture(panGesture, including: scale > 1 ? .gesture : .none)
+                .onTapGesture(count: 2) {                            // 双击切换，缩回时归位
+                    withAnimation {
+                        scale = scale > 1 ? 1 : 2
+                        if scale <= 1 { offset = .zero }
+                    }
+                }
                 .onTapGesture { onTap() }                                               // 单击关闭
                 .onLongPressGesture { onLongPress?() }                                  // 长按删除（没回调=无操作）
         } else {

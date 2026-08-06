@@ -3,7 +3,7 @@ import WebKit
 
 // MARK: - 数据模型（对齐后端 /webpages，产物来自 webpage 插件）
 
-struct WebpageItem: Decodable, Identifiable {
+struct WebpageItem: Decodable, Identifiable, Hashable {
     let id: String
     let title: String
     let ts: Int
@@ -35,9 +35,9 @@ extension ChatService {
     }
 }
 
-// MARK: - HTML 文件列表（聊天记录页入口的 sheet）
+// MARK: - HTML 文件列表（聊天记录页入口，整屏 push 页）
 
-struct WebpagesSheet: View {
+struct WebpagesPage: View {
     private let service = ChatService()
 
     @State private var items: [WebpageItem] = []
@@ -45,44 +45,43 @@ struct WebpagesSheet: View {
     @State private var opened: WebpageItem? = nil
 
     var body: some View {
-        NavigationStack {
-            Group {
-                if loading {
-                    ProgressView()
-                } else if items.isEmpty {
-                    ContentUnavailableView("还没有网页", systemImage: "doc.richtext",
-                                           description: Text("装上网页插件后，TA 就能做页面给你了。"))
-                } else {
-                    List {
-                        ForEach(items) { p in
-                            Button { opened = p } label: {
-                                HStack {
-                                    Image(systemName: "doc.richtext")
-                                        .foregroundStyle(Color.theme)
-                                    VStack(alignment: .leading, spacing: 2) {
-                                        Text(p.title).foregroundStyle(.primary).lineLimit(1)
-                                        Text(Self.fmt.string(from: Date(timeIntervalSince1970: TimeInterval(p.ts))))
-                                            .font(.caption).foregroundStyle(.secondary)
-                                    }
+        Group {
+            if loading {
+                ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if items.isEmpty {
+                ContentUnavailableView("还没有网页", systemImage: "doc.richtext",
+                                       description: Text("装上网页插件后，TA 就能做页面给你了。"))
+            } else {
+                List {
+                    ForEach(items) { p in
+                        Button { opened = p } label: {
+                            HStack {
+                                Image(systemName: "doc.richtext")
+                                    .foregroundStyle(Color.theme)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(p.title).foregroundStyle(.primary).lineLimit(1)
+                                    Text(Self.fmt.string(from: Date(timeIntervalSince1970: TimeInterval(p.ts))))
+                                        .font(.caption).foregroundStyle(.secondary)
                                 }
                             }
-                            .swipeActions(edge: .trailing) {
-                                Button(role: .destructive) {
-                                    Task { try? await service.deleteWebpage(id: p.id); await load() }
-                                } label: { Label("删除", systemImage: "trash") }
-                            }
+                        }
+                        .swipeActions(edge: .trailing) {
+                            Button(role: .destructive) {
+                                Task { try? await service.deleteWebpage(id: p.id); await load() }
+                            } label: { Label("删除", systemImage: "trash") }
                         }
                     }
-                    .listStyle(.plain)
                 }
+                .listStyle(.plain)
             }
-            .navigationTitle("HTML 文件")
-            .navigationBarTitleDisplayMode(.inline)
-            .refreshable { await load() }
-            .task { await load() }
-            .sheet(item: $opened) { p in WebpageViewerSheet(item: p) }
         }
-        .presentationDetents([.medium, .large])
+        .navigationTitle("HTML 文件")
+        .navigationBarTitleDisplayMode(.inline)
+        .navigationDestination(item: $opened) { p in
+            WebpageViewer(id: p.id, title: p.title)
+        }
+        .refreshable { await load() }
+        .task { await load() }
     }
 
     private func load() async {
@@ -97,26 +96,43 @@ struct WebpagesSheet: View {
     }()
 }
 
-// MARK: - 网页查看
+// MARK: - 网页查看（列表里 push 用；聊天卡片点开 asSheet=true 包一层导航壳）
 
-private struct WebpageViewerSheet: View {
-    let item: WebpageItem
+struct WebpageViewer: View {
+    let id: String
+    let title: String
+    var asSheet: Bool = false
+    @Environment(\.dismiss) private var dismiss
     private let service = ChatService()
+
     @State private var html: String? = nil
 
     var body: some View {
-        NavigationStack {
-            Group {
-                if let html {
-                    HTMLView(html: html)
-                } else {
-                    ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
-                }
+        if asSheet {
+            NavigationStack {
+                inner
+                    .toolbar {
+                        ToolbarItem(placement: .cancellationAction) {
+                            Button { dismiss() } label: { Image(systemName: "xmark") }
+                        }
+                    }
             }
-            .navigationTitle(item.title)
-            .navigationBarTitleDisplayMode(.inline)
-            .task { html = (try? await service.getWebpage(id: item.id))?.html }
+        } else {
+            inner
         }
+    }
+
+    private var inner: some View {
+        Group {
+            if let html {
+                HTMLView(html: html)
+            } else {
+                ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+        }
+        .navigationTitle(title)
+        .navigationBarTitleDisplayMode(.inline)
+        .task { html = (try? await service.getWebpage(id: id))?.html }
     }
 }
 
