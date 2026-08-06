@@ -484,8 +484,12 @@ def _stored_from_tool_use(name: str, inp: dict) -> Optional[dict]:
         return None
     if name.endswith("__trace"):
         return {"tool": "trace", "text": _describe_trace(inp)}
+    if name.endswith("__I"):
+        # 自我认知候选（写入才算产物；read/promote 是读和转正操作，不记）
+        c = (inp.get("content") or "").strip()
+        return {"tool": "i", "text": c} if c else None
     if name.endswith("__webpage_write"):
-        # 网页插件：做/改了一个网页 → 灰字带标题（app 在聊天记录页的 HTML 文件里看）
+        # 网页插件：做/改了一个网页 → 聊天里补可点的卡片（app 在 HTML 文件里也能看）
         title = (inp.get("title") or "").strip() or "未命名网页"
         return {"tool": "webpage", "text": title}
     return None
@@ -500,6 +504,9 @@ def parse_claude_stream(stdout: str, collect_all_text: bool = False) -> tuple[Op
     result_text = None
     text_parts: list[str] = []
     stored: list[dict] = []
+    seen_tool_ids: set = set()   # CLI 会按内容块重复发同一条 assistant 消息（每次带累计块），
+                                 # 同一个 tool_use 会出现多次——按块的唯一 id 去重（实锤：
+                                 # 一次 hold 在心流日志里记了两条）
     for line in stdout.splitlines():
         line = line.strip()
         if not line:
@@ -517,6 +524,11 @@ def parse_claude_stream(stdout: str, collect_all_text: bool = False) -> tuple[Op
                     if txt:
                         text_parts.append(txt)
                 elif bt == "tool_use":
+                    tid = b.get("id")
+                    if tid:
+                        if tid in seen_tool_ids:
+                            continue
+                        seen_tool_ids.add(tid)
                     s = _stored_from_tool_use(b.get("name", ""), b.get("input", {}) or {})
                     if s:
                         stored.append(s)

@@ -268,6 +268,8 @@ def do_wake_sync(settings: dict, trigger: str) -> dict:
     now_ts = int(time.time())
 
     raw, stored = run_claude_wake(wake_prompt(settings))
+    # 网页操作不进日志（同 chat 侧口径）：心流日志只记记忆类操作
+    stored = [s for s in (stored or []) if s.get("tool") != "webpage"]
 
     if raw is None:
         state_store.append_wake_log({"ts": now_ts, "time": pipeline.now_str(), "source": "wake",

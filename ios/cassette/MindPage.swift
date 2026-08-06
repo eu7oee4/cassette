@@ -108,7 +108,7 @@ private struct MindRow: View {
             if let stored = entry.stored, !stored.isEmpty {
                 ForEach(Array(stored.enumerated()), id: \.offset) { _, s in
                     HStack(alignment: .firstTextBaseline, spacing: 8) {
-                        Text(s.tool == "trace" ? "✏️" : "📥")
+                        Text(storedIcon(s.tool))
                         Text(s.text).font(.callout)
                             .fixedSize(horizontal: false, vertical: true)
                     }
@@ -129,6 +129,15 @@ private struct MindRow: View {
     private func trimmed(_ s: String?) -> String? {
         guard let s = s?.trimmingCharacters(in: .whitespacesAndNewlines), !s.isEmpty else { return nil }
         return s
+    }
+
+    /// stored 条目图标：✏️改记忆 / 🌱自我认知候选（I 工具，要经几轮 dream 见证才转正）/ 📥存记忆。
+    private func storedIcon(_ tool: String) -> String {
+        switch tool {
+        case "trace": return "✏️"
+        case "i":     return "🌱"
+        default:      return "📥"
+        }
     }
 
     private var sourceBadge: String {

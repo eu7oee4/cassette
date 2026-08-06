@@ -252,10 +252,13 @@ def finalize_chat_reply(reply: str, stored: list[dict], req: ChatRequest,
 
     # 聊天里存/改的记忆也记进 wake_log（source=chat，无 thoughts 不进时间线）：
     # 醒来的"别重复存"清单靠它才看得到聊天里已存过的。
-    if stored:
+    # 网页操作不进日志（眠眠定）：它有聊天卡片 + HTML 文件列表两个展示面，
+    # 心流日志只记记忆类操作，防重复清单也不被网页标题污染。
+    mem_stored = [s for s in stored if s.get("tool") != "webpage"]
+    if mem_stored:
         try:
             state_store.append_wake_log({"ts": int(time.time()), "time": pipeline.now_str(),
-                                         "source": "chat", "stored": stored})
+                                         "source": "chat", "stored": mem_stored})
         except Exception as e:
             logerr(f"记 chat stored 失败: {e}")
 

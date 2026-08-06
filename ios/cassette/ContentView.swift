@@ -649,6 +649,7 @@ struct ContentView: View {
     private func memoryNoteText(tool: String) -> String {
         switch tool {
         case "trace":   return "调整了一条记忆"
+        case "i":       return "记下了一个关于自己的念头"
         case "webpage": return "做了一个网页"
         default:        return "记住了一件事"
         }

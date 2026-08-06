@@ -90,6 +90,7 @@ async def translate_events(events, finalize):
     finalize：拿全文 (reply, stored) 组出 done 载荷（dict）的回调。"""
     mf = MarkerStreamFilter()
     stored: list[dict] = []
+    seen_tool_ids: set = set()
     raw_segments: list[str] = []   # 工具调用切开的正文段（原始未滤标记；最后一段以 result 为准）
     cur_raw = ""
     result_text = None
@@ -121,9 +122,15 @@ async def translate_events(events, finalize):
                         yield sse({"type": "text", "content": emit})
         elif t == "assistant":
             # 工具调用产物（记忆/网页等）抓进 stored + 往下游发 memory 灰字事件（气泡间可见）。
+            # 按块 id 去重：CLI 会按内容块重复发同一条 assistant 消息（每次带累计块）。
             for b in ev.get("message", {}).get("content", []):
                 if b.get("type") != "tool_use":
                     continue
+                tid = b.get("id")
+                if tid:
+                    if tid in seen_tool_ids:
+                        continue
+                    seen_tool_ids.add(tid)
                 s = pipeline._stored_from_tool_use(b.get("name", ""), b.get("input", {}) or {})
                 if s:
                     stored.append(s)
