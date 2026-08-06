@@ -78,10 +78,17 @@ def read_recent_window() -> list[dict]:
     return _read_json(RECENT_WINDOW_PATH, [])
 
 
-# ---------- wake log（醒来极简元数据，append-only）----------
+# ---------- wake log（醒来极简元数据，append-only；删除时整体重写）----------
 def append_wake_log(entry: dict) -> None:
     with WAKE_LOG_PATH.open("a", encoding="utf-8") as f:
         f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+
+
+def overwrite_wake_log(entries: list[dict]) -> None:
+    """整体重写 wake_log（心流日志删除某条后用）。唯一临时名 + 原子替换（mianmian 同款）。"""
+    tmp = WAKE_LOG_PATH.with_name(f".{WAKE_LOG_PATH.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+    tmp.write_text("".join(json.dumps(e, ensure_ascii=False) + "\n" for e in entries), "utf-8")
+    tmp.replace(WAKE_LOG_PATH)
 
 
 def read_wake_log(limit: Optional[int] = None) -> list[dict]:

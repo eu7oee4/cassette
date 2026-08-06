@@ -4,6 +4,7 @@ import SwiftUI
 
 /// 一条心流：TA 某次醒来（或聊天时存记忆）想了什么、说了什么、存了什么。
 struct MindEntry: Decodable {
+    let id: String?               // 内容哈希（左滑删除用定位）
     let ts: Int
     let source: String?           // "wake" | "chat"
     let action: String?           // none | message | error（chat 条目为空串）
@@ -26,6 +27,12 @@ extension ChatService {
         struct Wrap: Decodable { let items: [MindEntry] }
         do { return try JSONDecoder().decode(Wrap.self, from: data).items }
         catch { throw ChatServiceError.badResponse }
+    }
+
+    func deleteMindEntry(id: String) async throws {
+        struct Body: Encodable { let id: String }
+        let body = try JSONEncoder().encode(Body(id: id))
+        _ = try await perform(authedRequest("POST", "/mind/delete", jsonBody: body))
     }
 }
 
@@ -53,6 +60,16 @@ struct MindPage: View {
                 List {
                     ForEach(Array(entries.enumerated()), id: \.offset) { _, e in
                         MindRow(entry: e)
+                            .swipeActions(edge: .trailing) {
+                                if let id = e.id {
+                                    Button(role: .destructive) {
+                                        Task {
+                                            try? await service.deleteMindEntry(id: id)
+                                            await load()
+                                        }
+                                    } label: { Label("删除", systemImage: "trash") }
+                                }
+                            }
                     }
                 }
                 .listStyle(.plain)

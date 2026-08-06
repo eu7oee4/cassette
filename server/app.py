@@ -682,6 +682,13 @@ def webpages_delete(page_id: str, x_auth: Optional[str] = Header(default=None, a
 
 
 # ---------- 心流日志（wake_log 时间线）----------
+def _mind_entry_id(e: dict) -> str:
+    """给一条心流记录算稳定 id（内容哈希，append-only 文件没有天然主键），左滑删除用定位。"""
+    import hashlib
+    raw = {k: v for k, v in e.items() if k != "id"}
+    return hashlib.md5(json.dumps(raw, sort_keys=True, ensure_ascii=False).encode()).hexdigest()[:12]
+
+
 @app.get("/mind")
 def mind(limit: int = 100, x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
     """醒来日志尾部，倒序（最新在前）。只挑对用户有意义的字段，别把整条内部记录裸奔出去。"""
@@ -690,6 +697,7 @@ def mind(limit: int = 100, x_auth: Optional[str] = Header(default=None, alias="X
     items = []
     for w in reversed(state_store.read_wake_log(limit=limit)):
         entry = {
+            "id": _mind_entry_id(w),   # 按原始记录算哈希（删除按同口径匹配）
             "ts": w.get("ts"),
             "source": w.get("source", "wake"),
             "action": w.get("action", ""),
@@ -704,3 +712,19 @@ def mind(limit: int = 100, x_auth: Optional[str] = Header(default=None, alias="X
         if entry["thoughts"] or entry["stored"] or entry["content"]:
             items.append(entry)
     return {"items": items}
+
+
+class MindDeleteIn(BaseModel):
+    id: str
+
+
+@app.post("/mind/delete")
+def mind_delete(body: MindDeleteIn, x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
+    """删掉心流日志里指定 id 的记录（app 左滑删除，mianmian 同款：内容哈希定位+整体重写）。"""
+    verify_auth(x_auth)
+    entries = state_store.read_wake_log()
+    kept = [e for e in entries if _mind_entry_id(e) != body.id]
+    removed = len(entries) - len(kept)
+    if removed:
+        state_store.overwrite_wake_log(kept)
+    return {"ok": True, "removed": removed}
