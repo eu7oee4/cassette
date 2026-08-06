@@ -103,6 +103,8 @@ struct ContentView: View {
         switch page {
         case .memory:
             MemoryPage()
+        case .mind:
+            MindPage()
         case .settings:
             ProactiveSettingsView(store: proactiveStore)
         default:
