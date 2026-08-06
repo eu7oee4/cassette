@@ -10,9 +10,12 @@ struct ChatView: View {
     var onTapChatArea: () -> Void = { }            // 点聊天空白区
     var onTapAvatar: (MessageSender) -> Void = { _ in }   // 点头像：改昵称/换头像
     var editRefreshTick: Int = 0   // 用户亲手编辑/删除的信号：+1 → 手术式合并进冻结快照
+    var scrollTarget: UUID? = nil                  // 外部跳转请求（聊天记录页点行）
+    var onScrollTargetHandled: () -> Void = { }    // 跳转消费完通知外面清 nil
 
     var body: some View {
         GeometryReader { geo in
+        ScrollViewReader { proxy in
         // 倒置滚动（聊天 app 主流做法）：整个滚动视图上下翻转，每条内容再各自翻回来。
         // "底部"=滚动偏移 0，键盘弹出/新消息进来都免费贴底跟随（这是翻转的核心价值，别拆）。
         // 它的已知病根——**滚动进行中**插入消息会污染 LazyVStack 的 contentSize
@@ -45,6 +48,13 @@ struct ChatView: View {
                                        onEdit: onEdit,
                                        onDelete: onDelete,
                                        onTapAvatar: onTapAvatar)
+                        }
+                    }
+                    .background {
+                        // 跳转落地闪高亮：白光、横向占满屏（负 padding 吃掉列表左右边距）
+                        if flashRowId == message.id {
+                            Color.white.opacity(0.85)
+                                .padding(.horizontal, -12)
                         }
                     }
                     .flippedUpsideDown()
@@ -218,6 +228,39 @@ struct ChatView: View {
                 snapToBottom()
             }
         }
+        // 外部跳转请求（聊天记录页点行 / 以后引用灰条共用）：跳到那条气泡 + 闪高亮。
+        .onChange(of: scrollTarget) { _, target in
+            guard let target else { return }
+            jump(to: target, proxy: proxy)
+            onScrollTargetHandled()
+        }
+        }
+        }
+    }
+
+    // 跳转落地后闪高亮的行 id（1.5s 自动熄）。
+    @State private var flashRowId: UUID? = nil
+
+    /// 跳到任意一条：长 Lazy 列表按锚点跳会因行高估算落偏（mianmian 实锤"滑到半路+
+    /// 末尾窜一下"）→ 无动画连跳三拍让布局收敛落准；跳完退出跟随模式（人在读旧消息，
+    /// 别被流式吸回底）。
+    private func jump(to messageId: UUID, proxy: ScrollViewProxy) {
+        guard messages.contains(where: { $0.id == messageId }) else { return }
+        followBottom = false
+        frozenMessages = nil
+        frozenIsWaiting = nil
+        proxy.scrollTo(messageId, anchor: .center)
+        var attempts = 0
+        Timer.scheduledTimer(withTimeInterval: 0.15, repeats: true) { t in
+            attempts += 1
+            proxy.scrollTo(messageId, anchor: .center)
+            if attempts >= 3 { t.invalidate() }
+        }
+        withAnimation(.easeIn(duration: 0.2)) { flashRowId = messageId }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+            if flashRowId == messageId {
+                withAnimation(.easeOut(duration: 0.5)) { flashRowId = nil }
+            }
         }
     }
 

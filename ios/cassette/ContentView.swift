@@ -12,6 +12,8 @@ struct ContentView: View {
     @State private var draft: String = ""
     @State private var drawerOpen = false            // 抽屉（猫爪/左缘右滑开，阴影点击/左滑关）
     @State private var navPath: [DrawerPage] = []    // 抽屉 push 的页面栈
+    @State private var chatScrollTarget: UUID? = nil // 聊天记录页点行 → 聊天跳到那条气泡
+    @State private var jumpingToChat = false         // 跳转引发的收栈：这次不重开抽屉
     @AppStorage("hasOnboarded") private var hasOnboarded = false   // 首启起名引导
 
     // 点头像 → 底部弹按钮（改昵称 / 换头像）
@@ -80,8 +82,11 @@ struct ContentView: View {
         }
         .environmentObject(profileStore)
         // 页面返回（栈清空）→ 回到抽屉打开态：层级是 聊天 → 抽屉 → 页面。
+        // 例外：聊天记录页点行跳气泡是"直达聊天"，不经过抽屉。
         .onChange(of: navPath) { old, new in
-            if !old.isEmpty && new.isEmpty { drawerOpen = true }
+            if !old.isEmpty && new.isEmpty {
+                if jumpingToChat { jumpingToChat = false } else { drawerOpen = true }
+            }
         }
         // 待送达同步：前台时拉一次，并每 15s 轮询（断连补投的回复靠这条通道回来）。
         // .task(id: scenePhase)：进 active 启动、离开 active 自动取消循环，省电。
@@ -105,6 +110,15 @@ struct ContentView: View {
             MemoryPage()
         case .mind:
             MindPage()
+        case .history:
+            HistoryPage(messages: chatStore.messages, settingsStore: proactiveStore) { id in
+                jumpingToChat = true
+                navPath.removeAll()
+                // 等 pop 动画完、聊天列表回到台前再跳，不然滚动请求打在看不见的列表上
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                    chatScrollTarget = id
+                }
+            }
         case .settings:
             ProactiveSettingsView(store: proactiveStore)
         default:
@@ -143,7 +157,9 @@ struct ContentView: View {
                  onDelete: { msg in deleteTarget = msg },
                  onTapChatArea: { if showStickers { showStickers = false } },
                  onTapAvatar: { sender in dismissKeyboard(); avatarActionTarget = sender },
-                 editRefreshTick: editRefreshTick)
+                 editRefreshTick: editRefreshTick,
+                 scrollTarget: chatScrollTarget,
+                 onScrollTargetHandled: { chatScrollTarget = nil })
             .background(Color(.systemGroupedBackground))
             .safeAreaInset(edge: .bottom, spacing: 0) {
                 VStack(spacing: 0) {
