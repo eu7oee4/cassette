@@ -37,6 +37,11 @@ extension ChatService {
         _ = try await perform(authedRequest("POST", "/plugins/toggle", jsonBody: body))
     }
 
+    func updatePlugin(name: String) async throws {
+        let body = try JSONEncoder().encode(PluginBody(name: name))
+        _ = try await perform(authedRequest("POST", "/plugins/update", jsonBody: body, timeout: 200))
+    }
+
     func uninstallPlugin(name: String) async throws {
         let body = try JSONEncoder().encode(PluginBody(name: name))
         _ = try await perform(authedRequest("POST", "/plugins/uninstall", jsonBody: body))
@@ -131,6 +136,12 @@ struct PluginsPage: View {
             if p.state != "not_installed" {
                 Button(role: .destructive) { uninstallTarget = p } label: {
                     Label("卸载", systemImage: "trash")
+                }
+                if p.in_registry == true {
+                    Button {
+                        Task { await run(p.name) { try await service.updatePlugin(name: p.name) } }
+                    } label: { Label("更新", systemImage: "arrow.triangle.2.circlepath") }
+                    .tint(Color.theme)
                 }
             }
         }

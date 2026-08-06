@@ -39,10 +39,12 @@ PLUGINS_DIR = config.BASE_DIR / "plugins"          # 安装目录（gitignore，
 ENABLED_PATH = state_store.STATE_DIR / "plugins_enabled.json"
 MCP_CONFIG_PATH = state_store.STATE_DIR / "plugins.mcp.json"
 
-# 写死的插件 registry：只认自己名下的仓。上新插件 = 改这里 + 发版，不做远程 registry。
+# 写死的插件 registry：只认自己名下的仓，且**钉死 commit**——审过哪份代码就装哪份，
+# main 后续怎么动都影响不到已发版本。升级插件 = 改这里的 commit + 发版。
 REGISTRY: dict[str, dict] = {
     "webpage": {
         "repo": "https://github.com/eu7oee4/cassette-plugin-webpage",
+        "commit": "f77214dd2dfbe9a3fe864e2224b30b1cdd01cd3a",
         "display_name": "网页工坊",
         "description": "做 / 改 / 传送 HTML 网页（第一个插件）",
     },
@@ -115,8 +117,26 @@ def list_status() -> list[dict]:
     return out
 
 
+def _clone_pinned(reg: dict, dest: Path) -> None:
+    """clone + checkout 钉死的 commit + 校验清单。任一步失败删目录抛 HTTPException。
+    插件仓都很小，不用浅 clone（checkout 任意 sha 需要完整历史）。"""
+    try:
+        subprocess.run(["git", "clone", reg["repo"], str(dest)],
+                       capture_output=True, text=True, timeout=180, check=True)
+        commit = reg.get("commit", "")
+        if commit:
+            subprocess.run(["git", "-C", str(dest), "checkout", "--detach", commit],
+                           capture_output=True, text=True, timeout=60, check=True)
+    except subprocess.TimeoutExpired:
+        shutil.rmtree(dest, ignore_errors=True)
+        raise HTTPException(status_code=504, detail="clone 超时（网络问题？）")
+    except subprocess.CalledProcessError as e:
+        shutil.rmtree(dest, ignore_errors=True)
+        raise HTTPException(status_code=502, detail=f"clone/checkout 失败：{(e.stderr or '')[:200]}")
+
+
 def install(name: str) -> dict:
-    """从 registry 白名单 clone 插件仓。装完默认「已装未启用」，启用是用户的显式动作。"""
+    """从 registry 白名单 clone 插件仓（钉 commit）。装完默认「已装未启用」。"""
     _check_name(name)
     reg = REGISTRY.get(name)
     if reg is None:
@@ -124,21 +144,38 @@ def install(name: str) -> dict:
     dest = PLUGINS_DIR / name
     with _LOCK:
         if dest.exists():
-            raise HTTPException(status_code=409, detail="已安装过；要更新先卸载再装")
+            raise HTTPException(status_code=409, detail="已安装过；要升级用更新")
         PLUGINS_DIR.mkdir(parents=True, exist_ok=True)
-        try:
-            subprocess.run(["git", "clone", "--depth", "1", reg["repo"], str(dest)],
-                           capture_output=True, text=True, timeout=180, check=True)
-        except subprocess.TimeoutExpired:
-            shutil.rmtree(dest, ignore_errors=True)
-            raise HTTPException(status_code=504, detail="clone 超时（网络问题？）")
-        except subprocess.CalledProcessError as e:
-            shutil.rmtree(dest, ignore_errors=True)
-            raise HTTPException(status_code=502, detail=f"clone 失败：{(e.stderr or '')[:200]}")
+        _clone_pinned(reg, dest)
     if _read_manifest(name) is None:
         shutil.rmtree(dest, ignore_errors=True)
         raise HTTPException(status_code=502, detail="插件清单（plugin.json）不合法，已回滚")
     return {"ok": True, "state": "disabled"}
+
+
+def update(name: str) -> dict:
+    """升级到 registry 当前钉的 commit：先 clone 到临时目录验清单，全绿才换掉旧目录——
+    失败旧版原地不动。开关状态保留；插件数据在 state/ 下，换目录不影响。"""
+    _check_name(name)
+    reg = REGISTRY.get(name)
+    if reg is None:
+        raise HTTPException(status_code=403, detail="不在插件白名单里，没有升级来源")
+    dest = PLUGINS_DIR / name
+    if not dest.is_dir():
+        raise HTTPException(status_code=404, detail="没装这个插件（直接安装即可）")
+    tmp = PLUGINS_DIR / f".update-{name}-{uuid.uuid4().hex[:8]}"
+    with _LOCK:
+        _clone_pinned(reg, tmp)
+        # 换上新目录再验清单（校验依赖目录名=name），不合法就换回旧版
+        backup = PLUGINS_DIR / f".old-{name}-{uuid.uuid4().hex[:8]}"
+        dest.rename(backup)
+        tmp.rename(dest)
+        if _read_manifest(name) is None:
+            shutil.rmtree(dest, ignore_errors=True)
+            backup.rename(dest)
+            raise HTTPException(status_code=502, detail="新版本清单不合法，已回滚到旧版")
+        shutil.rmtree(backup, ignore_errors=True)
+    return {"ok": True}
 
 
 def toggle(name: str, on: bool) -> dict:

@@ -706,9 +706,42 @@ struct ContentView: View {
         chatStore.editText(id: message.id, newText: newText, updateTimestamp: regenerate)
         editRefreshTick += 1   // 亲手编辑立即上屏（离底冻结快照做手术式合并）
         if regenerate, !isGenerating {
+            // 附件找回（mianmian 实踩 bug）：图/文件只在原发送轮注入，历史里只剩
+            // [图片]/[文件:名] 占位——直接重答模型就看不到了。从这条往前收集紧邻的
+            // 同回合附件（发送时图/文件都排在文字前面），从沙盒把数据重建出来随重发带上。
+            let (imagesData, filesData) = collectAdjacentAttachments(before: message.id)
             chatStore.truncateAfter(id: message.id)   // 删掉这条之后的旧对话
-            Task { await generateReply() }
+            Task { await generateReply(imagesData: imagesData, filesData: filesData) }
         }
+    }
+
+    /// 从某条消息往前收集紧邻的自己发的图/文件（同回合附件），重建成可发送的数据。
+    private func collectAdjacentAttachments(before id: UUID) -> ([Data], [OutgoingFile]) {
+        var imagesData: [Data] = []
+        var filesData: [OutgoingFile] = []
+        guard let idx = chatStore.messages.firstIndex(where: { $0.id == id }) else {
+            return ([], [])
+        }
+        var i = idx - 1
+        walk: while i >= 0 {
+            let m = chatStore.messages[i]
+            guard m.sender == .me else { break }
+            switch m.kind {
+            case .image(let url):
+                if let data = try? Data(contentsOf: AppFiles.reanchored(url)) {
+                    imagesData.insert(data, at: 0)   // 存的就是发送时的 jpeg，原样回带
+                }
+            case .file(let url, let name):
+                if let data = try? Data(contentsOf: AppFiles.reanchored(url)) {
+                    filesData.insert(OutgoingFile(data: data, name: name,
+                                                  mime: Self.mime(for: URL(fileURLWithPath: name))), at: 0)
+                }
+            default:
+                break walk
+            }
+            i -= 1
+        }
+        return (imagesData, filesData)
     }
 }
 

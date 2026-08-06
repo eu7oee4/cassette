@@ -118,7 +118,8 @@ struct MemoryPage: View {
         .navigationTitle("记忆")
         .navigationBarTitleDisplayMode(.inline)
         .navigationDestination(for: MemoryItem.self) { m in
-            MemoryDetailPage(id: m.id, fallbackTitle: m.title, onChanged: { Task { await reload() } })
+            MemoryDetailPage(id: m.id, fallbackTitle: m.title, createdMs: m.created_epoch_ms,
+                             onChanged: { Task { await reload() } })
         }
         .task { await reload() }
         .refreshable { await reload() }
@@ -253,6 +254,7 @@ private struct MemoryRow: View {
 private struct MemoryDetailPage: View {
     let id: String
     let fallbackTitle: String
+    var createdMs: Int64? = nil   // 列表带来的创建时间（搜索结果没有 → 退回原字符串）
     var onChanged: () -> Void
     private let service = ChatService()
     @Environment(\.dismiss) private var dismiss
@@ -273,7 +275,11 @@ private struct MemoryDetailPage: View {
                                 Label("置顶", systemImage: "pin.fill").foregroundStyle(Color.theme)
                             }
                             if let imp = d.metadata.importance { Text("★ \(imp)") }
-                            if let c = d.metadata.created, !c.isEmpty {
+                            // 时间优先用 epoch 转北京；搜索进来的没有 epoch → 退回原字符串
+                            // （Ombre 侧是本地时区裸字符串，只作兜底展示）
+                            if let stamp = beijingStamp(createdMs) {
+                                Text(stamp).foregroundStyle(.secondary)
+                            } else if let c = d.metadata.created, !c.isEmpty {
                                 Text(c.prefix(16).replacingOccurrences(of: "T", with: " "))
                                     .foregroundStyle(.secondary)
                             }

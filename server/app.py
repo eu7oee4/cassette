@@ -48,6 +48,19 @@ async def _lifespan(_app: FastAPI):
 
 app = FastAPI(title="cassette backend", lifespan=_lifespan)
 
+# 请求体上限：多模态 base64 大但有边界（app 侧图 ≤9 张已压缩、文件单个 ≤10MB），
+# 64MB 之上就是异常流量——按头拒掉，别整包读进内存再发现撑爆。
+_MAX_BODY_BYTES = 64 * 1024 * 1024
+
+
+@app.middleware("http")
+async def _limit_body(request, call_next):
+    cl = request.headers.get("content-length", "")
+    if cl.isdigit() and int(cl) > _MAX_BODY_BYTES:
+        from fastapi.responses import JSONResponse
+        return JSONResponse({"detail": "请求体太大（上限 64MB）"}, status_code=413)
+    return await call_next(request)
+
 
 def verify_auth(x_auth: Optional[str]) -> None:
     if not config.AUTH_KEY:
@@ -599,6 +612,12 @@ def plugins_toggle(body: PluginIn, x_auth: Optional[str] = Header(default=None, 
     if body.enabled is None:
         raise HTTPException(status_code=400, detail="缺 enabled 字段")
     return plugins.toggle(body.name, body.enabled)
+
+
+@app.post("/plugins/update")
+def plugins_update(body: PluginIn, x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
+    verify_auth(x_auth)
+    return plugins.update(body.name)
 
 
 @app.post("/plugins/uninstall")
