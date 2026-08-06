@@ -134,13 +134,17 @@ struct HistoryPage: View {
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 8)
-        .onAppear { capText = "\(injectCap)" }
+        .onAppear {
+            capText = "\(injectCap)"
+            wakeCapText = "\(wakeCap)"   // 先用共享 store 里的已知值即时显示，别等网络
+        }
         .onChange(of: injectCap) { _, v in
             if !capFocused { capText = "\(v)" }
         }
         .task {
+            // 后台对齐服务器值（比如别的设备改过）；正在打字就不覆盖
             await settingsStore.refreshFromServer()
-            wakeCapText = "\(wakeCap)"
+            if !wakeCapFocused { wakeCapText = "\(wakeCap)" }
         }
     }
 
