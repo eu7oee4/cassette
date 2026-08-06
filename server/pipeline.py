@@ -376,17 +376,29 @@ def memory_block() -> str:
 # ---------- 子进程 ----------
 def base_claude_args(persona_file: Optional[Path] = None) -> list[str]:
     """所有 claude 调用共用的参数，统一从这里出（别另起一套）。
-    Ombre 活着 → 挂记忆工具（--strict-mcp-config 屏蔽机器上其它 MCP；--allowedTools
-    预批准所以 headless 不弹权限，绝不用 --dangerously-skip-permissions）。
-    不可达/没开 → 纯聊天 --tools ""。后续模块（插件工具）继续在这里累积。"""
+    各 MCP 源累积（可并列多个 --mcp-config，claude 合并）：Ombre 记忆 + 启用中的插件。
+    有工具 → 白名单挂载（--strict-mcp-config 屏蔽机器上其它 MCP；--allowedTools
+    预批准所以 headless 不弹权限，绝不用 --dangerously-skip-permissions）；
+    一个没有 → 纯聊天 --tools ""。"""
+    import plugins   # 函数内 import：plugins 依赖 state_store/config，避免模块级环
     args = [
         "claude", "-p",
         "--model", config.MODEL,
         "--system-prompt-file", str(persona_file or rendered_persona()),
     ]
+    mcp_configs: list[str] = []
+    tools: list[str] = []
     if ombre_alive():
-        args += ["--mcp-config", str(_ombre_mcp_config()), "--strict-mcp-config",
-                 "--tools", *OMBRE_TOOLS, "--allowedTools", *OMBRE_TOOLS]
+        mcp_configs.append(str(_ombre_mcp_config()))
+        tools += OMBRE_TOOLS
+    plug_cfg, plug_tools = plugins.mounted()
+    if plug_cfg:
+        mcp_configs.append(plug_cfg)
+        tools += plug_tools
+    if tools:
+        for c in mcp_configs:
+            args += ["--mcp-config", c]
+        args += ["--strict-mcp-config", "--tools", *tools, "--allowedTools", *tools]
     else:
         args += ["--tools", ""]
     return args

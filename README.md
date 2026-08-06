@@ -131,6 +131,7 @@ ios/cassette/     # SwiftUI app: chat UI, sticker library, settings, local persi
 - Every endpoint except the `/health` check requires the `X-Auth` shared key; with no key configured they all refuse requests (fail closed), and the comparison is constant-time.
 - The wake log at `server/state/wake_log.jsonl` is append-only. It holds the full inner monologue from every wake-up, including the text of messages that interruption control blocked from ever being sent, and it is never pruned (the pending outbox has a 7-day cleanup; this doesn't). It never leaves your Mac, but it is the single most intimate file in the project — worth knowing it exists.
 - The model subprocess runs with `--tools ""` by default: conversation only. With Ombre mounted, only the memory-tool whitelist is allowed (`--strict-mcp-config` shuts out any other MCP servers on the machine, `--allowedTools` pre-approves so nothing prompts) — built-in tools like Bash and file access are never enabled, and `--dangerously-skip-permissions` is never used.
+- "Install" in the plugin store means downloading and running code on your Mac, so the registry is a **hardcoded allowlist in the backend** (only plugin repos under this project's account) — there is no "install from URL" input in the app, and there never will be. Plugin tools go through the same per-tool `--allowedTools` whitelist; enabling/disabling needs no network.
 - Keep the backend on your LAN or a Tailscale network. Don't expose it raw to the public internet.
 
 ## Roadmap

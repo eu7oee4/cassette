@@ -28,6 +28,7 @@ import urllib.parse
 
 import config
 import ombre_rest
+import plugins
 import pipeline
 import sse
 import state_store
@@ -569,6 +570,40 @@ def memory_edit(mem_id: str, body: MemoryEditIn,
 def memory_forget(mem_id: str, x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
     verify_auth(x_auth)
     return ombre_rest.call(f"/api/bucket/{urllib.parse.quote(mem_id)}/forget", {})
+
+
+# ---------- 插件商店 ----------
+# registry 写死白名单（plugins.py），install=git clone / toggle=零联网 / uninstall=删目录。
+
+class PluginIn(BaseModel):
+    name: str
+    enabled: Optional[bool] = None   # toggle 用
+
+
+@app.get("/plugins")
+def plugins_list(x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
+    verify_auth(x_auth)
+    return {"items": plugins.list_status()}
+
+
+@app.post("/plugins/install")
+def plugins_install(body: PluginIn, x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
+    verify_auth(x_auth)
+    return plugins.install(body.name)
+
+
+@app.post("/plugins/toggle")
+def plugins_toggle(body: PluginIn, x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
+    verify_auth(x_auth)
+    if body.enabled is None:
+        raise HTTPException(status_code=400, detail="缺 enabled 字段")
+    return plugins.toggle(body.name, body.enabled)
+
+
+@app.post("/plugins/uninstall")
+def plugins_uninstall(body: PluginIn, x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
+    verify_auth(x_auth)
+    return plugins.uninstall(body.name)
 
 
 # ---------- 心流日志（wake_log 时间线）----------

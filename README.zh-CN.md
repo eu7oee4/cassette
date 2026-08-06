@@ -129,6 +129,7 @@ ios/cassette/     # SwiftUI app：聊天界面、表情库、设置页、本地�
 - 除 `/health` 健康检查外，所有接口都要过 `X-Auth` 共享密钥认证；没配密钥时这些接口全部拒绝（fail closed），密钥比较用常数时间。
 - 醒来日志 `server/state/wake_log.jsonl` 是 append-only 的，存着每次醒来的完整内心独白、连同被打扰控制拦下没发出的消息正文，且不会自动清理（待送达盒子有 7 天清理，它没有）。它不出你的 Mac，但整个项目里私密浓度最高的就是这个文件，值得知道它的存在。
 - 模型子进程默认 `--tools ""`，纯对话；挂了 Ombre 时也只放行记忆工具白名单（`--strict-mcp-config` 屏蔽机器上其它 MCP，`--allowedTools` 预批准免弹权限），Bash / 文件读写这类内置工具永远不开，也从不使用 `--dangerously-skip-permissions`。
+- 插件商店的「安装」= 往你的 Mac 下载并运行代码，所以 registry 是**写死在后端代码里的白名单**（只认本项目名下的插件仓），app 里没有、也永远不会有"输入 URL 安装"的口。插件工具同样逐个进 `--allowedTools` 白名单；开/关不联网。
 - 建议后端只暴露在局域网或 Tailscale 内网，不要裸奔公网。
 
 ## Roadmap

@@ -129,10 +129,10 @@ struct ContentView: View {
                     chatScrollTarget = id
                 }
             }
+        case .plugins:
+            PluginsPage()
         case .settings:
             ProactiveSettingsView(store: proactiveStore)
-        default:
-            DrawerPlaceholderPage(page: page)
         }
     }
 

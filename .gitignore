@@ -61,3 +61,4 @@ xcuserdata/
 *.log
 logs/
 nohup.out
+server/plugins/
