@@ -10,7 +10,8 @@ struct ContentView: View {
     @Environment(\.scenePhase) private var scenePhase
 
     @State private var draft: String = ""
-    @State private var showSettings = false          // 设置页
+    @State private var drawerOpen = false            // 抽屉（猫爪/左缘右滑开，阴影点击/左滑关）
+    @State private var navPath: [DrawerPage] = []    // 抽屉 push 的页面栈
     @AppStorage("hasOnboarded") private var hasOnboarded = false   // 首启起名引导
 
     // 点头像 → 底部弹按钮（改昵称 / 换头像）
@@ -54,11 +55,34 @@ struct ContentView: View {
     private let chatService = ChatService()
 
     var body: some View {
-        VStack(spacing: 0) {
-            header
-            chatBody
+        ZStack {
+            NavigationStack(path: $navPath) {
+                VStack(spacing: 0) {
+                    header
+                    chatBody
+                }
+                .toolbar(.hidden, for: .navigationBar)   // 聊天页用自定义顶栏
+                .navigationDestination(for: DrawerPage.self) { destination(for: $0) }
+                // 左缘右滑开抽屉（iOS 标准返回同方向，但只在栈空的聊天页生效，不打架）。
+                // simultaneousGesture：别抢聊天区的点击/滚动。
+                .simultaneousGesture(
+                    DragGesture(minimumDistance: 15, coordinateSpace: .global)
+                        .onEnded { v in
+                            if navPath.isEmpty, !drawerOpen,
+                               v.startLocation.x < 28, v.translation.width > 45,
+                               abs(v.translation.height) < 70 {
+                                dismissKeyboard()
+                                drawerOpen = true
+                            }
+                        })
+            }
+            drawerLayer
         }
         .environmentObject(profileStore)
+        // 页面返回（栈清空）→ 回到抽屉打开态：层级是 聊天 → 抽屉 → 页面。
+        .onChange(of: navPath) { old, new in
+            if !old.isEmpty && new.isEmpty { drawerOpen = true }
+        }
         // 待送达同步：前台时拉一次，并每 15s 轮询（断连补投的回复靠这条通道回来）。
         // .task(id: scenePhase)：进 active 启动、离开 active 自动取消循环，省电。
         .task(id: scenePhase) {
@@ -71,6 +95,39 @@ struct ContentView: View {
                 await reconcileRescues()
             }
         }
+    }
+
+    /// 抽屉项 → 页面（占位页随 PR2-5/PR8 逐个换真）。
+    @ViewBuilder
+    private func destination(for page: DrawerPage) -> some View {
+        switch page {
+        case .settings:
+            ProactiveSettingsView(store: proactiveStore)
+        default:
+            DrawerPlaceholderPage(page: page)
+        }
+    }
+
+    /// 抽屉层：阴影 + 面板。点阴影/阴影区左滑关；选中项 → 关抽屉 + push。
+    @ViewBuilder
+    private var drawerLayer: some View {
+        ZStack(alignment: .leading) {
+            if drawerOpen {
+                Color.black.opacity(0.35)
+                    .ignoresSafeArea()
+                    .contentShape(Rectangle())
+                    .onTapGesture { drawerOpen = false }
+                    .gesture(DragGesture(minimumDistance: 20)
+                        .onEnded { v in if v.translation.width < -30 { drawerOpen = false } })
+                    .transition(.opacity)
+                DrawerPanel(agentName: topTitle) { page in
+                    drawerOpen = false
+                    navPath.append(page)
+                }
+                .transition(.move(edge: .leading))
+            }
+        }
+        .animation(.easeInOut(duration: 0.22), value: drawerOpen)
     }
 
     // MARK: - 界面
@@ -124,9 +181,6 @@ struct ContentView: View {
                     onRegenerate: { saveEdit(message: message, regenerate: true) },
                     onCancel: { editingMessage = nil }
                 )
-            }
-            .sheet(isPresented: $showSettings) {
-                NavigationStack { ProactiveSettingsView(store: proactiveStore) }
             }
             // 长按气泡 → 删除确认：从本地历史移除，之后发给后端的历史自然不再包含它。
             .confirmationDialog("删除这条消息？", isPresented: Binding(
@@ -197,28 +251,31 @@ struct ContentView: View {
             }
     }
 
-    // 顶部导航栏：居中标题（ProfileStore.statusText，可在以后设置页改）。
+    /// 顶栏标题 = AI 的名字（首启起的，设置页可改）。抽屉顶部也用它。
+    private var topTitle: String {
+        proactiveStore.settings.agentName.isEmpty ? "cassette" : proactiveStore.settings.agentName
+    }
+
+    // 顶部导航栏：左猫爪开抽屉，居中标题；右侧空占位配平保持标题居中
+    // （原右上角设置齿轮已搬进抽屉）。
     private var header: some View {
         HStack {
-            Image(systemName: "recordingtape")
-                .font(.system(size: 18, weight: .medium))
-                .foregroundStyle(Color.theme)
-                .frame(width: 40, height: 40)
+            Button {
+                dismissKeyboard()
+                drawerOpen = true
+            } label: {
+                Image(systemName: "pawprint")
+                    .font(.system(size: 18, weight: .medium))
+                    .foregroundStyle(Color.theme)
+                    .frame(width: 40, height: 40)
+            }
             Spacer()
-            // 顶栏标题 = AI 的名字（首启起的，设置页可改）。
-            Text(proactiveStore.settings.agentName.isEmpty ? "cassette" : proactiveStore.settings.agentName)
+            Text(topTitle)
                 .font(.headline)
                 .lineLimit(1)
                 .truncationMode(.tail)
             Spacer()
-            Button {
-                showSettings = true
-            } label: {
-                Image(systemName: "gearshape")
-                    .font(.system(size: 17, weight: .medium))
-                    .foregroundStyle(Color.theme)
-                    .frame(width: 40, height: 40)
-            }
+            Color.clear.frame(width: 40, height: 40)
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 4)
