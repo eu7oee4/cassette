@@ -120,9 +120,14 @@ async def translate_events(events, finalize):
                     if emit:
                         yield sse({"type": "text", "content": emit})
         elif t == "assistant":
-            # 工具调用产物（长期记忆等）在这里抓进 stored——后续模块填充；
-            # 抓到后往下游发 memory 灰字事件，气泡间可见。
-            pass
+            # 工具调用产物（记忆/网页等）抓进 stored + 往下游发 memory 灰字事件（气泡间可见）。
+            for b in ev.get("message", {}).get("content", []):
+                if b.get("type") != "tool_use":
+                    continue
+                s = pipeline._stored_from_tool_use(b.get("name", ""), b.get("input", {}) or {})
+                if s:
+                    stored.append(s)
+                    yield sse({"type": "memory", "tool": s["tool"], "text": s["text"]})
         elif t == "result":
             if ev.get("is_error"):
                 is_error = True

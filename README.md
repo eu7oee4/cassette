@@ -12,6 +12,7 @@ Give it a name, write it a persona, add a few stickers — and it will "wake up"
 - **Wakes up on its own**: a backend scheduler wakes the model at the frequency you set. It reads the recent conversation and its own inner monologue from the last few wake-ups, then decides whether to say something or stay quiet. It can also set its own alarm ("wake me in 3 hours") — mention that you're going to bed and it will quietly schedule a wake-up for later.
 - **Long-term memory (optional)**: integrates [Ombre-Brain](https://github.com/P0luz/Ombre-Brain) (P0luz's open-source memory system, a self-hosted Docker service) — relevant memories surface at the start of a conversation, things worth keeping get saved on the fly, and wake-ups think with memory too; what it stored or edited shows up as gray hints in chat. Without Ombre running it falls back to plain chat, business as usual.
 - **Sends stickers**: add images from your photo library and the model writes a one-line description of each by looking at it; later it picks one that fits the mood and sends it to you (both in chat and when it wakes up), and it will rewrite a description it thinks is wrong. To ship a default set, drop PNGs into `ios/cassette/DefaultStickers/` — the filename becomes the initial description, seeded on first launch.
+- **Plugin store**: tool families live in their own small repos, not in this one — download/enable/uninstall with one tap in the app (the backend mounts them dynamically; toggling takes effect on the next turn). The first plugin, **webpage**, lets the companion build and edit self-contained HTML pages you can open from Chat history → HTML files. The registry is a hardcoded allowlist; there is no install-from-URL.
 - **Has a sense of time**: it knows whether it's "late Wednesday night" or "Saturday morning", and that you took 3 hours to reply. All of it is injected into the prompt, so it won't wish you good night in the afternoon.
 - **Doesn't lose messages**: lock your phone, background the app, or drop off the network mid-generation — the backend runs to completion, the reply goes into a pending outbox, and the app picks it up when it returns to the foreground; with [Bark](https://github.com/Finb/Bark) configured, your phone gets a push too. The reverse case is covered as well: if the request never reached the backend, the app reconciles with it and tells you to resend after about a minute; if that turn produced nothing at all, you get an explicit notice. A turn never just quietly disappears.
 
@@ -137,7 +138,7 @@ ios/cassette/     # SwiftUI app: chat UI, sticker library, settings, local persi
 ## Roadmap
 
 - **Seamless chat ⇄ coding mode**: switch from `claude -p` chat mode straight into a coding session inside tmux — same persona, continuous memory and awareness — so you can have the Claude Code on your Mac run tasks for you from your phone.
-- **Plugin ecosystem**: tool families (browser, web generation, and so on) as standalone plugin repos, mounted dynamically by the backend and installable from inside the app; the registry is a hardcoded allowlist, and install will never accept an arbitrary URL.
+- **More plugins**: browser and other tool families landing in the plugin store one by one (each its own small repo).
 - **Web client**: the client is thin enough that it deserves a version that runs in a browser.
 
 ## Credits

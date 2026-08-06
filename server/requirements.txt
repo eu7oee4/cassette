@@ -1,3 +1,4 @@
 fastapi
 uvicorn
 python-dotenv
+mcp>=1,<2  # 插件的 MCP stdio 入口（fastmcp；2.0 改了 API 先不追）

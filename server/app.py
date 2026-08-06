@@ -12,6 +12,7 @@ cassette 后端（无状态版）。
 import asyncio
 import base64
 import json
+import re
 import secrets
 import subprocess
 import time
@@ -604,6 +605,55 @@ def plugins_toggle(body: PluginIn, x_auth: Optional[str] = Header(default=None, 
 def plugins_uninstall(body: PluginIn, x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
     verify_auth(x_auth)
     return plugins.uninstall(body.name)
+
+
+# ---------- 网页（webpage 插件的产物）----------
+# 插件写 state/webpages/（index.json + {id}.html），这里只读给 app + 删除。
+# 没装插件时就是空列表，端点照常工作。
+
+_WEBPAGES_DIR = state_store.STATE_DIR / "webpages"
+_PAGE_ID_RE = re.compile(r"^[0-9a-f]{1,32}$")
+
+
+def _read_webpage_index() -> list[dict]:
+    try:
+        return json.loads((_WEBPAGES_DIR / "index.json").read_text("utf-8"))
+    except Exception:
+        return []
+
+
+@app.get("/webpages")
+def webpages_list(x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
+    verify_auth(x_auth)
+    items = sorted(_read_webpage_index(), key=lambda p: -int(p.get("ts", 0)))
+    return {"items": items}
+
+
+@app.get("/webpages/{page_id}")
+def webpages_get(page_id: str, x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
+    verify_auth(x_auth)
+    if not _PAGE_ID_RE.match(page_id):
+        raise HTTPException(status_code=400, detail="非法 id")
+    path = _WEBPAGES_DIR / f"{page_id}.html"
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="没有这个网页")
+    title = next((p.get("title", "") for p in _read_webpage_index()
+                  if p.get("id") == page_id), "")
+    return {"id": page_id, "title": title, "html": path.read_text("utf-8")}
+
+
+@app.post("/webpages/{page_id}/delete")
+def webpages_delete(page_id: str, x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
+    verify_auth(x_auth)
+    if not _PAGE_ID_RE.match(page_id):
+        raise HTTPException(status_code=400, detail="非法 id")
+    (_WEBPAGES_DIR / f"{page_id}.html").unlink(missing_ok=True)
+    idx = [p for p in _read_webpage_index() if p.get("id") != page_id]
+    tmp = _WEBPAGES_DIR / f".index.{uuid.uuid4().hex}.tmp"
+    _WEBPAGES_DIR.mkdir(parents=True, exist_ok=True)
+    tmp.write_text(json.dumps(idx, ensure_ascii=False, indent=2), "utf-8")
+    tmp.replace(_WEBPAGES_DIR / "index.json")
+    return {"ok": True}
 
 
 # ---------- 心流日志（wake_log 时间线）----------

@@ -1,4 +1,5 @@
 import SwiftUI
+import WebKit
 
 /// 聊天记录页（抽屉 → push）：搜索 + 倒数序号 + 日期直达 + 代码块检索 + 注入窗口控制。
 /// 序号的意义：历史是按"最近 N 条"注入给模型的——在这里定位到"倒数第 N 条"，
@@ -61,6 +62,7 @@ struct HistoryPage: View {
         .sheet(isPresented: $showCodeList) { codeListSheet }
         .sheet(isPresented: $showImageGrid) { imageGridSheet }
         .sheet(isPresented: $showFileList) { fileListSheet }
+        .sheet(isPresented: $showWebpages) { WebpagesSheet() }
         .sheet(item: $selected) { e in EntryDetail(entry: e, injectCap: $injectCap) }
         .sheet(isPresented: $showDates) { dateSheet }
         .alert("跳到倒数第几条？", isPresented: $showJump) {
@@ -75,12 +77,14 @@ struct HistoryPage: View {
 
     @State private var showImageGrid = false         // 图片九宫格
     @State private var showFileList = false          // 发过的文件
+    @State private var showWebpages = false          // TA 做的 HTML 网页
     @State private var gridViewer: EnlargedImage? = nil
 
     private var quickActions: some View {
         HStack(spacing: 14) {
             Button("日期检索") { showDates = true }
             Button("倒序号检索") { jumpText = ""; showJump = true }
+            Button("HTML文件") { showWebpages = true }
             Button("代码块") { showCodeList = true }
             Button("图片") { showImageGrid = true }
             Button("文件") { showFileList = true }

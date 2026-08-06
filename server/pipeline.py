@@ -471,7 +471,7 @@ def _describe_trace(inp: dict) -> str:
 
 
 def _stored_from_tool_use(name: str, inp: dict) -> Optional[dict]:
-    """记忆工具调用 → stored 条目（app 灰字提示用）。只记「写」操作，breath 等读操作不算产物。"""
+    """工具调用 → stored 条目（app 灰字提示用）。只记「写」操作，breath 等读操作不算产物。"""
     if name.endswith("__hold") or name.endswith("__grow"):
         text = _extract_memory_text(inp)
         if text:
@@ -479,6 +479,10 @@ def _stored_from_tool_use(name: str, inp: dict) -> Optional[dict]:
         return None
     if name.endswith("__trace"):
         return {"tool": "trace", "text": _describe_trace(inp)}
+    if name.endswith("__webpage_write"):
+        # 网页插件：做/改了一个网页 → 灰字带标题（app 在聊天记录页的 HTML 文件里看）
+        title = (inp.get("title") or "").strip() or "未命名网页"
+        return {"tool": "webpage", "text": title}
     return None
 
 

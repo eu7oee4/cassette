@@ -618,9 +618,13 @@ struct ContentView: View {
         }
     }
 
-    /// 一次记忆操作的灰字文案（内容后续在记忆页看，这里只标动作）。
+    /// 一次工具产物的灰字文案（内容去记忆页/聊天记录页看，这里只标动作）。
     private func memoryNoteText(tool: String) -> String {
-        tool == "trace" ? "调整了一条记忆" : "记住了一件事"
+        switch tool {
+        case "trace":   return "调整了一条记忆"
+        case "webpage": return "做了一个网页"
+        default:        return "记住了一件事"
+        }
     }
 
     // MARK: - 待送达同步（断连补投）
