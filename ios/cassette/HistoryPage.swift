@@ -59,6 +59,7 @@ struct HistoryPage: View {
         .searchable(text: $query, placement: .navigationBarDrawer(displayMode: .always),
                     prompt: "按聊天记录搜索")
         .sheet(isPresented: $showCodeList) { codeListSheet }
+        .sheet(isPresented: $showImageGrid) { imageGridSheet }
         .sheet(item: $selected) { e in EntryDetail(entry: e, injectCap: $injectCap) }
         .sheet(isPresented: $showDates) { dateSheet }
         .alert("跳到倒数第几条？", isPresented: $showJump) {
@@ -71,11 +72,15 @@ struct HistoryPage: View {
 
     // MARK: - 快捷检索行 + 窗口设置行（设计规则：图标非按钮不加，文案直给）
 
+    @State private var showImageGrid = false         // 图片九宫格
+    @State private var gridViewer: EnlargedImage? = nil
+
     private var quickActions: some View {
         HStack(spacing: 14) {
             Button("日期检索") { showDates = true }
             Button("倒序号检索") { jumpText = ""; showJump = true }
             Button("代码块") { showCodeList = true }
+            Button("图片") { showImageGrid = true }
             Spacer()
         }
         .font(.subheadline)
@@ -344,6 +349,93 @@ struct HistoryPage: View {
         }
         .presentationDetents([.medium, .large])
     }
+
+    // MARK: - 图片检索（按月九宫格）
+
+    /// 全部图片（新→旧）+ 全局序号（点开查看器从这张起）。
+    private var imageEntries: [(entry: Entry, url: URL)] {
+        entries.compactMap { e in
+            if case .image(let u) = e.msg.kind { return (e, u) }
+            return nil
+        }
+    }
+
+    private struct MonthGroup {
+        let month: String
+        let items: [(index: Int, url: URL)]   // index=全局序号
+    }
+
+    /// 按月分组（最近的月在最上；组内也是新→旧）。
+    private var imageMonths: [MonthGroup] {
+        var out: [MonthGroup] = []
+        for (i, item) in imageEntries.enumerated() {
+            let m = Self.monthFmt.string(from: item.entry.msg.timestamp)
+            if out.last?.month == m {
+                out[out.count - 1] = MonthGroup(month: m, items: out[out.count - 1].items + [(i, item.url)])
+            } else {
+                out.append(MonthGroup(month: m, items: [(i, item.url)]))
+            }
+        }
+        return out
+    }
+
+    private var imageGridSheet: some View {
+        NavigationStack {
+            ScrollView {
+                let allUrls = imageEntries.map(\.url)
+                LazyVStack(alignment: .leading, spacing: 8, pinnedViews: [.sectionHeaders]) {
+                    ForEach(imageMonths, id: \.month) { group in
+                        Section {
+                            LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 2),
+                                                     count: 4), spacing: 2) {
+                                ForEach(group.items, id: \.index) { item in
+                                    // 方形格标准写法：透明方容器定尺寸，图 overlay 填充后裁切
+                                    Color.clear
+                                        .aspectRatio(1, contentMode: .fit)
+                                        .overlay {
+                                            if let img = AppFiles.loadImage(item.url) {
+                                                Image(uiImage: img).resizable().scaledToFill()
+                                            } else {
+                                                Color(.systemGray5)
+                                            }
+                                        }
+                                        .clipped()
+                                        .contentShape(Rectangle())
+                                        .onTapGesture {
+                                            gridViewer = EnlargedImage(urls: allUrls, start: item.index)
+                                        }
+                                }
+                            }
+                        } header: {
+                            Text(group.month)
+                                .font(.subheadline.bold())
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 6)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .background(.bar)
+                        }
+                    }
+                }
+                if imageEntries.isEmpty {
+                    Text("还没有图片")
+                        .font(.footnote).foregroundStyle(.secondary).padding(.top, 40)
+                }
+            }
+            .navigationTitle("图片")
+            .navigationBarTitleDisplayMode(.inline)
+            .fullScreenCover(item: $gridViewer) { item in
+                ImageViewerView(urls: item.urls, start: item.start) { gridViewer = nil }
+            }
+        }
+        .presentationDetents([.large])
+    }
+
+    static let monthFmt: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "yyyy年M月"
+        f.locale = Locale(identifier: "zh_CN")
+        return f
+    }()
 
     // MARK: - 序号直达
 

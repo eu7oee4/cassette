@@ -71,6 +71,7 @@ class ChatRequest(BaseModel):
     session_id: Optional[str] = None   # 仅用于 app 记账，后端不依赖它记忆
     stickers: Optional[list[StickerInfo]] = None  # 表情库清单(id+描述)，供模型挑着发/改描述
     client_req_id: Optional[str] = None  # 断连补投关联 id：rescue 条目带回给 app 替换半截气泡
+    images: Optional[list[ImageInput]] = None  # 附给"最新这条"的图片，带图走多模态
 
 
 class StoredItem(BaseModel):
@@ -198,7 +199,10 @@ def chat(req: ChatRequest, x_auth: Optional[str] = Header(default=None, alias="X
     _snapshot_incoming_window(req)
     wake.chat_turn_begin()
     try:
-        reply, stored = pipeline.call_claude(prompt)
+        if req.images:
+            reply, stored = pipeline.call_claude_multimodal(prompt, req.images)
+        else:
+            reply, stored = pipeline.call_claude(prompt)
     finally:
         wake.chat_turn_end()
     return finalize_chat_reply(reply, stored, req, handle_to_id)
@@ -240,7 +244,7 @@ async def chat_stream(req: ChatRequest, x_auth: Optional[str] = Header(default=N
                 try:
                     def translate(events):
                         return sse.translate_events(events, finalize)
-                    async for chunk in sse.stream_claude(prompt, translate):
+                    async for chunk in sse.stream_claude(prompt, translate, images=req.images):
                         # ⚠️ 字节嗅探依赖 sse.sse() 用 json.dumps 默认分隔符（": " 带空格）——
                         # 正文里出现同样字样会被转义成 \" 不误判；若改压缩分隔符此检测会静默失效。
                         if b'"type": "done"' in chunk:

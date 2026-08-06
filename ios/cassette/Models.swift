@@ -20,6 +20,7 @@ struct ChatMessage: Identifiable, Codable, Equatable {
     enum Kind: Codable, Equatable {
         case text(String)
         case sticker(URL, String) // 表情包：本地图 + 描述。渲染成图，但 plainText 带描述发给后端
+        case image(URL)           // 聊天图片：本地存储。发送那轮以 base64 附给后端（多模态）
         case system(String)       // 系统提示（居中灰字）
         case memoryNote(String)   // 「存了记忆」等提示（居中灰字，纯 UI，不发回后端）
     }
@@ -43,6 +44,7 @@ struct ChatMessage: Identifiable, Codable, Equatable {
         switch kind {
         case .text(let t):       return t
         case .sticker(_, let d): return d.isEmpty ? "[表情包]" : "[表情包：\(d)]"
+        case .image:             return "[图片]"   // 历史轮次里图片以占位文本注入
         case .system(let t):     return t
         case .memoryNote(let t): return t
         }

@@ -25,4 +25,13 @@ enum AppFiles {
     static func loadImage(_ url: URL) -> UIImage? {
         UIImage(contentsOfFile: reanchored(url).path)
     }
+
+    /// 存一张聊天图片到 Documents/chat_images/（jpeg 数据原样落盘），返回存储 URL。
+    static func saveChatImage(_ data: Data) -> URL? {
+        let dir = documents.appendingPathComponent("chat_images", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let url = dir.appendingPathComponent(UUID().uuidString + ".jpg")
+        do { try data.write(to: url) } catch { return nil }
+        return url
+    }
 }

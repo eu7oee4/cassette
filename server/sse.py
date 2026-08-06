@@ -144,11 +144,17 @@ async def translate_events(events, finalize):
     yield sse(payload)
 
 
-async def stream_claude(prompt: str, translate):
+async def stream_claude(prompt: str, translate, images: list | None = None):
     """通用流式：起 claude 子进程 → 把 stream-json 事件交给 translate(events) 翻成 SSE 字节块。
-    安全约定同 pipeline.call_claude：base_claude_args + 删 ANTHROPIC_API_KEY。"""
+    安全约定同 pipeline.call_claude：base_claude_args + 删 ANTHROPIC_API_KEY。
+    images 非空 → stdin 换成 stream-json 的多模态 user 消息（模型真看图），其余不变。"""
     args = pipeline.base_claude_args() + \
         ["--output-format", "stream-json", "--verbose", "--include-partial-messages"]
+    if images:
+        args += ["--input-format", "stream-json"]
+        stdin_payload = pipeline.multimodal_stdin(prompt, images)
+    else:
+        stdin_payload = prompt
 
     proc = await asyncio.create_subprocess_exec(
         *args,
@@ -169,7 +175,7 @@ async def stream_claude(prompt: str, translate):
     stderr_task = asyncio.create_task(_drain_stderr())
 
     # prompt 走 stdin，写完关掉（claude -p 读到 EOF 才开始）。
-    proc.stdin.write(prompt.encode("utf-8"))
+    proc.stdin.write(stdin_payload.encode("utf-8"))
     await proc.stdin.drain()
     proc.stdin.close()
 

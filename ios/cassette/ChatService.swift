@@ -39,6 +39,12 @@ private struct OutMessage: Encodable {
     let ts: Int        // Unix 秒：后端用来算「现在几点 / 隔了多久」
 }
 
+/// 附给"最新这条"的图片（base64），后端带图走多模态让模型真看到。
+private struct ImageOut: Encodable {
+    let data: String          // base64
+    let media_type: String
+}
+
 /// 发给后端的请求体：完整对话历史（最后一条是用户新消息）。
 /// 后端无状态，靠这份历史理解上下文。session_id 仅供记账，nil 时自动省略。
 private struct ChatRequestBody: Encodable {
@@ -46,6 +52,7 @@ private struct ChatRequestBody: Encodable {
     let session_id: String?
     let stickers: [Sticker]?   // 表情库清单(id+描述)，供模型挑着发/改描述
     let client_req_id: String? // 断连补投的关联 id：后端 rescue 条目带回，app 用它替换半截气泡
+    let images: [ImageOut]?    // 最新这条附带的图片；nil 自动省略
 }
 
 /// 面向用户的错误类型，errorDescription 直接拿去给用户看。
@@ -91,7 +98,8 @@ struct ChatService {
     /// 构造发给后端 /chat 或 /chat/stream 的请求。
     /// history 应以用户的新消息结尾。memoryNote 是纯 UI 灰字、不发回后端；历史裁到最近 sendHistoryCap 条。
     private func buildChatRequest(path: String, history: [ChatMessage], sessionId: String?,
-                                  stickers: [Sticker] = [], reqId: String? = nil) throws -> URLRequest {
+                                  stickers: [Sticker] = [], reqId: String? = nil,
+                                  imagesData: [Data] = []) throws -> URLRequest {
         guard let url = URL(string: BackendConfig.baseURL + path) else {
             throw ChatServiceError.badURL
         }
@@ -108,10 +116,12 @@ struct ChatService {
         request.setValue(BackendConfig.authKey, forHTTPHeaderField: "X-Auth")
         request.timeoutInterval = 600   // 空闲计时（收到数据就重置）：流式有后端心跳撑着，
                                         // 这里只兜"后端整个没响应"
+        let images: [ImageOut]? = imagesData.isEmpty ? nil :
+            imagesData.map { ImageOut(data: $0.base64EncodedString(), media_type: "image/jpeg") }
         request.httpBody = try JSONEncoder().encode(
             ChatRequestBody(messages: outMessages, session_id: sessionId,
                             stickers: stickers.isEmpty ? nil : stickers,
-                            client_req_id: reqId)
+                            client_req_id: reqId, images: images)
         )
         return request
     }
@@ -134,9 +144,9 @@ struct ChatService {
 
     /// 发送对话历史（非流式），返回后端生成的完整回复。保留做流式的降级。
     func send(history: [ChatMessage], sessionId: String?,
-              stickers: [Sticker] = []) async throws -> ChatResponse {
+              stickers: [Sticker] = [], imagesData: [Data] = []) async throws -> ChatResponse {
         let request = try buildChatRequest(path: "/chat", history: history, sessionId: sessionId,
-                                           stickers: stickers)
+                                           stickers: stickers, imagesData: imagesData)
         let data: Data
         let response: URLResponse
         do {
@@ -161,13 +171,14 @@ struct ChatService {
     /// 流式发送：返回一串 SSE 事件（text / text_break / memory / error / done）。
     /// 用 URLSession.bytes 逐行读；.lines 自带跨包缓冲，半截行不会炸。
     func sendStream(history: [ChatMessage], sessionId: String?,
-                    stickers: [Sticker] = [], reqId: String? = nil) -> AsyncThrowingStream<StreamEvent, Error> {
+                    stickers: [Sticker] = [], reqId: String? = nil,
+                    imagesData: [Data] = []) -> AsyncThrowingStream<StreamEvent, Error> {
         AsyncThrowingStream { continuation in
             let task = Task {
                 do {
                     let request = try buildChatRequest(path: "/chat/stream", history: history,
                                                        sessionId: sessionId, stickers: stickers,
-                                                       reqId: reqId)
+                                                       reqId: reqId, imagesData: imagesData)
                     let (bytes, response) = try await URLSession.shared.bytes(for: request)
                     guard let http = response as? HTTPURLResponse else {
                         throw ChatServiceError.badResponse

@@ -25,6 +25,10 @@ struct ContentView: View {
     @State private var showAvatarPicker = false
     @State private var showStickers = false          // 表情包面板
     @State private var pendingSticker: Sticker? = nil // 暂存待发的表情（可配文字一起发）
+    @State private var pendingImages: [Data] = []    // 暂存待发的照片（jpeg，可配文字一起发）
+    @State private var showAttachPicker = false      // ➕ 的照片选择器
+    @State private var attachPickerItems: [PhotosPickerItem] = []
+    @State private var enlargedImage: EnlargedImage? = nil   // 点图片气泡 → 全屏查看
 
     // 后端联动状态
     @State private var sessionId: String? = nil   // 后端返回的会话 id（无状态后端仅用于记账）
@@ -157,6 +161,7 @@ struct ContentView: View {
                  onDelete: { msg in deleteTarget = msg },
                  onTapChatArea: { if showStickers { showStickers = false } },
                  onTapAvatar: { sender in dismissKeyboard(); avatarActionTarget = sender },
+                 onTapImage: { url in dismissKeyboard(); enlargedImage = EnlargedImage(url: url) },
                  editRefreshTick: editRefreshTick,
                  scrollTarget: chatScrollTarget,
                  onScrollTargetHandled: { chatScrollTarget = nil })
@@ -175,15 +180,23 @@ struct ContentView: View {
                             pendingSticker = nil
                         }
                     }
+                    if !pendingImages.isEmpty {
+                        Divider()
+                        PendingImagesBar(images: pendingImages) { idx in
+                            pendingImages.remove(at: idx)
+                        }
+                    }
                     InputBar(text: $draft,
                              stickersActive: showStickers,
                              sending: isGenerating || isWaiting,
-                             hasAttachments: pendingSticker != nil,
+                             hasAttachments: pendingSticker != nil || !pendingImages.isEmpty,
+                             onAttach: { dismissKeyboard(); showAttachPicker = true },
                              onStickers: toggleStickers,
                              onSend: send)
                 }
                 .animation(.easeInOut(duration: 0.2), value: showStickers)
                 .animation(.easeInOut(duration: 0.2), value: pendingSticker)
+                .animation(.easeInOut(duration: 0.2), value: pendingImages.count)
             }
             .alert("发送失败", isPresented: Binding(
                 get: { errorText != nil },
@@ -269,6 +282,34 @@ struct ContentView: View {
                     avatarPickerTarget = nil
                 }
             }
+            // ➕ 选照片：多选，压到适合模型看的尺寸再暂存（原图几 MB 的 base64 没必要）。
+            .photosPicker(isPresented: $showAttachPicker, selection: $attachPickerItems,
+                          maxSelectionCount: 9, matching: .images)
+            .onChange(of: attachPickerItems) { _, items in
+                guard !items.isEmpty else { return }
+                Task {
+                    for item in items {
+                        if let data = try? await item.loadTransferable(type: Data.self),
+                           let img = UIImage(data: data),
+                           let jpeg = Self.jpegForUpload(img) {
+                            pendingImages.append(jpeg)
+                        }
+                    }
+                    attachPickerItems = []
+                }
+            }
+            // 全屏查看聊天图片；长按可删（删的是那条消息，本地历史移除）。
+            .fullScreenCover(item: $enlargedImage) { item in
+                ImageViewerView(urls: item.urls, start: item.start, onDeleteURL: { url in
+                    if let msg = chatStore.messages.first(where: {
+                        if case .image(let u) = $0.kind { return u == url }
+                        return false
+                    }) {
+                        chatStore.remove(id: msg.id)
+                        editRefreshTick += 1
+                    }
+                }, onClose: { enlargedImage = nil })
+            }
     }
 
     /// 顶栏标题 = AI 的名字（首启起的，设置页可改）。抽屉顶部也用它。
@@ -318,9 +359,19 @@ struct ContentView: View {
 
     private func send() {
         let trimmed = draft.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !isGenerating, !trimmed.isEmpty || pendingSticker != nil else { return }
+        guard !isGenerating,
+              !trimmed.isEmpty || pendingSticker != nil || !pendingImages.isEmpty else { return }
         isGenerating = true   // 同步占位：立刻禁用发送、挡住极快的重复触发
         isWaiting = true
+
+        // 暂存的照片：先落盘成 .image 消息上屏；base64 数据随本轮请求带给后端（多模态）。
+        let imagesToSend = pendingImages
+        for data in pendingImages {
+            if let url = AppFiles.saveChatImage(data) {
+                chatStore.append(ChatMessage(sender: .me, kind: .image(url), timestamp: Date()))
+            }
+        }
+        pendingImages = []
 
         if !trimmed.isEmpty {
             chatStore.append(ChatMessage(sender: .me, kind: .text(trimmed), timestamp: Date()))
@@ -337,7 +388,22 @@ struct ContentView: View {
         draft = ""
         DispatchQueue.main.async { draft = "" }
 
-        Task { await generateReply() }
+        Task { await generateReply(imagesData: imagesToSend) }
+    }
+
+    /// 相册原图压到适合模型看的尺寸（长边 ≤1568，jpeg 0.8）——多模态按 token 算钱，
+    /// 原图几 MB 的 base64 纯浪费；本地气泡渲染用的也是这份，清晰度够。
+    private static func jpegForUpload(_ img: UIImage, maxDim: CGFloat = 1568) -> Data? {
+        let longer = max(img.size.width, img.size.height)
+        guard longer > maxDim else { return img.jpegData(compressionQuality: 0.8) }
+        let scale = maxDim / longer
+        let newSize = CGSize(width: img.size.width * scale, height: img.size.height * scale)
+        let fmt = UIGraphicsImageRendererFormat.default()
+        fmt.scale = 1
+        let resized = UIGraphicsImageRenderer(size: newSize, format: fmt).image { _ in
+            img.draw(in: CGRect(origin: .zero, size: newSize))
+        }
+        return resized.jpegData(compressionQuality: 0.8)
     }
 
     private func dismissKeyboard() {
@@ -349,7 +415,7 @@ struct ContentView: View {
     /// 把当前完整历史发给后端（流式），回复逐字上屏；失败则弹提示。
     /// 约定调用前 chatStore.messages 已以用户的新消息结尾。
     @MainActor
-    private func generateReply() async {
+    private func generateReply(imagesData: [Data] = []) async {
         isGenerating = true
         isWaiting = true
         defer { isWaiting = false; isGenerating = false }
@@ -366,7 +432,8 @@ struct ContentView: View {
         do {
             let stream = chatService.sendStream(history: chatStore.messages,
                                                 sessionId: sessionId,
-                                                stickers: stickerStore.stickers, reqId: reqId)
+                                                stickers: stickerStore.stickers, reqId: reqId,
+                                                imagesData: imagesData)
             for try await ev in stream {
                 switch ev {
                 case .text(let chunk):

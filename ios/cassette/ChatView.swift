@@ -9,6 +9,7 @@ struct ChatView: View {
     var onDelete: (ChatMessage) -> Void = { _ in } // 长按气泡：弹删除确认
     var onTapChatArea: () -> Void = { }            // 点聊天空白区
     var onTapAvatar: (MessageSender) -> Void = { _ in }   // 点头像：改昵称/换头像
+    var onTapImage: (URL) -> Void = { _ in }       // 点图片气泡：全屏查看
     var editRefreshTick: Int = 0   // 用户亲手编辑/删除的信号：+1 → 手术式合并进冻结快照
     var scrollTarget: UUID? = nil                  // 外部跳转请求（聊天记录页点行）
     var onScrollTargetHandled: () -> Void = { }    // 跳转消费完通知外面清 nil
@@ -47,7 +48,8 @@ struct ChatView: View {
                                        contentWidth: geo.size.width - 24,
                                        onEdit: onEdit,
                                        onDelete: onDelete,
-                                       onTapAvatar: onTapAvatar)
+                                       onTapAvatar: onTapAvatar,
+                                       onTapImage: onTapImage)
                         }
                     }
                     .background {
@@ -408,6 +410,7 @@ private struct MessageRow: View {
     var onEdit: (ChatMessage) -> Void = { _ in }
     var onDelete: (ChatMessage) -> Void = { _ in }
     var onTapAvatar: (MessageSender) -> Void = { _ in }
+    var onTapImage: (URL) -> Void = { _ in }
 
     private var isMe: Bool { message.sender == .me }
 
@@ -454,6 +457,23 @@ private struct MessageRow: View {
             StickerImage(url: url)
                 .frame(maxWidth: 160, maxHeight: 160)
                 .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        case .image(let url):
+            // 聊天图片：等比缩略气泡，点开全屏查看
+            if let img = AppFiles.loadImage(url) {
+                Image(uiImage: img)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(maxWidth: min(240, bubbleMaxWidth), maxHeight: 300)
+                    .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                    .onTapGesture { onTapImage(url) }
+            } else {
+                Image(systemName: "photo")
+                    .font(.system(size: 32))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 120, height: 90)
+                    .background(Color(.systemGray5),
+                                in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+            }
         case .system, .memoryNote:
             EmptyView()
         }

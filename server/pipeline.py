@@ -508,6 +508,38 @@ def parse_claude_stream(stdout: str, collect_all_text: bool = False) -> tuple[Op
     return (result_text.strip() if result_text else None), stored
 
 
+def multimodal_stdin(prompt: str, images: list) -> str:
+    """带图调用的 stdin 载荷：一条含 [text, image...] 的 user 消息（stream-json 输入格式）。
+    images 元素带 .data(base64)/.media_type（app.py 的 ImageInput）。非流式和流式共用。"""
+    content: list[dict] = [{"type": "text", "text": prompt}]
+    for img in images:
+        content.append({"type": "image",
+                        "source": {"type": "base64", "media_type": img.media_type,
+                                   "data": img.data}})
+    return json.dumps({"type": "user",
+                       "message": {"role": "user", "content": content}}) + "\n"
+
+
+def call_claude_multimodal(prompt: str, images: list) -> tuple[str, list[dict]]:
+    """带图的一次性调用（非流式回退路）：stream-json 输入让模型真正看到图。
+    其余与 call_claude 完全同款（参数/env/解析）。"""
+    args = base_claude_args() + ["--input-format", "stream-json",
+                                 "--output-format", "stream-json", "--verbose"]
+    try:
+        proc = subprocess.run(
+            args, input=multimodal_stdin(prompt, images), capture_output=True, text=True,
+            env=_subprocess_env(), timeout=config.CLAUDE_TIMEOUT_SEC,
+        )
+    except subprocess.TimeoutExpired:
+        raise HTTPException(status_code=504, detail="claude 超时未返回")
+    if proc.returncode != 0:
+        raise HTTPException(status_code=502, detail=f"claude 进程出错: {proc.stderr[:500]}")
+    reply, stored = parse_claude_stream(proc.stdout)
+    if reply is None:
+        raise HTTPException(status_code=502, detail="claude 未返回结果")
+    return reply, stored
+
+
 def call_claude(prompt: str) -> tuple[str, list[dict]]:
     """起一次性 claude -p 子进程（prompt 走 stdin，读到 EOF 才开始），返回 (回复, stored)。"""
     args = base_claude_args() + ["--output-format", "stream-json", "--verbose"]

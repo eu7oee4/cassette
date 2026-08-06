@@ -1,11 +1,12 @@
 import SwiftUI
 
-/// 底部输入栏：笑脸(表情包)按钮 + 文字输入框 + 发送按钮。
+/// 底部输入栏：➕(附件) + 笑脸(表情包)按钮 + 文字输入框 + 发送按钮。
 struct InputBar: View {
     @Binding var text: String
     var stickersActive: Bool = false  // 表情面板是否已展开，用来高亮笑脸按钮
     var sending: Bool = false         // 正在等待后端回复：发送按钮转圈并禁用
-    var hasAttachments: Bool = false  // 有暂存待发的表情时，即使没文字也能发送
+    var hasAttachments: Bool = false  // 有暂存待发的表情/图片时，即使没文字也能发送
+    var onAttach: () -> Void = { }    // ➕：选照片（以后加文件）
     var onStickers: () -> Void = { }  // 展开/收起表情包面板
     let onSend: () -> Void
 
@@ -15,6 +16,15 @@ struct InputBar: View {
 
     var body: some View {
         HStack(alignment: .bottom, spacing: 10) {
+            // ➕：附件（照片；文件入口以后挂进来）
+            Button(action: onAttach) {
+                Image(systemName: "plus.circle")
+                    .font(.system(size: 22, weight: .regular))
+                    .foregroundStyle(sending ? Color(.systemGray3) : Color.theme)
+                    .frame(width: 32, height: 32)
+            }
+            .disabled(sending)
+
             // 笑脸按钮：展开表情包面板
             Button(action: onStickers) {
                 Image(systemName: stickersActive ? "face.smiling.inverse" : "face.smiling")
@@ -63,6 +73,39 @@ struct InputBar: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
+        .background(.bar)
+    }
+}
+
+/// 待发照片预览条：浮在输入框上方的缩略图行，点 ✕ 移除单张。
+struct PendingImagesBar: View {
+    let images: [Data]
+    let onRemove: (Int) -> Void
+
+    var body: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                ForEach(Array(images.enumerated()), id: \.offset) { idx, data in
+                    ZStack(alignment: .topTrailing) {
+                        if let img = UIImage(data: data) {
+                            Image(uiImage: img)
+                                .resizable()
+                                .scaledToFill()
+                                .frame(width: 56, height: 56)
+                                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                        }
+                        Button { onRemove(idx) } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .font(.system(size: 16))
+                                .foregroundStyle(.white, .black.opacity(0.55))
+                        }
+                        .offset(x: 5, y: -5)
+                    }
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+        }
         .background(.bar)
     }
 }
