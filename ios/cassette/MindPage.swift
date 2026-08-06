@@ -114,11 +114,18 @@ private struct MindRow: View {
             }
 
             // 被拦下的消息正文：TA 想说而没送出去的话（发出去的正文在聊天里，不重复放）。
+            // 带一句原因——不然只看到一段没头没尾的话，不知道为什么没收到。
             if entry.action == "message", entry.pushed != true, let c = trimmed(entry.content) {
-                HStack(alignment: .firstTextBaseline, spacing: 8) {
-                    Text("🔇")
-                    Text(c).font(.callout)
-                        .fixedSize(horizontal: false, vertical: true)
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        Text("🔇")
+                        Text(c).font(.callout)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    Text(blockedReason)
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                        .padding(.leading, 26)
                 }
             }
 
@@ -159,6 +166,17 @@ private struct MindRow: View {
 
     private var sourceBadge: String {
         entry.source == "chat" ? "🗨️ 聊天" : "🌙 醒来"
+    }
+
+    /// 这段话为什么没送出去（note 机器码翻成人话）。下次醒来 TA 会看到这段、自己决定要不要重说。
+    private var blockedReason: String {
+        switch entry.note {
+        case "stale_user_msg":   return "这段话没送出去——刚写完你正好先开口了，内容就过时了"
+        case "capped_daily":     return "这段话没送出去——今天的主动消息条数已达上限"
+        case "capped_interval":  return "这段话没送出去——距上一条主动消息还没到最小间隔"
+        case "capped_quiet":     return "这段话没送出去——你刚说过话，还在静默期里"
+        default:                 return "这段话没送出去——被打扰控制拦下了"
+        }
     }
 
     private var timeText: String {

@@ -61,6 +61,39 @@ def is_daytime(settings: dict, now: datetime) -> bool:
     return cur >= start or cur < end   # 跨零点，如 22:00~06:00
 
 
+# ---------- 上次没送出去的话 ----------
+# 被拦（撞上用户先开口 / 打扰控制）的正文不该白写：下次醒来摆到他面前，
+# 他自己决定重说、改说还是放弃。**不硬发**——插回时间线会让他对自己的言行失忆
+# （他当时并不知道自己"说过"），也会跟用户刚说的话撞车。
+UNSENT_MAX_AGE_SEC = 3 * 3600   # 超过 3 小时的就算了，世界已经变了
+
+_UNSENT_WHY = {
+    "stale_user_msg": "正好撞上{u}先开口了",
+    "capped_daily": "今天的主动消息条数用完了",
+    "capped_interval": "距上一条主动消息还没到最小间隔",
+    "capped_quiet": "{u}刚说过话、还在静默期里",
+}
+
+
+def unsent_block(u: str) -> str:
+    """上次想说但没送出去的那段话（给醒来 prompt 用）。没有则空串。
+    只看**最后一条** message 记录：后来成功发过消息，这事自然就翻篇了。"""
+    last_msg = next((w for w in reversed(state_store.read_wake_log(limit=50))
+                     if w.get("action") == "message"), None)
+    if not last_msg or last_msg.get("pushed"):
+        return ""
+    text = (last_msg.get("content") or "").strip()
+    if not text:
+        return ""
+    if int(time.time()) - int(last_msg.get("ts", 0)) > UNSENT_MAX_AGE_SEC:
+        return ""
+    why = _UNSENT_WHY.get(last_msg.get("note", ""), "被打扰控制拦下了").format(u=u)
+    when = pipeline.fmt_ts(int(last_msg.get("ts", 0)))
+    return (f"\n【你上次醒来（{when}）想说这段话，但{why}，没送出去：\n"
+            f"「{text}」\n"
+            f"现在还想说吗？还合适就重说一遍（措辞可以改），过时了就算了、别硬凑。】\n")
+
+
 # ---------- 醒来提示词 ----------
 def wake_prompt(settings: dict) -> str:
     u = config.user_name()
@@ -94,6 +127,9 @@ def wake_prompt(settings: dict) -> str:
                          "；".join(t[:60] for t in recent_stored[-8:] if t) + "】")
         memory_section = "\n" + "\n".join(lines) + "\n"
 
+    # 上次憋回去的话：让他自己决定要不要重提（别白想一场）。
+    unsent_section = unsent_block(u)
+
     # 表情库（持久化的清单；醒来发消息也能配表情）。不给改描述——那是聊天里的事。
     sb = pipeline.sticker_block(state_store.read_sticker_catalog(), allow_desc=False)
     sticker_section = f"\n{sb}\n" if sb else ""
@@ -108,7 +144,7 @@ def wake_prompt(settings: dict) -> str:
 
 【最近发生的，按时间顺序——对话 / 你自己醒来时的内心，看时间戳别搞混先后】
 {timeline_block}
-{memory_section}{sticker_section}{blocked_section}
+{memory_section}{unsent_section}{sticker_section}{blocked_section}
 想清楚这次要不要做点什么。想{u}了、有话想说就发消息；没什么可说的就安静醒着，不用硬找话。
 你还可以自己定下次醒来的时间（NEXT）：写了我保证到那个点把你醒一次；这中间你照样可能随机醒来，不受影响。范围 5 分钟~12 小时；没特别想法就写"无"（不定这个点，纯随机节奏）。{u}现在设的活跃频率偏好是「{freq_cn}」，你定 NEXT 时可以参考。
 严格按下面格式回答（四段都要，标签用英文、后跟冒号）：
