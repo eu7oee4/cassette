@@ -52,6 +52,16 @@ A few details:
 - If a chat turn is in flight, the wake-up yields to the next tick rather than talking nonsense from a stale context.
 - Repeated failures (an expired CLI login, say) trigger a 30-minute backoff instead of burning a doomed subprocess every tick.
 
+## History is editable (editing it = editing its memory)
+
+Every message has edit and copy buttons, and a long press deletes it; your own messages also offer "edit and re-reply", which clears everything after that message and has it answer again. All of this is purely local: the backend is stateless and the history is injected whole every turn, so **editing your local history is editing its memory** — it takes effect on the very next turn, no backend involved.
+
+Editing is more useful than it looks:
+
+- **Fix typos**: trivial slips get corrected in place — OCD-friendly, and no need to burn a regeneration on them.
+- **Fix small errors**: small factual mistakes — including ones in its own past replies — get corrected directly in the text, instead of re-generating a whole turn or correcting the model over and over; the history injected next turn is simply right.
+- **Tune the voice**: rewrite its past replies into the way you'd like it to speak, and you're doing example-based fine-tuning beyond the persona file — injected history is the strongest kind of demonstration. A few edits in, you find the exact companion you were looking for.
+
 ## Getting started
 
 You'll need: a Mac (the backend runs here), an iPhone (the frontend is an iOS app), the [claude CLI](https://claude.com/claude-code) installed and logged in (subscription quota only by default; an API key works too, but takes deleting one line — see Architecture, point 2), Python 3, and Xcode.
