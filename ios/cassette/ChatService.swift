@@ -275,8 +275,9 @@ struct ChatService {
 
     // MARK: - 内部请求工具
 
-    private func authedRequest(_ method: String, _ path: String, jsonBody: Data? = nil,
-                               timeout: TimeInterval = 20) throws -> URLRequest {
+    // internal：MemoryPage 等功能页的服务扩展也走这两个（统一鉴权/错误翻译，别另起一套）
+    func authedRequest(_ method: String, _ path: String, jsonBody: Data? = nil,
+                       timeout: TimeInterval = 20) throws -> URLRequest {
         guard let url = URL(string: BackendConfig.baseURL + path) else { throw ChatServiceError.badURL }
         var req = URLRequest(url: url)
         req.httpMethod = method
@@ -290,7 +291,7 @@ struct ChatService {
     }
 
     /// 发请求 + 统一错误翻译 + 非 2xx 抛后端 detail。
-    private func perform(_ request: URLRequest) async throws -> Data {
+    func perform(_ request: URLRequest) async throws -> Data {
         let data: Data
         let response: URLResponse
         do {

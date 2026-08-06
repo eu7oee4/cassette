@@ -101,6 +101,8 @@ struct ContentView: View {
     @ViewBuilder
     private func destination(for page: DrawerPage) -> some View {
         switch page {
+        case .memory:
+            MemoryPage()
         case .settings:
             ProactiveSettingsView(store: proactiveStore)
         default:
