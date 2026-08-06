@@ -28,7 +28,7 @@ struct ProactiveSettingsView: View {
                 } header: {
                     Text("昵称")
                 } footer: {
-                    Text("TA 的昵称也是顶栏标题。人称代词会用在聊天、内心独白和记忆里。")
+                    Text("TA 的昵称也是顶栏标题。\n人称代词会用在聊天、内心独白和记忆里。")
                 }
 
                 Section {
