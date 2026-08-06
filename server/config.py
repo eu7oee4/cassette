@@ -47,3 +47,10 @@ BARK_ICON = os.environ.get("BARK_ICON", "").strip()   # 通知图标（公网可
 # wake 调度器（主动性）：总开关 + tick 间隔（每 tick 只做本地预判，不叫模型）
 PROACTIVE_ENABLED = os.environ.get("PROACTIVE_ENABLED", "1") != "0"
 WAKE_TICK_SEC = int(os.environ.get("WAKE_TICK_SEC", "300"))
+
+# 可选：长期记忆 Ombre-Brain（P0luz 的开源项目 https://github.com/P0luz/Ombre-Brain ，
+# 自部署服务，只对接不 vendor）。没跑 Ombre / 中途挂了 → 自动退回纯聊天，永不因记忆层断掉。
+OMBRE_ENABLED = os.environ.get("OMBRE_ENABLED", "1") != "0"
+OMBRE_MCP_URL = os.environ.get("OMBRE_MCP_URL", "http://localhost:18001/mcp")
+# Ombre 的 MCP 静态密钥（Ombre 配 mcp_auth_mode: token 时用；留空=对方免鉴权）
+OMBRE_MCP_TOKEN = os.environ.get("OMBRE_MCP_TOKEN", "").strip()

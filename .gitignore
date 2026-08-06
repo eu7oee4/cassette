@@ -60,3 +60,4 @@ xcuserdata/
 # ===== 日志 =====
 *.log
 logs/
+nohup.out

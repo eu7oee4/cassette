@@ -80,6 +80,20 @@ def wake_prompt(settings: dict) -> str:
     freq_cn = {"low": "低（少打扰）", "mid": "中", "high": "高（可以勤快点）"}.get(
         settings.get("day_freq" if is_daytime(settings, now) else "night_freq", "low"), "中")
 
+    # 长期记忆（Ombre 挂上才有）：引导 + 近 12h 已存清单——不给清单模型会把
+    # 时间线里同一件事每次醒来都存一遍（mianmian 实踩）。
+    memory_section = ""
+    if pipeline.ombre_alive():
+        lines = ["【你有自己的长期记忆（Ombre 工具）：想不起细节可以先 breath；"
+                 "这次醒来若有值得留住的，用 hold 存下来。】"]
+        recent_stored = [s.get("text", "") for w in state_store.read_wake_log(limit=100)
+                         if int(w.get("ts", 0)) > int(time.time()) - 12 * 3600
+                         for s in (w.get("stored") or [])]
+        if recent_stored:
+            lines.append("【最近 12 小时你已经存过这些，别重复存：" +
+                         "；".join(t[:60] for t in recent_stored[-8:] if t) + "】")
+        memory_section = "\n" + "\n".join(lines) + "\n"
+
     # 表情库（持久化的清单；醒来发消息也能配表情）。不给改描述——那是聊天里的事。
     sb = pipeline.sticker_block(state_store.read_sticker_catalog(), allow_desc=False)
     sticker_section = f"\n{sb}\n" if sb else ""
@@ -93,7 +107,7 @@ def wake_prompt(settings: dict) -> str:
 
 【最近发生的，按时间顺序——对话 / 你自己醒来时的内心，看时间戳别搞混先后】
 {timeline_block}
-{sticker_section}{blocked_section}
+{memory_section}{sticker_section}{blocked_section}
 想清楚这次要不要做点什么。想{u}了、有话想说就发消息；没什么可说的就安静醒着，不用硬找话。
 你还可以自己定下次醒来的时间（NEXT）：写了我保证到那个点把你醒一次；这中间你照样可能随机醒来，不受影响。范围 5 分钟~12 小时；没特别想法就写"无"（不定这个点，纯随机节奏）。{u}现在设的活跃频率偏好是「{freq_cn}」，你定 NEXT 时可以参考。
 严格按下面格式回答（四段都要，标签用英文、后跟冒号）：
@@ -193,7 +207,7 @@ def push_block(settings: dict) -> Optional[tuple[str, str]]:
 def try_push(text: str, settings: dict, thoughts: str = "", trigger: str = "",
              sticker_ids: Optional[list] = None, bark_text: str = "",
              next_wake_at: Optional[int] = None, next_wake_note: str = "",
-             started_ts: Optional[int] = None) -> bool:
+             started_ts: Optional[int] = None, stored: Optional[list] = None) -> bool:
     """硬顶闸（每天条数 + 最小间隔 + 静默）。只拦推送、不拦思考。通过 → 进 outbox + Bark + 追加窗口。
     thoughts＝这次醒来的内心，一并记进日志（连被抑制的也记）。
     sticker_ids＝这条消息附带的表情（app 按 id 取本地图上屏）；
@@ -208,6 +222,8 @@ def try_push(text: str, settings: dict, thoughts: str = "", trigger: str = "",
         return False
     base = {"ts": now_ts, "time": pipeline.now_str(), "source": "wake", "action": "message",
             "trigger": trigger, "thoughts": thoughts}
+    if stored:
+        base["stored"] = stored   # 这次醒来存/改了什么记忆（Mind 展示 + "别重复存"清单）
     if next_wake_at:
         base["next_wake_at"] = next_wake_at
         base["next_wake_note"] = next_wake_note
@@ -281,11 +297,13 @@ def do_wake_sync(settings: dict, trigger: str) -> dict:
         result["pushed"] = try_push(app_text, settings, thoughts, trigger,
                                     sticker_ids=sticker_ids, bark_text=bark_text,
                                     next_wake_at=next_wake_at, next_wake_note=nw_note,
-                                    started_ts=now_ts)
+                                    started_ts=now_ts, stored=stored)
     else:
         result["action"] = "none"   # none，或 message 但 content 空 → 兜底成 none
         entry = {"ts": now_ts, "time": pipeline.now_str(), "source": "wake", "action": "none",
                  "trigger": trigger, "thoughts": thoughts}
+        if stored:
+            entry["stored"] = stored
         if next_wake_at:
             entry["next_wake_at"] = next_wake_at
             entry["next_wake_note"] = nw_note

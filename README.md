@@ -10,6 +10,7 @@ Give it a name, write it a persona, add a few stickers — and it will "wake up"
 
 - **Feels like a real chat app**: token-by-token streaming, Markdown rendering (code blocks with syntax highlighting and one-tap copy), edit/delete/regenerate on any message, custom avatars and display names, WeChat-style inverted scrolling with a new-message pill.
 - **Wakes up on its own**: a backend scheduler wakes the model at the frequency you set. It reads the recent conversation and its own inner monologue from the last few wake-ups, then decides whether to say something or stay quiet. It can also set its own alarm ("wake me in 3 hours") — mention that you're going to bed and it will quietly schedule a wake-up for later.
+- **Long-term memory (optional)**: integrates [Ombre-Brain](https://github.com/P0luz/Ombre-Brain) (P0luz's open-source memory system, a self-hosted Docker service) — relevant memories surface at the start of a conversation, things worth keeping get saved on the fly, and wake-ups think with memory too; what it stored or edited shows up as gray hints in chat. Without Ombre running it falls back to plain chat, business as usual.
 - **Sends stickers**: add images from your photo library and the model writes a one-line description of each by looking at it; later it picks one that fits the mood and sends it to you (both in chat and when it wakes up), and it will rewrite a description it thinks is wrong. To ship a default set, drop PNGs into `ios/cassette/DefaultStickers/` — the filename becomes the initial description, seeded on first launch.
 - **Has a sense of time**: it knows whether it's "late Wednesday night" or "Saturday morning", and that you took 3 hours to reply. All of it is injected into the prompt, so it won't wish you good night in the afternoon.
 - **Doesn't lose messages**: lock your phone, background the app, or drop off the network mid-generation — the backend runs to completion, the reply goes into a pending outbox, and the app picks it up when it returns to the foreground; with [Bark](https://github.com/Finb/Bark) configured, your phone gets a push too. The reverse case is covered as well: if the request never reached the backend, the app reconciles with it and tells you to resend after about a minute; if that turn produced nothing at all, you get an explicit notice. A turn never just quietly disappears.
@@ -102,6 +103,10 @@ Then open `ios/cassette.xcodeproj` in Xcode and set two values in `Config.swift`
 
 Run it, name the two of you in the first-launch flow, and start talking.
 
+### 4. Long-term memory (optional)
+
+Self-host an [Ombre-Brain](https://github.com/P0luz/Ombre-Brain) instance (P0luz's open-source memory system, one Docker command) and point `OMBRE_MCP_URL` in `.env` at it; if Ombre has static-token auth enabled (`mcp_auth_mode: "token"`, recommended), put the same secret in `OMBRE_MCP_TOKEN`. The backend probes it before every call: if Ombre isn't there — not installed, disabled, or down — it falls back to plain chat, and the memory layer can never take the app down with it.
+
 ## Project layout
 
 ```
@@ -125,19 +130,18 @@ ios/cassette/     # SwiftUI app: chat UI, sticker library, settings, local persi
 - Chat history lives in the app sandbox at `Documents/chat_history.json`; the backend keeps only a shadow snapshot of the recent window (≤300 messages).
 - Every endpoint except the `/health` check requires the `X-Auth` shared key; with no key configured they all refuse requests (fail closed), and the comparison is constant-time.
 - The wake log at `server/state/wake_log.jsonl` is append-only. It holds the full inner monologue from every wake-up, including the text of messages that interruption control blocked from ever being sent, and it is never pruned (the pending outbox has a 7-day cleanup; this doesn't). It never leaves your Mac, but it is the single most intimate file in the project — worth knowing it exists.
-- The model subprocess runs with `--tools ""`: no tool access at all, conversation only.
+- The model subprocess runs with `--tools ""` by default: conversation only. With Ombre mounted, only the memory-tool whitelist is allowed (`--strict-mcp-config` shuts out any other MCP servers on the machine, `--allowedTools` pre-approves so nothing prompts) — built-in tools like Bash and file access are never enabled, and `--dangerously-skip-permissions` is never used.
 - Keep the backend on your LAN or a Tailscale network. Don't expose it raw to the public internet.
 
 ## Roadmap
 
 - **Seamless chat ⇄ coding mode**: switch from `claude -p` chat mode straight into a coding session inside tmux — same persona, continuous memory and awareness — so you can have the Claude Code on your Mac run tasks for you from your phone.
-- **Long-term memory**: integrate [Ombre-Brain](https://github.com/P0luz/Ombre-Brain) (P0luz's open-source memory system, mounted as an external service over MCP) — memories surfacing at the start of a session, saved on the fly, continuous across sessions.
 - **Plugin ecosystem**: tool families (browser, web generation, and so on) as standalone plugin repos, mounted dynamically by the backend and installable from inside the app; the registry is a hardcoded allowlist, and install will never accept an arbitrary URL.
 - **Web client**: the client is thin enough that it deserves a version that runs in a browser.
 
 ## Credits
 
-The iOS app uses [MarkdownUI](https://github.com/gonzalezreal/swift-markdown-ui), [Highlightr](https://github.com/raspu/Highlightr) and [swift-markdown](https://github.com/swiftlang/swift-markdown); push notifications use [Bark](https://github.com/Finb/Bark).
+Long-term memory integrates [Ombre-Brain](https://github.com/P0luz/Ombre-Brain) — P0luz's open-source memory system; this project connects to it as an external service and does not vendor its code. The iOS app uses [MarkdownUI](https://github.com/gonzalezreal/swift-markdown-ui), [Highlightr](https://github.com/raspu/Highlightr) and [swift-markdown](https://github.com/swiftlang/swift-markdown); push notifications use [Bark](https://github.com/Finb/Bark).
 
 ## License
 

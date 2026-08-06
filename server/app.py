@@ -162,6 +162,15 @@ def finalize_chat_reply(reply: str, stored: list[dict], req: ChatRequest,
     except Exception as e:
         logerr(f"写 recent_window 失败: {e}")
 
+    # 聊天里存/改的记忆也记进 wake_log（source=chat，无 thoughts 不进时间线）：
+    # 醒来的"别重复存"清单靠它才看得到聊天里已存过的。
+    if stored:
+        try:
+            state_store.append_wake_log({"ts": int(time.time()), "time": pipeline.now_str(),
+                                         "source": "chat", "stored": stored})
+        except Exception as e:
+            logerr(f"记 chat stored 失败: {e}")
+
     return ChatResponse(
         reply=reply,
         session_id=req.session_id or str(uuid.uuid4()),

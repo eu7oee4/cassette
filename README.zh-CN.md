@@ -10,6 +10,7 @@
 
 - **像聊天软件一样聊**：流式逐字回复、Markdown 渲染（代码块带高亮和一键复制）、消息编辑/删除/重新生成、头像昵称自定义、微信式的倒置滚动和新消息角标。
 - **自主醒来**：后端调度器按你设置的频率随机唤醒模型，它读一遍最近的对话和自己上几次醒来时的内心独白，自己决定发消息还是安静待着。它也可以给自己定闹钟（"3 小时后叫我"），聊天里说到"我去睡了"，它会顺手安排一次到点的醒来。
+- **长期记忆（可选）**：对接 [Ombre-Brain](https://github.com/P0luz/Ombre-Brain)（P0luz 的开源记忆系统，自部署 Docker 服务）——聊天开场相关记忆自然浮现，值得留住的事它随手存下，醒来时也带着记忆想事；存了什么、改了什么在聊天里以灰字可见。没跑 Ombre 就自动退回纯聊天，一切照常。
 - **发表情包**：从相册往表情库里加图，模型看图自动写一句描述；之后它会在合适的情绪下挑一张发给你（聊天里和醒来时都会），觉得描述不准还会自己改。想预置一套默认表情，把图（png）放进 `ios/cassette/DefaultStickers/` 即可——文件名就是初始描述，首启自动入库。
 - **有时间感**：知道现在是"周三深夜"还是"周六上午"，知道你隔了 3 小时才回消息——这些都注入在 prompt 里，它不会在下午跟你说晚安。
 - **消息不丢**：生成中途锁屏、切后台、断网，后端照跑到完，回复进"待送达盒子"，app 回前台自动补上屏；配了 [Bark](https://github.com/Finb/Bark) 的话手机还会收到推送。反过来的情况也兜住了：请求根本没到后端，app 会和后端对账、一分钟左右提示你重发；那轮模型空产出，也会收到明确提示——一轮对话不会不明不白地消失。
@@ -102,6 +103,10 @@ cp Config.swift.example Config.swift
 
 跑起来，首启引导里给它和自己起好名字，开聊。
 
+### 4. 长期记忆（可选）
+
+自部署一个 [Ombre-Brain](https://github.com/P0luz/Ombre-Brain)（P0luz 的开源记忆系统，Docker 一条命令起），在 `.env` 里把 `OMBRE_MCP_URL` 指过去；Ombre 侧开了静态密钥鉴权（`mcp_auth_mode: "token"`，推荐）就把同一个密钥填进 `OMBRE_MCP_TOKEN`。后端每次调用前会快速探活：Ombre 不在（没装、没开、中途挂了）就自动退回纯聊天，永不因记忆层断掉。
+
 ## 项目结构
 
 ```
@@ -123,19 +128,18 @@ ios/cassette/     # SwiftUI app：聊天界面、表情库、设置页、本地�
 - 聊天记录存 app 沙盒 `Documents/chat_history.json`；后端只保留一份最近窗口的影子快照（≤300 条）。
 - 除 `/health` 健康检查外，所有接口都要过 `X-Auth` 共享密钥认证；没配密钥时这些接口全部拒绝（fail closed），密钥比较用常数时间。
 - 醒来日志 `server/state/wake_log.jsonl` 是 append-only 的，存着每次醒来的完整内心独白、连同被打扰控制拦下没发出的消息正文，且不会自动清理（待送达盒子有 7 天清理，它没有）。它不出你的 Mac，但整个项目里私密浓度最高的就是这个文件，值得知道它的存在。
-- 模型子进程 `--tools ""`，没有任何工具权限，纯对话。
+- 模型子进程默认 `--tools ""`，纯对话；挂了 Ombre 时也只放行记忆工具白名单（`--strict-mcp-config` 屏蔽机器上其它 MCP，`--allowedTools` 预批准免弹权限），Bash / 文件读写这类内置工具永远不开，也从不使用 `--dangerously-skip-permissions`。
 - 建议后端只暴露在局域网或 Tailscale 内网，不要裸奔公网。
 
 ## Roadmap
 
 - **聊天模式 ⇄ 写代码模式无缝切换**：从 `claude -p` 的 chat 模式一键切进 tmux 会话里的 code 模式——同一个人设、连续的记忆和意识，用手机就能让 Mac 上的 Claude Code 帮你跑代码。
-- **长期记忆**：对接 [Ombre-Brain](https://github.com/P0luz/Ombre-Brain)（P0luz 的开源记忆系统，作为外部服务经 MCP 挂载）——开场浮现、随手存取、跨会话连续。
 - **插件生态**：工具族（浏览器、网页生成等）做成独立插件仓，后端动态挂载，app 内一键装卸；registry 采用写死白名单，install 绝不接受任意 URL。
 - **Web 客户端**：客户端足够薄，值得一个浏览器里的版本。
 
 ## 致谢
 
-iOS 端用到 [MarkdownUI](https://github.com/gonzalezreal/swift-markdown-ui)、[Highlightr](https://github.com/raspu/Highlightr)、[swift-markdown](https://github.com/swiftlang/swift-markdown)；推送用 [Bark](https://github.com/Finb/Bark)。
+长期记忆对接 [Ombre-Brain](https://github.com/P0luz/Ombre-Brain)——P0luz 的开源记忆系统，本项目只作为外部服务对接、不内嵌其代码。iOS 端用到 [MarkdownUI](https://github.com/gonzalezreal/swift-markdown-ui)、[Highlightr](https://github.com/raspu/Highlightr)、[swift-markdown](https://github.com/swiftlang/swift-markdown)；推送用 [Bark](https://github.com/Finb/Bark)。
 
 ## License
 

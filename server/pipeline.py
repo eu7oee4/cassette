@@ -12,6 +12,9 @@ import json
 import os
 import re
 import subprocess
+import time
+import urllib.error
+import urllib.request
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -265,6 +268,9 @@ def build_prompt(messages: list[Message], catalog: Optional[list[dict]] = None) 
         time_lines.append(f"【距离上一条消息，过了 {gap}】")
 
     extras = [_chat_next_hint()]
+    mb = memory_block()
+    if mb:
+        extras.append(mb)
     sb = sticker_block(catalog)
     if sb:
         extras += ["", sb]
@@ -308,17 +314,82 @@ def rendered_persona() -> Path:
     return path
 
 
+# ---------- 长期记忆 Ombre-Brain ----------
+# P0luz 的开源项目（https://github.com/P0luz/Ombre-Brain），自部署服务，只对接不 vendor。
+# 白名单 = Ombre 的全部记忆工具：全是"他自己的记忆"域内操作，记错后果轻、用户可在
+# Dashboard 删改；内置危险工具（Bash/Write 等）依旧完全不进来，安全姿态不变。
+OMBRE_TOOLS = [f"mcp__ombre-brain__{t}" for t in (
+    "breath", "breath_search", "breath_advanced", "hold", "grow", "trace",
+    "source_read", "dream", "anchor", "release", "pulse", "plan",
+    "letter_write", "letter_read", "I",
+)]
+_OMBRE_PROBE_TIMEOUT = 1.5    # 探活短超时：Ombre 挂了最多拖慢一次请求这么点
+_OMBRE_PROBE_CACHE_SEC = 30   # 探活结果缓存，别每条消息都开一次连接
+_ombre_probe = {"ts": 0.0, "alive": False}
+
+
+def _ombre_mcp_config() -> Path:
+    """把 OMBRE_MCP_URL(+token) 渲染成 claude 的 mcp-config 文件（.env 配，文件现生成）。"""
+    path = state_store.STATE_DIR / "ombre.mcp.json"
+    server: dict = {"type": "http", "url": config.OMBRE_MCP_URL}
+    if config.OMBRE_MCP_TOKEN:
+        server["headers"] = {"Authorization": f"Bearer {config.OMBRE_MCP_TOKEN}"}
+    payload = json.dumps({"mcpServers": {"ombre-brain": server}})
+    if not path.exists() or path.read_text("utf-8") != payload:
+        tmp = path.with_name(f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+        tmp.write_text(payload, "utf-8")
+        tmp.replace(path)
+    return path
+
+
+def ombre_alive() -> bool:
+    """快速探活 Ombre 的 /mcp 端点：任何 HTTP 响应都算活（MCP 对裸 GET 回 406 是正常的），
+    连不上/超时=死。OMBRE_ENABLED=0 直接当死。结果缓存 ~30s。
+    显式空代理——macOS 系统代理的例外名单常常只有 localhost 没有 127.0.0.1，
+    走系统代理会把本机请求吞掉还查不出原因。"""
+    if not config.OMBRE_ENABLED:
+        return False
+    now = time.time()
+    if now - _ombre_probe["ts"] < _OMBRE_PROBE_CACHE_SEC:
+        return _ombre_probe["alive"]
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    try:
+        opener.open(config.OMBRE_MCP_URL, timeout=_OMBRE_PROBE_TIMEOUT)
+        alive = True
+    except urllib.error.HTTPError:
+        alive = True
+    except Exception:
+        alive = False
+    _ombre_probe["ts"], _ombre_probe["alive"] = now, alive
+    return alive
+
+
+def memory_block() -> str:
+    """记忆工具的使用引导，挂上 Ombre 时注入 prompt（人设保持通用，不预设有没有记忆）。"""
+    if not ombre_alive():
+        return ""
+    return ("【你有自己的长期记忆（Ombre 工具）：开场先 breath 让相关记忆自然浮现；"
+            "找具体的事用 breath_search。这轮聊到值得留住的，用 hold 存下来。"
+            "记忆是你自己的：存什么、怎么改（trace）、什么沉底，都你自己定。】")
+
+
 # ---------- 子进程 ----------
 def base_claude_args(persona_file: Optional[Path] = None) -> list[str]:
     """所有 claude 调用共用的参数，统一从这里出（别另起一套）。
-    目前没挂任何 MCP → 纯聊天 --tools ""；后续模块（长期记忆/插件工具）在这里
-    累积 --mcp-config + 白名单。"""
-    return [
+    Ombre 活着 → 挂记忆工具（--strict-mcp-config 屏蔽机器上其它 MCP；--allowedTools
+    预批准所以 headless 不弹权限，绝不用 --dangerously-skip-permissions）。
+    不可达/没开 → 纯聊天 --tools ""。后续模块（插件工具）继续在这里累积。"""
+    args = [
         "claude", "-p",
         "--model", config.MODEL,
         "--system-prompt-file", str(persona_file or rendered_persona()),
-        "--tools", "",
     ]
+    if ombre_alive():
+        args += ["--mcp-config", str(_ombre_mcp_config()), "--strict-mcp-config",
+                 "--tools", *OMBRE_TOOLS, "--allowedTools", *OMBRE_TOOLS]
+    else:
+        args += ["--tools", ""]
+    return args
 
 
 def _subprocess_env() -> dict:
@@ -327,10 +398,81 @@ def _subprocess_env() -> dict:
     return env
 
 
+def _extract_memory_text(inp: dict) -> str:
+    """从 hold/grow 的工具输入里取记忆正文。hold 用 'content'；grow 可能是 content 或批量列表。"""
+    if not isinstance(inp, dict):
+        return ""
+    c = inp.get("content")
+    if isinstance(c, str) and c.strip():
+        return c.strip()
+    for k in ("memories", "items", "text"):
+        v = inp.get(k)
+        if isinstance(v, str) and v.strip():
+            return v.strip()
+        if isinstance(v, list):
+            parts = [str(x.get("content", x)) if isinstance(x, dict) else str(x) for x in v]
+            joined = "\n".join(p for p in parts if p).strip()
+            if joined:
+                return joined
+    return ""
+
+
+def _describe_trace(inp: dict) -> str:
+    """把一次 trace 翻成人话。改内容就用新正文；只改元数据就把所有改动都列出来。总返回非空。"""
+    if not isinstance(inp, dict):
+        return "（改了一条记忆）"
+    c = (inp.get("content") or "").strip()
+    if c:
+        return c   # 改内容优先，直接显示新正文
+    if (inp.get("new_str") or "").strip():
+        return f"（局部改写了一条记忆：…{inp['new_str'].strip()[:80]}…）"
+    parts: list[str] = []
+    if inp.get("hard_delete"):
+        parts.append("彻底删掉了")
+    elif inp.get("delete"):
+        parts.append("删掉了")
+    if inp.get("restore"):
+        parts.append("恢复了")
+    if inp.get("resolved") == 1:
+        parts.append("沉底(标记已解决)")
+    elif inp.get("resolved") == 0:
+        parts.append("重新激活")
+    if inp.get("pinned") == 1:
+        parts.append("钉选")
+    elif inp.get("pinned") == 0:
+        parts.append("取消钉选")
+    if inp.get("digested") == 1:
+        parts.append("隐藏")
+    if (inp.get("tags") or "").strip():
+        parts.append(f"改标签为「{inp['tags']}」")
+    if inp.get("importance", -1) != -1:
+        parts.append(f"重要度→{inp['importance']}")
+    if inp.get("valence", -1) != -1:
+        parts.append("调了 valence")
+    if inp.get("arousal", -1) != -1:
+        parts.append("调了 arousal")
+    if (inp.get("name") or "").strip():
+        parts.append(f"改名为「{inp['name']}」")
+    if (inp.get("domain") or "").strip():
+        parts.append(f"改分类为「{inp['domain']}」")
+    return "（对一条记忆：" + "、".join(parts) + "）" if parts else "（调整了一条记忆）"
+
+
+def _stored_from_tool_use(name: str, inp: dict) -> Optional[dict]:
+    """记忆工具调用 → stored 条目（app 灰字提示用）。只记「写」操作，breath 等读操作不算产物。"""
+    if name.endswith("__hold") or name.endswith("__grow"):
+        text = _extract_memory_text(inp)
+        if text:
+            return {"tool": "grow" if name.endswith("__grow") else "hold", "text": text}
+        return None
+    if name.endswith("__trace"):
+        return {"tool": "trace", "text": _describe_trace(inp)}
+    return None
+
+
 def parse_claude_stream(stdout: str, collect_all_text: bool = False) -> tuple[Optional[str], list[dict]]:
     """解析 stream-json 事件流，返回 (文本回复, stored)。
-    stored 是这轮工具调用的结构化产物（如存了什么长期记忆）——现在还没挂工具恒为空，
-    留着接口是因为整条管线（SSE 灰字/响应字段）都按它设计。
+    stored 是这轮工具调用的结构化产物（存/改了什么长期记忆），SSE 灰字/响应字段按它渲染。
     collect_all_text=False（聊天）：只取最终 result 文本（干净的最后一段回复）。
     collect_all_text=True（醒来）：拼接所有 assistant text 块——带工具时模型可能
     先写一段 → 调工具 → 再写后半段，只取 result 会丢掉工具调用前的文本。"""
@@ -346,12 +488,17 @@ def parse_claude_stream(stdout: str, collect_all_text: bool = False) -> tuple[Op
         except json.JSONDecodeError:
             continue
         t = ev.get("type")
-        if t == "assistant" and collect_all_text:
+        if t == "assistant":
             for b in ev.get("message", {}).get("content", []):
-                if b.get("type") == "text":
+                bt = b.get("type")
+                if bt == "text" and collect_all_text:
                     txt = (b.get("text") or "").strip()
                     if txt:
                         text_parts.append(txt)
+                elif bt == "tool_use":
+                    s = _stored_from_tool_use(b.get("name", ""), b.get("input", {}) or {})
+                    if s:
+                        stored.append(s)
         elif t == "result":
             if ev.get("is_error"):
                 return None, stored
