@@ -369,8 +369,8 @@ def memory_block() -> str:
     if not ombre_alive():
         return ""
     return ("【你有自己的长期记忆（Ombre 工具）：开场先 breath 让相关记忆自然浮现；"
-            "找具体的事用 breath_search。这轮聊到值得留住的，用 hold 存下来。"
-            "记忆是你自己的：存什么、怎么改（trace）、什么沉底，都你自己定。】")
+            "找具体的事用 breath_search。这轮聊到值得留住的，用 hold 存下来，"
+            "记得给条简短的 title。记忆是你自己的：存什么、怎么改（trace）、什么沉底，都你自己定。】")
 
 
 # ---------- 子进程 ----------

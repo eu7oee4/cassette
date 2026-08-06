@@ -54,3 +54,6 @@ OMBRE_ENABLED = os.environ.get("OMBRE_ENABLED", "1") != "0"
 OMBRE_MCP_URL = os.environ.get("OMBRE_MCP_URL", "http://localhost:18001/mcp")
 # Ombre 的 MCP 静态密钥（Ombre 配 mcp_auth_mode: token 时用；留空=对方免鉴权）
 OMBRE_MCP_TOKEN = os.environ.get("OMBRE_MCP_TOKEN", "").strip()
+# Ombre 的 REST 面（记忆页数据源）：默认从 MCP URL 推；Dashboard 密码换 cookie。
+OMBRE_REST_URL = os.environ.get("OMBRE_REST_URL", "").strip() or OMBRE_MCP_URL.rsplit("/mcp", 1)[0]
+OMBRE_DASHBOARD_PASSWORD = os.environ.get("OMBRE_DASHBOARD_PASSWORD", "").strip()

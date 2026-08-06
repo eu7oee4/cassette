@@ -23,7 +23,10 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
+import urllib.parse
+
 import config
+import ombre_rest
 import pipeline
 import sse
 import state_store
@@ -439,3 +442,77 @@ def post_pending_ack(body: AckIn, x_auth: Optional[str] = Header(default=None, a
     verify_auth(x_auth)
     state_store.outbox_ack(body.ids)
     return {"ok": True}
+
+
+# ---------- 记忆页（Ombre REST 代理）----------
+# 读=列表/搜索/详情，写=官方 /edit /forget 透传。Ombre 不在 → ombre_rest 抛 502/503，
+# app 显式提示"记忆服务不在线"，不影响聊天。
+
+@app.get("/memories")
+def list_memories(sort: str = "created", q: str = "",
+                  x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
+    """记忆列表。sort: created(最新创建，默认) / activity(活跃度分)。带 q= 走搜索。"""
+    verify_auth(x_auth)
+    if q.strip():
+        return ombre_rest.call("/api/search?q=" + urllib.parse.quote(q.strip()))
+    mode = "score" if sort == "activity" else "created_desc"
+    return ombre_rest.call(f"/api/buckets?sort={mode}")
+
+
+@app.get("/memories/{mem_id}")
+def memory_detail(mem_id: str, x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
+    verify_auth(x_auth)
+    return ombre_rest.call(f"/api/bucket/{urllib.parse.quote(mem_id)}")
+
+
+class MemoryEditIn(BaseModel):
+    # 官方 /edit 的字段面（白名单在 Ombre 侧再校验一遍，未知字段会被它拒绝）
+    name: Optional[str] = None
+    title: Optional[str] = None
+    tags: Optional[list] = None
+    domain: Optional[list] = None
+    importance: Optional[int] = None
+    resolved: Optional[bool] = None
+    pinned: Optional[bool] = None
+    content: Optional[str] = None
+
+
+@app.post("/memories/{mem_id}/edit")
+def memory_edit(mem_id: str, body: MemoryEditIn,
+                x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
+    verify_auth(x_auth)
+    fields = {k: v for k, v in body.model_dump().items() if v is not None}
+    if not fields:
+        raise HTTPException(status_code=400, detail="没有要改的字段")
+    return ombre_rest.call(f"/api/bucket/{urllib.parse.quote(mem_id)}/edit", fields)
+
+
+@app.post("/memories/{mem_id}/forget")
+def memory_forget(mem_id: str, x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
+    verify_auth(x_auth)
+    return ombre_rest.call(f"/api/bucket/{urllib.parse.quote(mem_id)}/forget", {})
+
+
+# ---------- 心流日志（wake_log 时间线）----------
+@app.get("/mind")
+def mind(limit: int = 100, x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
+    """醒来日志尾部，倒序（最新在前）。只挑对用户有意义的字段，别把整条内部记录裸奔出去。"""
+    verify_auth(x_auth)
+    limit = min(max(limit, 1), 300)
+    items = []
+    for w in reversed(state_store.read_wake_log(limit=limit)):
+        entry = {
+            "ts": w.get("ts"),
+            "source": w.get("source", "wake"),
+            "action": w.get("action", ""),
+            "thoughts": (w.get("thoughts") or "").strip(),
+            "content": (w.get("content") or "").strip(),
+            "pushed": w.get("pushed"),
+            "note": w.get("note", ""),
+            "stored": w.get("stored") or [],
+            "next_wake_note": w.get("next_wake_note", ""),
+        }
+        # 空壳（无内心/无产出/无消息）不给 app：多半是 error 或纯调度记录
+        if entry["thoughts"] or entry["stored"] or entry["content"]:
+            items.append(entry)
+    return {"items": items}
