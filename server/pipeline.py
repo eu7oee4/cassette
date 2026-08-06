@@ -508,26 +508,30 @@ def parse_claude_stream(stdout: str, collect_all_text: bool = False) -> tuple[Op
     return (result_text.strip() if result_text else None), stored
 
 
-def multimodal_stdin(prompt: str, images: list) -> str:
-    """带图调用的 stdin 载荷：一条含 [text, image...] 的 user 消息（stream-json 输入格式）。
-    images 元素带 .data(base64)/.media_type（app.py 的 ImageInput）。非流式和流式共用。"""
+def multimodal_stdin(prompt: str, images: list, file_blocks: Optional[list[dict]] = None) -> str:
+    """带图/文件调用的 stdin 载荷：一条含 [text, image, document...] 的 user 消息
+    （stream-json 输入格式）。images 元素带 .data(base64)/.media_type（app.py 的
+    ImageInput）；file_blocks 是 app.py _file_to_block 转好的 document block。"""
     content: list[dict] = [{"type": "text", "text": prompt}]
     for img in images:
         content.append({"type": "image",
                         "source": {"type": "base64", "media_type": img.media_type,
                                    "data": img.data}})
+    content.extend(file_blocks or [])
     return json.dumps({"type": "user",
                        "message": {"role": "user", "content": content}}) + "\n"
 
 
-def call_claude_multimodal(prompt: str, images: list) -> tuple[str, list[dict]]:
-    """带图的一次性调用（非流式回退路）：stream-json 输入让模型真正看到图。
+def call_claude_multimodal(prompt: str, images: list,
+                           file_blocks: Optional[list[dict]] = None) -> tuple[str, list[dict]]:
+    """带图/文件的一次性调用（非流式回退路）：stream-json 输入让模型真正看到。
     其余与 call_claude 完全同款（参数/env/解析）。"""
     args = base_claude_args() + ["--input-format", "stream-json",
                                  "--output-format", "stream-json", "--verbose"]
     try:
         proc = subprocess.run(
-            args, input=multimodal_stdin(prompt, images), capture_output=True, text=True,
+            args, input=multimodal_stdin(prompt, images, file_blocks),
+            capture_output=True, text=True,
             env=_subprocess_env(), timeout=config.CLAUDE_TIMEOUT_SEC,
         )
     except subprocess.TimeoutExpired:

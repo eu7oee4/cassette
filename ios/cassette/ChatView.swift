@@ -10,6 +10,7 @@ struct ChatView: View {
     var onTapChatArea: () -> Void = { }            // 点聊天空白区
     var onTapAvatar: (MessageSender) -> Void = { _ in }   // 点头像：改昵称/换头像
     var onTapImage: (URL) -> Void = { _ in }       // 点图片气泡：全屏查看
+    var onTapFile: (URL) -> Void = { _ in }        // 点文件卡片：QuickLook 预览
     var editRefreshTick: Int = 0   // 用户亲手编辑/删除的信号：+1 → 手术式合并进冻结快照
     var scrollTarget: UUID? = nil                  // 外部跳转请求（聊天记录页点行）
     var onScrollTargetHandled: () -> Void = { }    // 跳转消费完通知外面清 nil
@@ -49,7 +50,8 @@ struct ChatView: View {
                                        onEdit: onEdit,
                                        onDelete: onDelete,
                                        onTapAvatar: onTapAvatar,
-                                       onTapImage: onTapImage)
+                                       onTapImage: onTapImage,
+                                       onTapFile: onTapFile)
                         }
                     }
                     .background {
@@ -411,6 +413,7 @@ private struct MessageRow: View {
     var onDelete: (ChatMessage) -> Void = { _ in }
     var onTapAvatar: (MessageSender) -> Void = { _ in }
     var onTapImage: (URL) -> Void = { _ in }
+    var onTapFile: (URL) -> Void = { _ in }
 
     private var isMe: Bool { message.sender == .me }
 
@@ -474,6 +477,24 @@ private struct MessageRow: View {
                     .background(Color(.systemGray5),
                                 in: RoundedRectangle(cornerRadius: 16, style: .continuous))
             }
+        case .file(let url, let name):
+            // 文件卡片：图标 + 文件名，点开 QuickLook 预览
+            HStack(spacing: 10) {
+                Image(systemName: "doc.fill")
+                    .font(.system(size: 26))
+                    .foregroundStyle(Color.theme)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(name).font(.callout.weight(.medium)).lineLimit(2)
+                    Text(url.pathExtension.uppercased())
+                        .font(.caption2).foregroundStyle(.secondary)
+                }
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 12)
+            .frame(maxWidth: min(240, bubbleMaxWidth), alignment: .leading)
+            .background(Color(.secondarySystemBackground),
+                        in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .onTapGesture { onTapFile(url) }
         case .system, .memoryNote:
             EmptyView()
         }

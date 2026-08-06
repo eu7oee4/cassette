@@ -77,6 +77,38 @@ struct InputBar: View {
     }
 }
 
+/// 待发文件预览条：文件名胶囊行，点 ✕ 移除单个。
+struct PendingFilesBar: View {
+    let files: [OutgoingFile]
+    let onRemove: (Int) -> Void
+
+    var body: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                ForEach(Array(files.enumerated()), id: \.offset) { idx, f in
+                    HStack(spacing: 6) {
+                        Image(systemName: "doc.fill")
+                            .font(.system(size: 14))
+                            .foregroundStyle(Color.theme)
+                        Text(f.name).font(.footnote).lineLimit(1)
+                        Button { onRemove(idx) } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .font(.system(size: 14))
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 7)
+                    .background(Color(.systemGray6), in: Capsule())
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+        }
+        .background(.bar)
+    }
+}
+
 /// 待发照片预览条：浮在输入框上方的缩略图行，点 ✕ 移除单张。
 struct PendingImagesBar: View {
     let images: [Data]

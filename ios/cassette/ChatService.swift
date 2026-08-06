@@ -45,6 +45,20 @@ private struct ImageOut: Encodable {
     let media_type: String
 }
 
+/// 附给"最新这条"的文件（base64 + 原始文件名），后端转 document block 喂给模型。
+private struct FileOut: Encodable {
+    let data: String
+    let media_type: String
+    let name: String
+}
+
+/// app 内部传递的待发文件（选择器读出来的数据 + 元信息）。
+struct OutgoingFile {
+    let data: Data
+    let name: String
+    let mime: String
+}
+
 /// 发给后端的请求体：完整对话历史（最后一条是用户新消息）。
 /// 后端无状态，靠这份历史理解上下文。session_id 仅供记账，nil 时自动省略。
 private struct ChatRequestBody: Encodable {
@@ -53,6 +67,7 @@ private struct ChatRequestBody: Encodable {
     let stickers: [Sticker]?   // 表情库清单(id+描述)，供模型挑着发/改描述
     let client_req_id: String? // 断连补投的关联 id：后端 rescue 条目带回，app 用它替换半截气泡
     let images: [ImageOut]?    // 最新这条附带的图片；nil 自动省略
+    let files: [FileOut]?      // 最新这条附带的文件；nil 自动省略
 }
 
 /// 面向用户的错误类型，errorDescription 直接拿去给用户看。
@@ -99,7 +114,8 @@ struct ChatService {
     /// history 应以用户的新消息结尾。memoryNote 是纯 UI 灰字、不发回后端；历史裁到最近 sendHistoryCap 条。
     private func buildChatRequest(path: String, history: [ChatMessage], sessionId: String?,
                                   stickers: [Sticker] = [], reqId: String? = nil,
-                                  imagesData: [Data] = []) throws -> URLRequest {
+                                  imagesData: [Data] = [],
+                                  filesData: [OutgoingFile] = []) throws -> URLRequest {
         guard let url = URL(string: BackendConfig.baseURL + path) else {
             throw ChatServiceError.badURL
         }
@@ -118,10 +134,13 @@ struct ChatService {
                                         // 这里只兜"后端整个没响应"
         let images: [ImageOut]? = imagesData.isEmpty ? nil :
             imagesData.map { ImageOut(data: $0.base64EncodedString(), media_type: "image/jpeg") }
+        let files: [FileOut]? = filesData.isEmpty ? nil :
+            filesData.map { FileOut(data: $0.data.base64EncodedString(),
+                                    media_type: $0.mime, name: $0.name) }
         request.httpBody = try JSONEncoder().encode(
             ChatRequestBody(messages: outMessages, session_id: sessionId,
                             stickers: stickers.isEmpty ? nil : stickers,
-                            client_req_id: reqId, images: images)
+                            client_req_id: reqId, images: images, files: files)
         )
         return request
     }
@@ -172,13 +191,15 @@ struct ChatService {
     /// 用 URLSession.bytes 逐行读；.lines 自带跨包缓冲，半截行不会炸。
     func sendStream(history: [ChatMessage], sessionId: String?,
                     stickers: [Sticker] = [], reqId: String? = nil,
-                    imagesData: [Data] = []) -> AsyncThrowingStream<StreamEvent, Error> {
+                    imagesData: [Data] = [],
+                    filesData: [OutgoingFile] = []) -> AsyncThrowingStream<StreamEvent, Error> {
         AsyncThrowingStream { continuation in
             let task = Task {
                 do {
                     let request = try buildChatRequest(path: "/chat/stream", history: history,
                                                        sessionId: sessionId, stickers: stickers,
-                                                       reqId: reqId, imagesData: imagesData)
+                                                       reqId: reqId, imagesData: imagesData,
+                                                       filesData: filesData)
                     let (bytes, response) = try await URLSession.shared.bytes(for: request)
                     guard let http = response as? HTTPURLResponse else {
                         throw ChatServiceError.badResponse

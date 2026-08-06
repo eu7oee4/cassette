@@ -144,15 +144,16 @@ async def translate_events(events, finalize):
     yield sse(payload)
 
 
-async def stream_claude(prompt: str, translate, images: list | None = None):
+async def stream_claude(prompt: str, translate, images: list | None = None,
+                        file_blocks: list | None = None):
     """通用流式：起 claude 子进程 → 把 stream-json 事件交给 translate(events) 翻成 SSE 字节块。
     安全约定同 pipeline.call_claude：base_claude_args + 删 ANTHROPIC_API_KEY。
-    images 非空 → stdin 换成 stream-json 的多模态 user 消息（模型真看图），其余不变。"""
+    带图/文件 → stdin 换成 stream-json 的多模态 user 消息（模型真看到），其余不变。"""
     args = pipeline.base_claude_args() + \
         ["--output-format", "stream-json", "--verbose", "--include-partial-messages"]
-    if images:
+    if images or file_blocks:
         args += ["--input-format", "stream-json"]
-        stdin_payload = pipeline.multimodal_stdin(prompt, images)
+        stdin_payload = pipeline.multimodal_stdin(prompt, images or [], file_blocks)
     else:
         stdin_payload = prompt
 

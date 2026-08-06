@@ -1,5 +1,7 @@
 import SwiftUI
 import PhotosUI
+import QuickLook
+import UniformTypeIdentifiers
 
 struct ContentView: View {
     @StateObject private var chatStore = ChatStore()       // 聊天记录的主人（本地持久化）
@@ -26,9 +28,13 @@ struct ContentView: View {
     @State private var showStickers = false          // 表情包面板
     @State private var pendingSticker: Sticker? = nil // 暂存待发的表情（可配文字一起发）
     @State private var pendingImages: [Data] = []    // 暂存待发的照片（jpeg，可配文字一起发）
-    @State private var showAttachPicker = false      // ➕ 的照片选择器
+    @State private var pendingFiles: [OutgoingFile] = []   // 暂存待发的文件
+    @State private var showAttachMenu = false        // ➕ 的选项弹层（照片/文件）
+    @State private var showAttachPicker = false      // 照片选择器
+    @State private var showFileImporter = false      // 文件选择器
     @State private var attachPickerItems: [PhotosPickerItem] = []
     @State private var enlargedImage: EnlargedImage? = nil   // 点图片气泡 → 全屏查看
+    @State private var quickLookURL: URL? = nil      // 点文件卡片 → QuickLook 预览
 
     // 后端联动状态
     @State private var sessionId: String? = nil   // 后端返回的会话 id（无状态后端仅用于记账）
@@ -162,6 +168,7 @@ struct ContentView: View {
                  onTapChatArea: { if showStickers { showStickers = false } },
                  onTapAvatar: { sender in dismissKeyboard(); avatarActionTarget = sender },
                  onTapImage: { url in dismissKeyboard(); enlargedImage = EnlargedImage(url: url) },
+                 onTapFile: { url in dismissKeyboard(); quickLookURL = AppFiles.reanchored(url) },
                  editRefreshTick: editRefreshTick,
                  scrollTarget: chatScrollTarget,
                  onScrollTargetHandled: { chatScrollTarget = nil })
@@ -186,11 +193,18 @@ struct ContentView: View {
                             pendingImages.remove(at: idx)
                         }
                     }
+                    if !pendingFiles.isEmpty {
+                        Divider()
+                        PendingFilesBar(files: pendingFiles) { idx in
+                            pendingFiles.remove(at: idx)
+                        }
+                    }
                     InputBar(text: $draft,
                              stickersActive: showStickers,
                              sending: isGenerating || isWaiting,
-                             hasAttachments: pendingSticker != nil || !pendingImages.isEmpty,
-                             onAttach: { dismissKeyboard(); showAttachPicker = true },
+                             hasAttachments: pendingSticker != nil || !pendingImages.isEmpty
+                                             || !pendingFiles.isEmpty,
+                             onAttach: { dismissKeyboard(); showAttachMenu = true },
                              onStickers: toggleStickers,
                              onSend: send)
                 }
@@ -282,6 +296,29 @@ struct ContentView: View {
                     avatarPickerTarget = nil
                 }
             }
+            // ➕ 的选项弹层：照片 / 文件。
+            .confirmationDialog("", isPresented: $showAttachMenu, titleVisibility: .hidden) {
+                Button("照片") { showAttachPicker = true }
+                Button("文件") { showFileImporter = true }
+                Button("取消", role: .cancel) { }
+            }
+            // 选文件：PDF / 文本类（md/代码/txt）/ json / docx。读出数据暂存，≤10MB。
+            .fileImporter(isPresented: $showFileImporter,
+                          allowedContentTypes: Self.allowedFileTypes,
+                          allowsMultipleSelection: true) { result in
+                guard case .success(let urls) = result else { return }
+                for url in urls {
+                    let scoped = url.startAccessingSecurityScopedResource()
+                    defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+                    guard let data = try? Data(contentsOf: url) else { continue }
+                    guard data.count <= 10 * 1024 * 1024 else {
+                        errorText = "「\(url.lastPathComponent)」超过 10MB，先精简一下再发"
+                        continue
+                    }
+                    pendingFiles.append(OutgoingFile(data: data, name: url.lastPathComponent,
+                                                     mime: Self.mime(for: url)))
+                }
+            }
             // ➕ 选照片：多选，压到适合模型看的尺寸再暂存（原图几 MB 的 base64 没必要）。
             .photosPicker(isPresented: $showAttachPicker, selection: $attachPickerItems,
                           maxSelectionCount: 9, matching: .images)
@@ -298,6 +335,7 @@ struct ContentView: View {
                     attachPickerItems = []
                 }
             }
+            .quickLookPreview($quickLookURL)
             // 全屏查看聊天图片；长按可删（删的是那条消息，本地历史移除）。
             .fullScreenCover(item: $enlargedImage) { item in
                 ImageViewerView(urls: item.urls, start: item.start, onDeleteURL: { url in
@@ -360,7 +398,8 @@ struct ContentView: View {
     private func send() {
         let trimmed = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !isGenerating,
-              !trimmed.isEmpty || pendingSticker != nil || !pendingImages.isEmpty else { return }
+              !trimmed.isEmpty || pendingSticker != nil
+                || !pendingImages.isEmpty || !pendingFiles.isEmpty else { return }
         isGenerating = true   // 同步占位：立刻禁用发送、挡住极快的重复触发
         isWaiting = true
 
@@ -372,6 +411,15 @@ struct ContentView: View {
             }
         }
         pendingImages = []
+
+        // 暂存的文件：同款——落盘成 .file 消息上屏，数据随请求带给后端（document block）。
+        let filesToSend = pendingFiles
+        for f in pendingFiles {
+            if let url = AppFiles.saveChatFile(f.data, name: f.name) {
+                chatStore.append(ChatMessage(sender: .me, kind: .file(url, f.name), timestamp: Date()))
+            }
+        }
+        pendingFiles = []
 
         if !trimmed.isEmpty {
             chatStore.append(ChatMessage(sender: .me, kind: .text(trimmed), timestamp: Date()))
@@ -388,7 +436,23 @@ struct ContentView: View {
         draft = ""
         DispatchQueue.main.async { draft = "" }
 
-        Task { await generateReply(imagesData: imagesToSend) }
+        Task { await generateReply(imagesData: imagesToSend, filesData: filesToSend) }
+    }
+
+    /// 文件选择器放行的类型 + 各自的 MIME（后端按这个决定 PDF 直喂 / 文本读 / docx 抽正文）。
+    private static let allowedFileTypes: [UTType] = {
+        var types: [UTType] = [.pdf, .text, .json]
+        if let docx = UTType("org.openxmlformats.wordprocessingml.document") { types.append(docx) }
+        return types
+    }()
+
+    private static func mime(for url: URL) -> String {
+        switch url.pathExtension.lowercased() {
+        case "pdf":  return "application/pdf"
+        case "docx": return "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        case "json": return "application/json"
+        default:     return "text/plain"   // md/txt/代码：后端按文本原文读
+        }
     }
 
     /// 相册原图压到适合模型看的尺寸（长边 ≤1568，jpeg 0.8）——多模态按 token 算钱，
@@ -415,7 +479,7 @@ struct ContentView: View {
     /// 把当前完整历史发给后端（流式），回复逐字上屏；失败则弹提示。
     /// 约定调用前 chatStore.messages 已以用户的新消息结尾。
     @MainActor
-    private func generateReply(imagesData: [Data] = []) async {
+    private func generateReply(imagesData: [Data] = [], filesData: [OutgoingFile] = []) async {
         isGenerating = true
         isWaiting = true
         defer { isWaiting = false; isGenerating = false }
@@ -433,7 +497,7 @@ struct ContentView: View {
             let stream = chatService.sendStream(history: chatStore.messages,
                                                 sessionId: sessionId,
                                                 stickers: stickerStore.stickers, reqId: reqId,
-                                                imagesData: imagesData)
+                                                imagesData: imagesData, filesData: filesData)
             for try await ev in stream {
                 switch ev {
                 case .text(let chunk):

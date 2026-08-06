@@ -34,4 +34,14 @@ enum AppFiles {
         do { try data.write(to: url) } catch { return nil }
         return url
     }
+
+    /// 存一个聊天文件到 Documents/chat_files/（原始文件名保留在尾部，避免重名前面加短 id）。
+    static func saveChatFile(_ data: Data, name: String) -> URL? {
+        let dir = documents.appendingPathComponent("chat_files", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let safe = name.replacingOccurrences(of: "/", with: "_")
+        let url = dir.appendingPathComponent(String(UUID().uuidString.prefix(8)) + "_" + safe)
+        do { try data.write(to: url) } catch { return nil }
+        return url
+    }
 }

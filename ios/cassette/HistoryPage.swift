@@ -60,6 +60,7 @@ struct HistoryPage: View {
                     prompt: "按聊天记录搜索")
         .sheet(isPresented: $showCodeList) { codeListSheet }
         .sheet(isPresented: $showImageGrid) { imageGridSheet }
+        .sheet(isPresented: $showFileList) { fileListSheet }
         .sheet(item: $selected) { e in EntryDetail(entry: e, injectCap: $injectCap) }
         .sheet(isPresented: $showDates) { dateSheet }
         .alert("跳到倒数第几条？", isPresented: $showJump) {
@@ -73,6 +74,7 @@ struct HistoryPage: View {
     // MARK: - 快捷检索行 + 窗口设置行（设计规则：图标非按钮不加，文案直给）
 
     @State private var showImageGrid = false         // 图片九宫格
+    @State private var showFileList = false          // 发过的文件
     @State private var gridViewer: EnlargedImage? = nil
 
     private var quickActions: some View {
@@ -81,6 +83,7 @@ struct HistoryPage: View {
             Button("倒序号检索") { jumpText = ""; showJump = true }
             Button("代码块") { showCodeList = true }
             Button("图片") { showImageGrid = true }
+            Button("文件") { showFileList = true }
             Spacer()
         }
         .font(.subheadline)
@@ -436,6 +439,37 @@ struct HistoryPage: View {
         f.locale = Locale(identifier: "zh_CN")
         return f
     }()
+
+    // MARK: - 文件检索
+
+    private var fileEntries: [Entry] {
+        entries.filter { e in
+            if case .file = e.msg.kind { return true }
+            return false
+        }
+    }
+
+    private var fileListSheet: some View {
+        NavigationStack {
+            ScrollView {
+                LazyVStack(spacing: 0) {
+                    ForEach(fileEntries) { e in
+                        EntryRow(entry: e, showDate: true)
+                            .onTapGesture { showFileList = false; onJump(e.id) }
+                        Divider().padding(.leading, 58)
+                    }
+                    if fileEntries.isEmpty {
+                        Text("还没有发过文件")
+                            .font(.footnote).foregroundStyle(.secondary).padding(.top, 40)
+                    }
+                }
+            }
+            .scrollDismissesKeyboard(.immediately)
+            .navigationTitle("文件")
+            .navigationBarTitleDisplayMode(.inline)
+        }
+        .presentationDetents([.medium, .large])
+    }
 
     // MARK: - 序号直达
 

@@ -10,6 +10,7 @@ cassette 后端（无状态版）。
   .venv/bin/uvicorn app:app --host 0.0.0.0 --port 8000
 """
 import asyncio
+import base64
 import json
 import secrets
 import subprocess
@@ -66,12 +67,80 @@ class ImageInput(BaseModel):
     media_type: str = "image/png"
 
 
+class FileInput(BaseModel):
+    """随消息带的文件，走 API 的 document block 直接喂给模型。
+    PDF=base64 原样；文本类(md/txt/代码/json)=text source；docx=解压抽正文再走 text source。"""
+    data: str                 # base64
+    media_type: str = "application/pdf"
+    name: str = ""            # 原始文件名，给模型当 title 用
+
+
+_DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+
+
+def _decode_text(raw: bytes) -> str:
+    """文本文件解码：utf-8 优先，兜 gb18030（Windows 来的中文文档），再不行替换坏字符。"""
+    for enc in ("utf-8", "gb18030"):
+        try:
+            return raw.decode(enc)
+        except UnicodeDecodeError:
+            continue
+    return raw.decode("utf-8", errors="replace")
+
+
+def _docx_text(raw: bytes) -> str:
+    """docx 抽正文：零依赖（docx=zip 里的 word/document.xml），按段落取 <w:t> 文本。
+    旧版二进制 .doc 不是 zip，这里会抛错，由调用方转成 400。"""
+    import io
+    import zipfile
+    from xml.etree import ElementTree
+    with zipfile.ZipFile(io.BytesIO(raw)) as z:
+        root = ElementTree.fromstring(z.read("word/document.xml"))
+    w = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+    paras = []
+    for p in root.iter(f"{w}p"):
+        text = "".join(t.text or "" for t in p.iter(f"{w}t"))
+        if text.strip():
+            paras.append(text)
+    return "\n".join(paras)
+
+
+def _file_to_block(f: FileInput) -> dict:
+    """FileInput → API document block。类型不认识/解不开 → 400（路由里流开始前调，能正常报错）。"""
+    mt = (f.media_type or "").lower()
+    label = f.name or "未命名文件"
+    if mt == "application/pdf":
+        blk = {"type": "document",
+               "source": {"type": "base64", "media_type": "application/pdf", "data": f.data}}
+    else:
+        try:
+            raw = base64.b64decode(f.data)
+        except Exception:
+            raise HTTPException(status_code=400, detail=f"文件数据不是合法 base64：{label}")
+        if mt == _DOCX_MIME:
+            try:
+                text = _docx_text(raw)
+            except Exception:
+                raise HTTPException(status_code=400, detail=f"读不了这个 Word 文件（要 .docx）：{label}")
+        elif mt.startswith("text/") or mt == "application/json":
+            text = _decode_text(raw)
+        else:
+            raise HTTPException(status_code=400, detail=f"暂不支持的文件类型 {mt}：{label}")
+        # text source 的 media_type 按 API 规定只能是 text/plain（md/代码原文照样完整可读）
+        blk = {"type": "document",
+               "source": {"type": "text", "media_type": "text/plain", "data": text}}
+    if f.name:
+        blk["title"] = f.name
+    return blk
+
+
 class ChatRequest(BaseModel):
     messages: list[Message]            # 完整对话历史，最后一条应是用户的新消息
     session_id: Optional[str] = None   # 仅用于 app 记账，后端不依赖它记忆
     stickers: Optional[list[StickerInfo]] = None  # 表情库清单(id+描述)，供模型挑着发/改描述
     client_req_id: Optional[str] = None  # 断连补投关联 id：rescue 条目带回给 app 替换半截气泡
     images: Optional[list[ImageInput]] = None  # 附给"最新这条"的图片，带图走多模态
+    files: Optional[list[FileInput]] = None    # 附给"最新这条"的文件（PDF/文本/docx），同上
 
 
 class StoredItem(BaseModel):
@@ -197,10 +266,13 @@ def chat(req: ChatRequest, x_auth: Optional[str] = Header(default=None, alias="X
     verify_auth(x_auth)
     prompt, handle_to_id = _prepare_chat(req)
     _snapshot_incoming_window(req)
+    # 文件转 block 在调用前做：类型不支持/解不开在这里 400，不进子进程。
+    file_blocks = [_file_to_block(f) for f in (req.files or [])]
     wake.chat_turn_begin()
     try:
-        if req.images:
-            reply, stored = pipeline.call_claude_multimodal(prompt, req.images)
+        if req.images or file_blocks:
+            reply, stored = pipeline.call_claude_multimodal(prompt, req.images or [],
+                                                            file_blocks=file_blocks)
         else:
             reply, stored = pipeline.call_claude(prompt)
     finally:
@@ -224,6 +296,7 @@ async def chat_stream(req: ChatRequest, x_auth: Optional[str] = Header(default=N
     """流式聊天：SSE 逐字回复。协议见 sse.py。"""
     verify_auth(x_auth)
     prompt, handle_to_id = _prepare_chat(req)   # 校验在流开始前，能正常返 4xx
+    file_blocks = [_file_to_block(f) for f in (req.files or [])]   # 同上：4xx 趁早
     _snapshot_incoming_window(req)
 
     def finalize(reply: str, stored: list[dict]) -> dict:
@@ -244,7 +317,8 @@ async def chat_stream(req: ChatRequest, x_auth: Optional[str] = Header(default=N
                 try:
                     def translate(events):
                         return sse.translate_events(events, finalize)
-                    async for chunk in sse.stream_claude(prompt, translate, images=req.images):
+                    async for chunk in sse.stream_claude(prompt, translate, images=req.images,
+                                                         file_blocks=file_blocks):
                         # ⚠️ 字节嗅探依赖 sse.sse() 用 json.dumps 默认分隔符（": " 带空格）——
                         # 正文里出现同样字样会被转义成 \" 不误判；若改压缩分隔符此检测会静默失效。
                         if b'"type": "done"' in chunk:
