@@ -37,7 +37,23 @@ import state_store
 
 PLUGINS_DIR = config.BASE_DIR / "plugins"          # 安装目录（gitignore，装的都是外部仓）
 ENABLED_PATH = state_store.STATE_DIR / "plugins_enabled.json"
-MCP_CONFIG_PATH = state_store.STATE_DIR / "plugins.mcp.json"
+# 挂载清单按调用场景分文件。**不能共用一个路径**：聊天和醒来的工具集不一样（见
+# NO_WAKE_PLUGINS），共用就会互相覆盖——两条路并发起子进程时，谁后写谁说了算，
+# 另一边的 claude 读到的是对方那份。
+MCP_CONFIG_PATHS = {
+    "chat": state_store.STATE_DIR / "plugins.mcp.json",
+    "wake": state_store.STATE_DIR / "plugins.wake.mcp.json",
+}
+
+# 醒来那条路不挂的插件。
+#
+# 这是**宿主侧的安全策略，不交给插件自己在 plugin.json 里声明**——「这个工具能不能给
+# 一个没人看着的凌晨三点的进程用」是我们的判断，插件作者没有动机限制自己。
+#
+# codemode：一调就起一个手握整台电脑（Bash/Write/Edit）的常驻会话，权限弹窗只能靠人在
+# 手机上按。聊天里切过去是人当场要的；一次随机醒来自己切进去完全是另一回事。
+# mianmian 同口径（main_v2.py base_claude_args：「自切 code：只主 chat，wake 不挂」）。
+NO_WAKE_PLUGINS = {"codemode"}
 
 # 写死的插件 registry：只认自己名下的仓，且**钉死 commit**——审过哪份代码就装哪份，
 # main 后续怎么动都影响不到已发版本。升级插件 = 改这里的 commit + 发版。
@@ -206,14 +222,19 @@ def uninstall(name: str) -> dict:
     return {"ok": True, "state": "not_installed"}
 
 
-def mounted() -> tuple[Optional[str], list[str]]:
+def mounted(context: str = "chat") -> tuple[Optional[str], list[str]]:
     """启用中的合法插件 → (mcp-config 文件路径, 工具白名单)。没有则 (None, [])。
-    config 文件现渲染进 state/（stdio：本仓 venv 的 python 起清单里的 entry）。"""
+    config 文件现渲染进 state/（stdio：本仓 venv 的 python 起清单里的 entry）。
+
+    context＝这次是给谁挂：'chat'（聊天，全挂）或 'wake'（醒来，摘掉 NO_WAKE_PLUGINS）。
+    认不出的 context 一律按 chat 处理——多挂比少挂容易被发现，静默少挂会让人以为工具坏了。"""
+    cfg_path = MCP_CONFIG_PATHS.get(context, MCP_CONFIG_PATHS["chat"])
+    blocked = NO_WAKE_PLUGINS if context == "wake" else set()
     enabled = _read_enabled()
     servers: dict = {}
     tools: list[str] = []
     for name, on in sorted(enabled.items()):
-        if not on:
+        if not on or name in blocked:
             continue
         m = _read_manifest(name)
         if m is None:
@@ -224,9 +245,8 @@ def mounted() -> tuple[Optional[str], list[str]]:
     if not servers:
         return None, []
     payload = json.dumps({"mcpServers": servers}, ensure_ascii=False)
-    if not MCP_CONFIG_PATH.exists() or MCP_CONFIG_PATH.read_text("utf-8") != payload:
-        _atomic_write_raw = MCP_CONFIG_PATH.with_name(
-            f".{MCP_CONFIG_PATH.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
-        _atomic_write_raw.write_text(payload, "utf-8")
-        _atomic_write_raw.replace(MCP_CONFIG_PATH)
-    return str(MCP_CONFIG_PATH), tools
+    if not cfg_path.exists() or cfg_path.read_text("utf-8") != payload:
+        tmp = cfg_path.with_name(f".{cfg_path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+        tmp.write_text(payload, "utf-8")
+        tmp.replace(cfg_path)
+    return str(cfg_path), tools

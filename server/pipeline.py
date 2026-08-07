@@ -379,12 +379,16 @@ def memory_block() -> str:
 
 
 # ---------- 子进程 ----------
-def base_claude_args(persona_file: Optional[Path] = None) -> list[str]:
+def base_claude_args(persona_file: Optional[Path] = None,
+                     context: str = "chat") -> list[str]:
     """所有 claude 调用共用的参数，统一从这里出（别另起一套）。
     各 MCP 源累积（可并列多个 --mcp-config，claude 合并）：Ombre 记忆 + 启用中的插件。
     有工具 → 白名单挂载（--strict-mcp-config 屏蔽机器上其它 MCP；--allowedTools
     预批准所以 headless 不弹权限，绝不用 --dangerously-skip-permissions）；
-    一个没有 → 纯聊天 --tools ""。"""
+    一个没有 → 纯聊天 --tools ""。
+
+    context＝这次调用是哪条路（'chat' / 'wake'）：插件按场景分挂，有些工具不给醒来那条路
+    （见 plugins.NO_WAKE_PLUGINS）。默认 chat——醒来的调用方必须自己显式写 context='wake'。"""
     import plugins   # 函数内 import：plugins 依赖 state_store/config，避免模块级环
     args = [
         "claude", "-p",
@@ -396,7 +400,7 @@ def base_claude_args(persona_file: Optional[Path] = None) -> list[str]:
     if ombre_alive():
         mcp_configs.append(str(_ombre_mcp_config()))
         tools += OMBRE_TOOLS
-    plug_cfg, plug_tools = plugins.mounted()
+    plug_cfg, plug_tools = plugins.mounted(context)
     if plug_cfg:
         mcp_configs.append(plug_cfg)
         tools += plug_tools
