@@ -758,6 +758,8 @@ def code_append(inp: CodeAppendIn, x_auth: Optional[str] = Header(default=None, 
         return {"ok": True, "skipped": True}
     # 去重：hook 超时会重试且 ts 不变 → 同 (ts, 正文) 只收一次。
     # （踩过：Bark 同步调用把响应拖过 hook 的 8s 超时 → 重试 → 手机上连着弹三条一样的。）
+    # ⚠️ ts 是 hook 那边给的**段落身份**（transcript 那行的 uuid），不是正文哈希——所以
+    # 两段碰巧一模一样的正文（"汪。"这种）是两个 key，不会被当成重试吞掉第二条。
     # 查重+写入走 outbox_append_once 的同一把锁：一轮里并行调好几个工具时，几个 hook 进程
     # 会同时打进来，分开做的话谁查重时都还没落盘，同一段话会上屏好几次。
     dedupe_key = f"{inp.ts or ''}|{hashlib.md5(text.encode()).hexdigest()[:12]}"

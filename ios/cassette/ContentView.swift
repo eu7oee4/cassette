@@ -58,7 +58,6 @@ struct ContentView: View {
     /// 有没有还在等的补投（驱动"正在输入"三个点；发送禁用仍只看 isWaiting）。
     private var rescueActive: Bool { rescueWaiting.values.contains { !$0.givenUp } }
 
-    // 编辑消息弹窗状态
     // Code 模式：消息改道 tmux 交互会话（那边手上有整台电脑），回复走待送达盒子回来。
     // codeMode 的真相在后端（会话活着 = 模式开着），@AppStorage 只是冷启动前的乐观值，
     // 每次回前台都用 /code/status 对齐一次。

@@ -84,8 +84,9 @@ struct CodeTerminalPanel: View {
         .padding(.top, height > 0 ? -(growRoom + 6) : 0)
         .animation(.easeOut(duration: 0.22), value: height)
         // 外部改了展开状态（点黑条 / 退出 Code 模式）→ 档位跟上。
-        // ⚠️ 收起时才无条件归零；打开时**只在原本收着的情况下**给满档——否则拖拽松手那一下
-        // （expanded false→true）会顺手把刚吸附好的半屏档重置成全屏，人就永远停不到 2/3。
+        // ⚠️ 收起时才无条件归零；打开时**只在原本收着的情况下**给满档——否则从收起状态点
+        // 「⅔」时，setRatio 先设好 0.62、再把 expanded 翻成 true，这里会顺手把它重置成
+        // 全屏，人就永远停不到 2/3。
         .onChange(of: expanded) { _, on in
             if !on { stopRatio = 0 } else if stopRatio == 0 { stopRatio = 1 }
         }
@@ -311,7 +312,11 @@ struct CodeTerminalPanel: View {
             if scrolling { heldContent = s.content } else { content = s.content }
         }
         let opts = s.dialog ?? []
-        if opts.map(\.key) != dialog.map(\.key) { dialog = opts }
+        // ⚠️ 整体比（key + 文案），**别退回只比 key**：权限弹窗的编号恒定是 1/2/3，带信息的
+        // 是文案（"Yes, and don't ask again for `git` commands in …"）。两个弹窗落在同一个
+        // 轮询间隔里（中间那一帧"没弹窗"没被扫到）时，只比 key 就换不上——屏幕上是上一个
+        // 弹窗的文案，按下去执行的却是这一个的语义。
+        if opts != dialog { dialog = opts }
         lastOk = Date()
         now = Date()
     }

@@ -328,7 +328,8 @@ struct ChatService {
 
     /// 确认弹窗里的一个选项：key 是要按的键，label 是弹窗里的原文。
     /// **按钮文案一律用 label**——写死「1允许/2总允许/3拒绝」既不准，选项也常常不止三个。
-    struct CodeDialogOption: Decodable, Identifiable {
+    /// Equatable 是必需的：面板靠整体比对判断要不要换掉这批按钮，只比 key 会漏（见 poll()）。
+    struct CodeDialogOption: Decodable, Identifiable, Equatable {
         let key: String
         let label: String
         var id: String { key }

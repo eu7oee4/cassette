@@ -27,7 +27,8 @@ final class ChatStore: ObservableObject {
     }
 
     /// 追加一条系统提示消息（居中灰字）。统一入口。
-    /// sender 用 .me 只是为了发给后端时算作用户轮；显示按 kind 走居中样式。
+    /// 纯 UI：显示按 kind 走居中样式，发给后端时整条过滤掉（见 ChatService 的 isSystem）——
+    /// 它是 app 说给人看的话，混进历史就成了以 role:user 冒充用户说过的。
     func appendSystemMessage(_ text: String) {
         append(ChatMessage(sender: .me, kind: .system(text), timestamp: Date()))
     }

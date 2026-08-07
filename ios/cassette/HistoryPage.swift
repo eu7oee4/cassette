@@ -25,7 +25,7 @@ struct HistoryPage: View {
     /// 关掉 sheet 后待执行的跳转目标（listArea 的 onChange 消费）。
     @State private var pendingScrollTarget: UUID? = nil
 
-    /// 一行 = 一条可注入的消息（memoryNote 是纯 UI 灰字不发后端，排除——
+    /// 一行 = 一条可注入的消息（memoryNote 灰字、system 提示都是纯 UI、不发后端，排除——
     /// 过滤口径必须和 ChatService.buildChatRequest 一致，序号才和注入窗口对齐）。
     struct Entry: Identifiable {
         let n: Int                // 倒数序号：1 = 最新
@@ -35,7 +35,7 @@ struct HistoryPage: View {
 
     /// 全量条目，最新在最上（倒数#1 在顶部）。
     private var entries: [Entry] {
-        let sendable = messages.filter { !$0.isMemoryNote }
+        let sendable = messages.filter { !$0.isMemoryNote && !$0.isSystem }
         return sendable.reversed().enumerated().map { Entry(n: $0.offset + 1, msg: $0.element) }
     }
 

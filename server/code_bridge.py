@@ -284,16 +284,6 @@ def _input_box() -> Optional[list]:
     return lines[seps[-2] + 1: seps[-1]]
 
 
-def _input_dirty() -> bool:
-    """输入框里看着有东西吗。
-    ⚠️ 分不出真内容和 CC 自己放的建议回复（ghost text）——抓屏里两者一模一样。所以这只是
-    「要不要试着清一下」的信号，别当真值用；清不动会由 _clear_input 自己收场。"""
-    box = _input_box()
-    if box is None:
-        return True      # 认不出来就当它脏，多清一遍不亏
-    return bool("".join(ln.lstrip("❯ ").strip() for ln in box))
-
-
 def _clear_input(max_rounds: int = 12) -> None:
     """把输入框清干净再发消息。
 
@@ -304,10 +294,18 @@ def _clear_input(max_rounds: int = 12) -> None:
     Esc 清不掉（实测无效）；C-c 能一下清干净，但它会打断正在跑的活，绝不能用在发消息前。
     所以只能一行行删——一次 send-keys 带 40 个 C-u，几轮就够，中间拿画面判断有没有清完。"""
     prev = None
+    unknown = 0
     for _ in range(max_rounds):
         box = _input_box()
         if box is not None and not "".join(ln.lstrip("❯ ").strip() for ln in box):
             return                      # 干净了
+        if box is None:
+            # 认不出输入框（TUI 换了边框样式、画面正好在重绘）：清两轮就收手。
+            # 认不出来时下面那个"画面没变就停"的判断永远为假，不设这个闸就会空转满
+            # max_rounds 轮、白敲几百个 C-u，每发一条消息多等一秒。
+            unknown += 1
+            if unknown > 2:
+                return
         cur = "\n".join(box) if box is not None else None
         if cur is not None and cur == prev:
             # 一轮 C-u 下去画面纹丝不动 = 没东西可删了，别死磕。
