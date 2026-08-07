@@ -18,6 +18,12 @@ plugin.json 清单（PR8 定稿）：
       "entry": "webpage_mcp.py",      # 相对插件目录的 MCP stdio 入口（本仓 venv python 起）
       "tools": ["webpage_create"]     # MCP 工具名（不带 mcp__ 前缀），逐个进白名单
     }
+
+纪律：**改了插件仓的内容就 bump version**，哪怕只改 README。
+version 是作者手写的、没有任何机制校验，所以两个不同 commit 完全可以都自称同一个号——
+codemode 的 d916917 和 2388151 就都是 0.1.0（那次只改 README，没 bump，将就了：旧那个
+commit 没被任何地方钉过，世界上装不出第二个 0.1.0，没有需要区分的东西）。
+下次开始照规矩来。真正靠得住的身份是 sha，见 _installed_commit()——app 上显示的是它。
 """
 import json
 import os
@@ -117,6 +123,31 @@ def _read_manifest(name: str) -> Optional[dict]:
     return m
 
 
+def _installed_commit(name: str) -> str:
+    """装着的这份实际停在哪个 commit（短 sha）。读不出来返回 ""。
+
+    为什么要这个：`version` 是插件作者手写在 plugin.json 里的、靠自觉，两个不同 commit
+    完全可以都自称 0.1.0（实锤：codemode 的 d916917 和 2388151 都是 0.1.0）。**真正的身份
+    是 sha**，而且它是机制给的、填不错。app 上显示它，「我装的到底是哪一份」才有确定答案，
+    更新前后也才看得见变化（只显示 registry 钉的那个的话，更新完显示纹丝不动）。
+
+    直接读 .git/HEAD 文件，不起 git 子进程：`_clone_pinned` 是 checkout --detach，HEAD 里
+    躺着的就是裸 sha。手放进来的开发副本没有 .git，返回 "" —— 那本身就是有用的信息
+    （没有 sha = 这份不是从 registry 装的，来源不可考）。"""
+    head = PLUGINS_DIR / name / ".git" / "HEAD"
+    try:
+        raw = head.read_text("utf-8").strip()
+    except OSError:
+        return ""
+    if raw.startswith("ref: "):
+        # 不是我们装的（我们只产生 detached HEAD）：跟一层引用，跟不到就算了
+        try:
+            raw = (PLUGINS_DIR / name / ".git" / raw[5:].strip()).read_text("utf-8").strip()
+        except OSError:
+            return ""
+    return raw[:7] if len(raw) >= 7 and all(c in "0123456789abcdef" for c in raw) else ""
+
+
 def list_status() -> list[dict]:
     """registry ∪ 已安装 → 三态清单（not_installed / disabled / enabled）。"""
     enabled = _read_enabled()
@@ -138,6 +169,10 @@ def list_status() -> list[dict]:
             "in_registry": name in REGISTRY,
             "state": ("enabled" if enabled.get(name) else "disabled") if installed else "not_installed",
             "valid": manifest is not None if installed else True,
+            # 两个 sha 都给：pinned = registry 声明该装哪个，installed = 实际停在哪个。
+            # 不一样 = 这份没跟上（app 据此提示可更新）；installed 空 = 手放的开发副本。
+            "commit": reg.get("commit", "")[:7],
+            "installed_commit": _installed_commit(name) if installed else "",
         }
         out.append(item)
     return out
