@@ -134,7 +134,10 @@ async def translate_events(events, finalize):
                 s = pipeline._stored_from_tool_use(b.get("name", ""), b.get("input", {}) or {})
                 if s:
                     stored.append(s)
-                    yield sse({"type": "memory", "tool": s["tool"], "text": s["text"]})
+                    # codemode 是借 stored 走的控制信号（TA 自切 code 模式），不是记忆产物——
+                    # 发成 memory 事件的话 app 会渲染出一条莫名其妙的灰字。
+                    if s["tool"] != "codemode":
+                        yield sse({"type": "memory", "tool": s["tool"], "text": s["text"]})
         elif t == "result":
             if ev.get("is_error"):
                 is_error = True

@@ -12,6 +12,7 @@ Give it a name, write it a persona, add a few stickers — and it will "wake up"
 - **Wakes up on its own**: a backend scheduler wakes the model at the frequency you set. It reads the recent conversation and its own inner monologue from the last few wake-ups, then decides whether to say something or stay quiet. It can also set its own alarm ("wake me in 3 hours") — mention that you're going to bed and it will quietly schedule a wake-up for later.
 - **Long-term memory (optional)**: integrates [Ombre-Brain](https://github.com/P0luz/Ombre-Brain) (P0luz's open-source memory system, a self-hosted Docker service) — relevant memories surface at the start of a conversation, things worth keeping get saved on the fly, and wake-ups think with memory too; what it stored or edited shows up as gray hints in chat. Without Ombre running it falls back to plain chat, business as usual.
 - **Sends stickers**: add images from your photo library and the model writes a one-line description of each by looking at it; later it picks one that fits the mood and sends it to you (both in chat and when it wakes up), and it will rewrite a description it thinks is wrong. To ship a default set, drop PNGs into `ios/cassette/DefaultStickers/` — the filename becomes the initial description, seeded on first launch.
+- **Code mode (off by default)**: flip one switch in the header and the same companion moves from `claude -p` chat into a live interactive `claude` session in tmux on your Mac — same persona, the conversation carried over verbatim, and now with the whole computer in hand. A terminal panel slides up inline above the input bar so you can watch it work and answer permission prompts without leaving the chat. See [Code mode](#code-mode) — it opens a door the rest of this project keeps shut, so read that section before enabling it.
 - **Plugin store**: tool families live in their own small repos, not in this one — download/enable/uninstall with one tap in the app (the backend mounts them dynamically; toggling takes effect on the next turn). The first plugin, **webpage**, lets the companion build and edit self-contained HTML pages you can open from Chat history → HTML files. The registry is a hardcoded allowlist; there is no install-from-URL.
 - **Has a sense of time**: it knows whether it's "late Wednesday night" or "Saturday morning", and that you took 3 hours to reply. All of it is injected into the prompt, so it won't wish you good night in the afternoon.
 - **Doesn't lose messages**: lock your phone, background the app, or drop off the network mid-generation — the backend runs to completion, the reply goes into a pending outbox, and the app picks it up when it returns to the foreground; with [Bark](https://github.com/Finb/Bark) configured, your phone gets a push too. The reverse case is covered as well: if the request never reached the backend, the app reconciles with it and tells you to resend after about a minute; if that turn produced nothing at all, you get an explicit notice. A turn never just quietly disappears.
@@ -53,6 +54,60 @@ A few details:
 - If you happen to send a message during the tens of seconds a wake-up takes to generate, that proactive message is dropped entirely (it's talking about a world that no longer exists) and only logged.
 - If a chat turn is in flight, the wake-up yields to the next tick rather than talking nonsense from a stale context.
 - Repeated failures (an expired CLI login, say) trigger a 30-minute backoff instead of burning a doomed subprocess every tick.
+
+## Code mode
+
+Everywhere else in this project the model runs with a per-tool allowlist and no built-in tools.
+Code mode is the deliberate exception: it starts a long-lived interactive `claude` inside a tmux
+session on your Mac, with Bash, file writes, the lot. That's the point of it — and the reason it
+ships **off**. Turn it on in `server/.env` (`CODE_MODE_ENABLED=1`, needs `tmux` installed);
+until you do, the app doesn't even show the switch.
+
+How it hangs together:
+
+```
+chat mode:  app → POST /chat/stream → claude -p                (one throwaway process per message)
+code mode:  app → POST /code/send   → tmux send-keys → live claude session
+            replies ← session hooks → POST /code/append → pending outbox → the app's normal polling
+```
+
+Memory stays continuous for free. Switching in injects the same recent history the chat path
+sends, so the session opens knowing exactly what you were just talking about; and because its
+replies flow back through the ordinary outbox into the app's history, switching back means the
+next `claude -p` prompt contains everything said in code mode. Nothing is "synced" — the app
+owns the history either way. Wake-ups see it too (code-mode turns are written to the recent
+window), so it won't wake up amnesiac about the last hour of work.
+
+- **Every switch-in is a fresh session** (old one killed, context re-injected): no drift, no
+  guessing what state it's in. Leaving code mode kills the session, which keeps "session alive =
+  mode on" a clean invariant — that's what the app reconciles against on return to foreground,
+  and how it notices the companion switched itself in. If it's mid-task when you leave, you get
+  asked first.
+- **A dropped connection doesn't cost you the reply.** Replies come back through the pending
+  outbox, so locking your phone or losing signal mid-task changes nothing — the work finishes on
+  your Mac and the message is waiting when you return.
+- **The inline terminal** sits above the input bar: tap the black strip to slide it up, tap again
+  to put it away, or hit the `⅔` button for a half-height view. At either height the newest output
+  stays pinned to the bottom edge and the button row stays put — the height changes how much you
+  see, not where the content is. Scroll up inside it for earlier output.
+- **Permission prompts are never bypassed.** They appear as buttons in that panel, one per option,
+  labelled with the prompt's own wording — however many options it has. If one sits unanswered
+  for five minutes and you have Bark configured, your phone gets a nudge. Messages you send while
+  a prompt is waiting are refused rather than swallowed by the dialog (a message starting with a
+  digit would otherwise press a button for you).
+- **The session's working directory** is its turf — where Grep and Glob search, where relative
+  paths resolve, whose `.claude/settings.local.json` allowlist applies. Set `CODE_CWD`; the app may
+  ask for a different directory per switch-in, but only inside `CODE_CWD_ALLOW` (resolved through
+  symlinks and `..`, so there's nothing to slip past).
+- **Reporting hooks are scoped to that session**, passed via `claude --settings` at startup. Your
+  global `~/.claude/settings.json` is left alone, and your own claude sessions never trigger them.
+- **Editing and regenerating are disabled** while in code mode: those turns had real side effects,
+  and replaying history would perform them again.
+- **Optional: let it switch itself.** The backend also accepts a self-switch call, so the
+  companion can decide mid-conversation to move to your Mac; it echoes the task it wrote into your
+  chat verbatim, so a garbled restatement is something you catch immediately. Reaching it needs a
+  small separate plugin (not in the registry yet) — until you install one, that switch is yours
+  alone to flip.
 
 ## History is editable (editing it = editing its memory)
 
@@ -122,8 +177,12 @@ server/
   wake.py         # wake scheduler: local pre-gates → four-section protocol → interruption control
   state_store.py  # runtime state (plain files, atomic writes + locks)
   notify.py       # Bark push + timestamped error logging
+  code_bridge.py  # code mode: the tmux session (start/stop, send, capture, dialog parsing)
+  hooks/          # the session's own reporting hook (passed via --settings, not installed globally)
   persona.example.md
+  code_addendum.example.md   # working rules appended to the persona in code mode
 ios/cassette/     # SwiftUI app: chat UI, sticker library, settings, local persistence
+  CodeTerminalPanel.swift    # the inline terminal (two heights, output pinned to the bottom)
 ```
 
 ## Data and safety
@@ -132,12 +191,12 @@ ios/cassette/     # SwiftUI app: chat UI, sticker library, settings, local persi
 - Every endpoint except the `/health` check requires the `X-Auth` shared key; with no key configured they all refuse requests (fail closed), and the comparison is constant-time.
 - The wake log at `server/state/wake_log.jsonl` is append-only. It holds the full inner monologue from every wake-up, including the text of messages that interruption control blocked from ever being sent, and it is never pruned (the pending outbox has a 7-day cleanup; this doesn't). It never leaves your Mac, but it is the single most intimate file in the project — worth knowing it exists.
 - The model subprocess runs with `--tools ""` by default: conversation only. With Ombre mounted, only the memory-tool whitelist is allowed (`--strict-mcp-config` shuts out any other MCP servers on the machine, `--allowedTools` pre-approves so nothing prompts) — built-in tools like Bash and file access are never enabled, and `--dangerously-skip-permissions` is never used.
+- [Code mode](#code-mode) is the one deliberate exception to the line above, which is why it ships off and has to be enabled by hand. Even there the permission prompts stay: they're answered by you, in the app. Its working directory is confined to an allowlist, and its reporting hooks are scoped to that one session rather than installed into your global claude config.
 - "Install" in the plugin store means downloading and running code on your Mac, so the registry is a **hardcoded allowlist in the backend** (only plugin repos under this project's account) — there is no "install from URL" input in the app, and there never will be. Plugin tools go through the same per-tool `--allowedTools` whitelist; enabling/disabling needs no network.
 - Keep the backend on your LAN or a Tailscale network. Don't expose it raw to the public internet.
 
 ## Roadmap
 
-- **Seamless chat ⇄ coding mode**: switch from `claude -p` chat mode straight into a coding session inside tmux — same persona, continuous memory and awareness — so you can have the Claude Code on your Mac run tasks for you from your phone.
 - **More plugins**: browser and other tool families landing in the plugin store one by one (each its own small repo).
 - **Web client**: the client is thin enough that it deserves a version that runs in a browser.
 

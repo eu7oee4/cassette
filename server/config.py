@@ -47,6 +47,39 @@ def user_pronoun() -> str:
     p = (state_store.load_settings().get("user_pronoun") or "").strip()
     return p if p in ("她", "他", "TA") else "TA"
 
+# ---------- Code 模式（tmux 里一个常驻的交互式 claude）----------
+# ⚠️ 这道门和本仓其它地方的安全姿态**不一样**：聊天/醒来只挂白名单 MCP 工具，内置的
+# Bash/Write/Edit 永远不开；code 模式恰恰相反——那个会话手上有整台电脑。所以默认关，
+# 要用得自己在 .env 里拧开，并读一遍 README 的 Code mode 一节。权限弹窗照旧保留
+# （绝不 --dangerously-skip-permissions），在 app 的内联终端里按。
+CODE_MODE_ENABLED = os.environ.get("CODE_MODE_ENABLED", "0") == "1"
+
+# 会话默认工作目录 = 那个 claude 的地盘：Grep/Glob 不带 path 时搜这儿、相对路径从这儿算、
+# 只有这个目录的 .claude/settings.local.json 权限白名单才生效。留空 = 用本仓根目录。
+CODE_CWD = os.environ.get("CODE_CWD", "").strip() or str(BASE_DIR.parent)
+
+# app 每次切入可以指定别的工作目录（多项目），但必须落在这些根目录之下——手机端能指定
+# 任意目录起一个有 Bash 权限的会话是不能接受的。逗号分隔；留空 = 只认 CODE_CWD 及其子目录。
+CODE_CWD_ALLOW = [p.strip() for p in os.environ.get("CODE_CWD_ALLOW", "").split(",") if p.strip()]
+
+# tmux 会话名（和你自己手开的会话重名会被杀，改这个避开）
+CODE_SESSION = os.environ.get("CODE_SESSION", "cassette-code").strip() or "cassette-code"
+
+# code 会话的人设追加档：交互式 claude 只能 --append-system-prompt（不能像聊天那样
+# --system-prompt-file 整个替换——替换掉它就没有工具用法说明了，活也就干不成）。
+# 人设 + 这份守则一起追加在默认提示词后面。
+# 用函数不用常量：import 时定死的话，先跑起后端、后写 code_addendum.md 得重启才认。
+_CODE_ADDENDUM_FILE = os.environ.get("CODE_ADDENDUM_FILE", "code_addendum.md")
+
+
+def code_addendum_path() -> Path:
+    p = BASE_DIR / _CODE_ADDENDUM_FILE
+    return p if p.exists() else BASE_DIR / "code_addendum.example.md"
+
+# 后端自己的地址：给 MCP 插件（如 codemode 自切）回调用。插件是独立进程，够不着这里的
+# uvicorn 命令行参数，只能靠这个约定。改端口跑记得同步改这里。
+BACKEND_URL = os.environ.get("CASSETTE_BACKEND_URL", "http://127.0.0.1:8000").rstrip("/")
+
 # 可选：Bark 推送（断连补投/主动消息时通知手机；不配则静默跳过）
 BARK_URL = os.environ.get("BARK_URL", "").strip()
 BARK_ICON = os.environ.get("BARK_ICON", "").strip()   # 通知图标（公网可访问的图片 URL），空=Bark 默认

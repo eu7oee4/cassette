@@ -8,6 +8,7 @@ struct ChatResponse: Decodable {
     let sticker_sends: [String]?    // 这轮他要发的表情（sticker id）
     let desc_updates: [DescUpdate]? // 这轮他改的表情描述
     let next_wake_hint: String?     // 这轮他若定了下次醒来 → 现成灰字提示文案；没定则 nil
+    let code_started: Bool?         // 这轮他自己切进了 Code 模式 → app 翻 codeMode，消息改道
 }
 
 /// 模型改了某张表情的描述。
@@ -119,7 +120,9 @@ struct ChatService {
         guard let url = URL(string: BackendConfig.baseURL + path) else {
             throw ChatServiceError.badURL
         }
-        let outMessages = history.filter { !$0.isMemoryNote }
+        // 灰字提示和 app 自己的系统提示（「已切进 Code 模式」「重发试试」）都不发回后端——
+        // 它们是 UI 说给人看的，混进历史就成了以 role:user 冒充用户说过的话。
+        let outMessages = history.filter { !$0.isMemoryNote && !$0.isSystem }
             .suffix(Self.sendHistoryCap)
             .map {
                 OutMessage(role: $0.sender == .me ? "user" : "assistant",
@@ -303,6 +306,97 @@ struct ChatService {
         struct Wrap: Decodable { let active: [String] }
         do { return try JSONDecoder().decode(Wrap.self, from: data).active }
         catch { throw ChatServiceError.badResponse }
+    }
+
+    // MARK: - Code 模式
+
+    /// 后端 Code 模式的状态。enabled=false（.env 没开/后端旧版）时 app 完全不显示入口。
+    struct CodeStatus: Decodable {
+        let enabled: Bool
+        let alive: Bool        // tmux 会话活着 = 模式开着（app 的开关以它为准）
+        let tmux: Bool         // 机器上有没有装 tmux
+        let cwd: String        // 会话默认工作目录，显示用
+        let busy: Bool?        // TA 正在跑活吗（只有 probeBusy 时才是真值）
+    }
+
+    /// 会话画面的一帧 + 当前确认弹窗的选项。
+    struct CodeScreen: Decodable {
+        let alive: Bool
+        let content: String
+        let dialog: [CodeDialogOption]?   // 空=没有弹窗在等
+    }
+
+    /// 确认弹窗里的一个选项：key 是要按的键，label 是弹窗里的原文。
+    /// **按钮文案一律用 label**——写死「1允许/2总允许/3拒绝」既不准，选项也常常不止三个。
+    struct CodeDialogOption: Decodable, Identifiable {
+        let key: String
+        let label: String
+        var id: String { key }
+    }
+
+    /// probeBusy=true 时后端会多花 0.6 秒比对两帧画面判断 TA 在不在干活（退出模式前问一句用）。
+    /// 回前台对齐是高频调用，那条路别开这个。
+    func codeStatus(probeBusy: Bool = false) async throws -> CodeStatus {
+        let path = probeBusy ? "/code/status?busy=1" : "/code/status"
+        let data = try await perform(authedRequest("GET", path, timeout: probeBusy ? 12 : 8))
+        do { return try JSONDecoder().decode(CodeStatus.self, from: data) }
+        catch { throw ChatServiceError.badResponse }
+    }
+
+    /// 切进 Code 模式：把最近历史发过去起会话（和 /chat 同一个条数口径——切换前后
+    /// 他看到的历史一字不差，记忆连贯是这么来的）。cwd 为空 = 用后端默认工作目录。
+    func codeStart(history: [ChatMessage], cwd: String? = nil) async throws {
+        struct Body: Encodable {
+            let messages: [OutMessage]
+            let cwd: String?
+        }
+        let messages = history.filter { !$0.isMemoryNote && !$0.isSystem }   // 同上，别把 UI 提示当用户的话
+            .suffix(Self.sendHistoryCap)
+            .map {
+                OutMessage(role: $0.sender == .me ? "user" : "assistant",
+                           text: $0.plainText,
+                           ts: Int($0.timestamp.timeIntervalSince1970))
+            }
+        let body = try JSONEncoder().encode(Body(messages: Array(messages), cwd: cwd))
+        // 起会话要杀旧的、写文件、等 shell——比普通请求慢，给足时间
+        _ = try await perform(authedRequest("POST", "/code/start", jsonBody: body, timeout: 40))
+    }
+
+    /// 发一条消息进 Code 会话。回复不在这条响应里——它走 hook → 待送达盒子 → app 轮询上屏。
+    /// 文件不像聊天那样转成 document block，后端会落盘、把路径给 TA 自己读。
+    func codeSend(text: String, imagesData: [Data] = [],
+                  filesData: [OutgoingFile] = []) async throws {
+        struct Body: Encodable {
+            let text: String
+            let images: [ImageOut]?
+            let files: [FileOut]?
+        }
+        let images: [ImageOut]? = imagesData.isEmpty ? nil :
+            imagesData.map { ImageOut(data: $0.base64EncodedString(), media_type: "image/jpeg") }
+        let files: [FileOut]? = filesData.isEmpty ? nil :
+            filesData.map { FileOut(data: $0.data.base64EncodedString(),
+                                    media_type: $0.mime, name: $0.name) }
+        let body = try JSONEncoder().encode(Body(text: text, images: images, files: files))
+        _ = try await perform(authedRequest("POST", "/code/send", jsonBody: body, timeout: 60))
+    }
+
+    /// 退出 Code 模式：停掉 Mac 上那个会话。
+    func codeStop() async throws {
+        _ = try await perform(authedRequest("POST", "/code/stop", jsonBody: Data("{}".utf8)))
+    }
+
+    /// 抓一帧会话画面（整个 pane，面板里可以往回翻）。
+    /// 超时压到 8s：蜂窝网络黑洞里 URLSession 会挂很久，面板宁可显示"没刷新"也别僵着。
+    func codeCapture(lines: Int = 240) async throws -> CodeScreen {
+        let data = try await perform(authedRequest("GET", "/code/capture?lines=\(lines)", timeout: 8))
+        do { return try JSONDecoder().decode(CodeScreen.self, from: data) }
+        catch { throw ChatServiceError.badResponse }
+    }
+
+    /// 按键透传（弹窗选项的数字、回车、Esc、Ctrl-C，或任意文本）。
+    func codeKeys(_ keys: String) async throws {
+        let body = try JSONEncoder().encode(["keys": keys])
+        _ = try await perform(authedRequest("POST", "/code/keys", jsonBody: body, timeout: 10))
     }
 
     // MARK: - 内部请求工具

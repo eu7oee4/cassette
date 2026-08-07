@@ -24,6 +24,7 @@ memory/
 outbox/
 prompts/persona*
 persona.md
+code_addendum.md
 playroom/
 
 # ===== 求职相关 =====

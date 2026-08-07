@@ -150,6 +150,21 @@ def outbox_append(item: dict) -> None:
         write_outbox(items)
 
 
+def outbox_append_once(item: dict, dedupe_key: str, origin: str, look_back: int = 8) -> bool:
+    """带去重的追加：最近 look_back 条里已有同 origin 同 key 的就不写。返回是否真的写了。
+
+    查重和写入必须在**同一把锁里**：code 模式一轮里并行调好几个工具时，几个 hook 进程会
+    同时打进来，各自查重时谁都还没落盘 → 全部通过 → 同一段话上屏好几次。"""
+    with _OUTBOX_LOCK:
+        items = read_outbox()
+        for x in items[-look_back:]:
+            if x.get("origin") == origin and x.get("hook_key") == dedupe_key:
+                return False
+        items.append(item)
+        write_outbox(items)
+        return True
+
+
 def outbox_pending() -> list[dict]:
     return [x for x in read_outbox() if not x.get("delivered")]
 

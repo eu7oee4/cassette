@@ -59,6 +59,28 @@ struct ContentView: View {
     private var rescueActive: Bool { rescueWaiting.values.contains { !$0.givenUp } }
 
     // 编辑消息弹窗状态
+    // Code 模式：消息改道 tmux 交互会话（那边手上有整台电脑），回复走待送达盒子回来。
+    // codeMode 的真相在后端（会话活着 = 模式开着），@AppStorage 只是冷启动前的乐观值，
+    // 每次回前台都用 /code/status 对齐一次。
+    @AppStorage("codeMode") private var codeMode = false
+    @State private var codeAvailable = false          // 后端开了 Code 模式吗（没开就完全不露入口）
+    @State private var codeSwitching = false          // 正在切换中：按钮转圈、挡住连点
+    @State private var terminalExpanded = false       // 内联终端面板展开着吗
+    @State private var confirmStopBusy = false        // 退出时那边正干着活 → 先问一句
+    /// 终端以下那一摞（附件条 + 输入栏）有多高，**按内容算，不去量**。
+    /// 量过一版，结果是正反馈震荡：终端变高 → 底下空间不够 → 输入栏被压 → 量出更小的值
+    /// → 终端算出自己还能更高 → 再压……静止时黑条都会自己上下跳。这些条子都是自己写的，
+    /// 高度可控，算出来就不再依赖布局结果，环就断了。
+    private var bottomBarsHeight: CGFloat {
+        var h: CGFloat = 52                                  // InputBar 单行
+        if showStickers { h += 301 }                         // 表情面板 300 + 分隔线
+        if pendingSticker != nil { h += 77 }
+        if !pendingImages.isEmpty { h += 73 }
+        if !pendingFiles.isEmpty { h += 48 }
+        return h   // 输入框长高的余地由面板自己的 growRoom 留，不用在这儿算行数
+    }
+
+    // 编辑消息弹窗状态
     @State private var editingMessage: ChatMessage? = nil
     @State private var editingText: String = ""
     @State private var editRefreshTick = 0   // 亲手编辑/删除的信号：ChatView 收到就手术式合并进冻结快照
@@ -103,10 +125,12 @@ struct ContentView: View {
         // .task(id: scenePhase)：进 active 启动、离开 active 自动取消循环，省电。
         .task(id: scenePhase) {
             guard scenePhase == .active else { return }
+            await syncCodeMode()   // 他可能在断流/后台期间自己切进了 Code 模式 → 回前台对齐
             await syncPending()
             await reconcileRescues()
             while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(15))
+                // Code 模式下他说的每句话都靠这条通道回来 → 提到 3s；平时 15s 省电。
+                try? await Task.sleep(for: .seconds(codeMode ? 3 : 15))
                 await syncPending()
                 await reconcileRescues()
             }
@@ -183,6 +207,14 @@ struct ContentView: View {
             .background(Color(.systemGroupedBackground))
             .safeAreaInset(edge: .bottom, spacing: 0) {
                 VStack(spacing: 0) {
+                    // Code 模式：终端内联在输入框上方。它长高时气泡区自然被压短（safeAreaInset
+                    // 的语义），气泡区底部因此永远贴着终端窗口顶部。
+                    // bottomBars 把下面这一摞的实测高度告诉它，它才知道自己最多能占多高——
+                    // 表情面板、待发照片条、文件条都会让可用空间变，估算撑不住。
+                    if codeMode {
+                        CodeTerminalPanel(service: chatService, expanded: $terminalExpanded,
+                                          bottomBars: bottomBarsHeight)
+                    }
                     if showStickers {
                         Divider()
                         StickerPanel(store: stickerStore, onPick: stageSticker)
@@ -250,6 +282,16 @@ struct ContentView: View {
                     editRefreshTick += 1   // 离底冻结快照就地撤行，不用滑回底部
                 }
                 Button("取消", role: .cancel) { }
+            }
+            // 退出 Code 模式时那边正在干活：说清楚代价再让人按。
+            .confirmationDialog("TA 正在电脑上干活", isPresented: $confirmStopBusy,
+                                titleVisibility: .visible) {
+                Button("停掉并退出", role: .destructive) {
+                    Task { @MainActor in await exitCodeMode() }
+                }
+                Button("先不退", role: .cancel) { }
+            } message: {
+                Text("退出会停掉那边正在跑的活，做到一半的东西不会有结果。")
             }
             .fullScreenCover(isPresented: Binding(
                 get: { !hasOnboarded },
@@ -385,12 +427,36 @@ struct ContentView: View {
                 .lineLimit(1)
                 .truncationMode(.tail)
             Spacer()
-            Color.clear.frame(width: 40, height: 40)
+            // 右侧：Code 模式开关（后端没开这个功能时是个等宽空位，标题照样居中）
+            if codeAvailable {
+                codeToggle
+            } else {
+                Color.clear.frame(width: 40, height: 40)
+            }
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 4)
         .background(.bar)
         .overlay(alignment: .bottom) { Divider() }
+    }
+
+    /// Code 模式开关：切入=起会话并注入最近历史；切出=停会话回普通聊天。
+    private var codeToggle: some View {
+        Button(action: toggleCodeMode) {
+            Group {
+                if codeSwitching {
+                    ProgressView().tint(codeMode ? .white : Color.theme)
+                } else {
+                    Image(systemName: "chevron.left.forwardslash.chevron.right")
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(codeMode ? Color.white : Color.theme)
+                }
+            }
+            .frame(width: 40, height: 30)
+            .background(Capsule().fill(codeMode ? Color.theme : Color.clear))
+        }
+        .disabled(codeSwitching)
+        .accessibilityLabel(codeMode ? "Code 模式：开（点这里退出）" : "切进 Code 模式")
     }
 
     // MARK: - 发送 / 流式接收
@@ -406,11 +472,129 @@ struct ContentView: View {
         showStickers.toggle()
     }
 
+    /// 切 Code 模式：入=带最近历史起会话；出=停会话。
+    /// 失败时**不翻** codeMode——开关必须和后端会话的真实状态一致，翻了就会往一个不存在的
+    /// 会话里发消息。
+    private func toggleCodeMode() {
+        dismissKeyboard()
+        codeSwitching = true
+        Task { @MainActor in
+            defer { codeSwitching = false }
+            if codeMode {
+                // 退出 = 杀掉 Mac 上那个会话。它要是正干着活，先问一句——不问的话
+                // 一个跑了十分钟的活就这么没了。
+                if let st = try? await chatService.codeStatus(probeBusy: true), st.busy == true {
+                    confirmStopBusy = true
+                    return
+                }
+                await exitCodeMode()
+            } else {
+                do {
+                    try await chatService.codeStart(history: chatStore.messages)
+                    codeMode = true
+                    chatStore.appendSystemMessage("已切进 Code 模式")
+                } catch {
+                    errorText = "切 Code 模式失败：\((error as? ChatServiceError)?.errorDescription ?? error.localizedDescription)"
+                }
+            }
+        }
+    }
+
+    /// 真的退出 Code 模式：停掉 Mac 上那个会话。
+    @MainActor
+    private func exitCodeMode() async {
+        do {
+            try await chatService.codeStop()
+            codeMode = false
+            terminalExpanded = false
+            chatStore.appendSystemMessage("已退出 Code 模式")
+        } catch {
+            // 停不掉就别翻开关：翻了下一次回前台 syncCodeMode 又会按"会话还活着"
+            // 给翻回来，还补一条"已切进 Code 模式"，人看着莫名其妙。
+            errorText = "没能停掉会话：\((error as? ChatServiceError)?.errorDescription ?? error.localizedDescription)"
+        }
+    }
+
+    /// 和后端对齐 Code 模式状态（会话活着 = 模式开着，这是唯一不变量）。
+    /// 回前台时校准：他自己切进 Code 模式的那个 done 事件若在断流/后台期间丢了，靠这个补上。
+    @MainActor
+    private func syncCodeMode() async {
+        guard let st = try? await chatService.codeStatus() else { return }
+        codeAvailable = st.enabled && st.tmux
+        guard st.enabled else {
+            if codeMode { codeMode = false; terminalExpanded = false }
+            return
+        }
+        guard st.alive != codeMode else { return }
+        codeMode = st.alive
+        if !st.alive { terminalExpanded = false }
+        if st.alive { chatStore.appendSystemMessage("已切进 Code 模式") }
+    }
+
+    /// Code 模式的发送：文字 + 图片进会话，回复走待送达盒子回来。
+    /// 不占 isWaiting/isGenerating——那边干一件活可能几分钟，气泡由轮询上屏，
+    /// 期间输入框不该锁着（他在干活时人还想再补一句是常事）。
+    private func sendToCode(_ trimmed: String) {
+        var imagesData: [Data] = []
+        var bubbleIds: [UUID] = []
+        for data in pendingImages {
+            if let url = AppFiles.saveChatImage(data) {
+                let m = ChatMessage(sender: .me, kind: .image(url), timestamp: Date())
+                chatStore.append(m)
+                bubbleIds.append(m.id)
+            }
+            imagesData.append(data)
+        }
+        pendingImages = []
+        // 文件：和聊天一样落盘上屏成卡片，数据随消息带过去（后端存进会话够得着的目录、给路径）
+        let filesToSend = pendingFiles
+        for f in pendingFiles {
+            if let url = AppFiles.saveChatFile(f.data, name: f.name) {
+                let m = ChatMessage(sender: .me, kind: .file(url, f.name), timestamp: Date())
+                chatStore.append(m)
+                bubbleIds.append(m.id)
+            }
+        }
+        pendingFiles = []
+        if !trimmed.isEmpty {
+            let m = ChatMessage(sender: .me, kind: .text(trimmed), timestamp: Date())
+            chatStore.append(m)
+            bubbleIds.append(m.id)
+        }
+        draft = ""
+        DispatchQueue.main.async { draft = "" }
+        Task { @MainActor in
+            do {
+                try await chatService.codeSend(text: trimmed, imagesData: imagesData,
+                                               filesData: filesToSend)
+            } catch {
+                // 没送进去（弹窗护栏挡下 / 会话没了）：撤掉这批气泡，别让它看着像发出去了；
+                // 文字放回输入框，按掉弹窗直接重发（图得重选）。
+                for id in bubbleIds { chatStore.remove(id: id) }
+                editRefreshTick += 1
+                draft = trimmed
+                errorText = (error as? ChatServiceError)?.errorDescription ?? error.localizedDescription
+            }
+        }
+    }
+
     private func send() {
         let trimmed = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !isGenerating,
               !trimmed.isEmpty || pendingSticker != nil
                 || !pendingImages.isEmpty || !pendingFiles.isEmpty else { return }
+
+        // Code 模式：走 tmux 会话那条管道。表情没接——在一个正在写代码的会话里没什么意义，
+        // 挡住说清楚就行。
+        if codeMode {
+            if pendingSticker != nil {
+                errorText = "Code 模式发不了表情，退出 Code 模式再发。"
+                return
+            }
+            sendToCode(trimmed)
+            return
+        }
+
         isGenerating = true   // 同步占位：立刻禁用发送、挡住极快的重复触发
         isWaiting = true
 
@@ -629,6 +813,12 @@ struct ContentView: View {
         if let hint = resp.next_wake_hint, !hint.isEmpty {
             chatStore.appendMemoryNote(hint)
         }
+        // 他这轮自己切进了 Code 模式（调了 code_start 工具）→ 翻开关，后续消息改道会话。
+        if resp.code_started == true, !codeMode {
+            codeMode = true
+            codeAvailable = true
+            chatStore.appendSystemMessage("已切进 Code 模式")
+        }
         // 他这轮做/改的网页 → 网页卡片消息（stored 只有标题，从后端反查 id）。
         let pages = (resp.stored ?? []).filter { $0.tool == "webpage" }
         if !pages.isEmpty {
@@ -720,7 +910,13 @@ struct ContentView: View {
     // MARK: - 编辑 / 重新生成
 
     /// gobackward：打开编辑弹窗（弹窗里 Edit / Regenerate 按钮按发送者不同）。
+    /// Code 模式下整个禁掉：那边的操作有真实副作用（改了文件、跑过命令），
+    /// 重放一遍历史等于再干一次。
     private func startEdit(_ message: ChatMessage) {
+        guard !codeMode else {
+            errorText = "Code 模式下不能编辑/重新生成（那边的操作有真实副作用），退出 Code 模式再用。"
+            return
+        }
         editingText = message.plainText
         editingMessage = message
     }

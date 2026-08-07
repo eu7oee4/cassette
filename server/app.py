@@ -15,6 +15,7 @@ import json
 import re
 import secrets
 import subprocess
+import threading
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -27,6 +28,7 @@ from pydantic import BaseModel
 
 import urllib.parse
 
+import code_bridge
 import config
 import ombre_rest
 import plugins
@@ -40,10 +42,14 @@ from pipeline import Message
 @asynccontextmanager
 async def _lifespan(_app: FastAPI):
     """启动 wake 调度器（on_event 已被 FastAPI 弃用，用 lifespan）。"""
-    task = asyncio.create_task(wake.scheduler_loop()) if config.PROACTIVE_ENABLED else None
+    tasks = []
+    if config.PROACTIVE_ENABLED:
+        tasks.append(asyncio.create_task(wake.scheduler_loop()))
+    if config.CODE_MODE_ENABLED:
+        tasks.append(asyncio.create_task(_code_dialog_watchdog()))
     yield
-    if task:
-        task.cancel()
+    for t in tasks:
+        t.cancel()
 
 
 app = FastAPI(title="cassette backend", lifespan=_lifespan)
@@ -175,6 +181,7 @@ class ChatResponse(BaseModel):
     sticker_sends: list[str] = []        # 这轮他要发的表情（sticker id，按顺序）
     desc_updates: list[DescUpdate] = []  # 这轮他改的表情描述
     next_wake_hint: Optional[str] = None  # 这轮他若定了下次醒来 → 现成的灰字提示文案；没定则 None
+    code_started: bool = False           # 这轮他自己切进了 code 模式 → app 收到翻 codeMode
 
 
 def _prepare_chat(req: ChatRequest) -> tuple[str, dict]:
@@ -250,11 +257,15 @@ def finalize_chat_reply(reply: str, stored: list[dict], req: ChatRequest,
     except Exception as e:
         logerr(f"写 recent_window 失败: {e}")
 
+    # 这轮他自己调工具切进了 code 模式：剥出来置标志（控制信号，不是记忆产物，不进 Mind），
+    # app 收到 code_started 就翻 codeMode，后续消息改道 tmux 会话。
+    code_started = any(s.get("tool") == "codemode" for s in stored)
+
     # 聊天里存/改的记忆也记进 wake_log（source=chat，无 thoughts 不进时间线）：
     # 醒来的"别重复存"清单靠它才看得到聊天里已存过的。
-    # 网页操作不进日志（眠眠定）：它有聊天卡片 + HTML 文件列表两个展示面，
-    # 心流日志只记记忆类操作，防重复清单也不被网页标题污染。
-    mem_stored = [s for s in stored if s.get("tool") != "webpage"]
+    # 网页/codemode 不进日志：网页有聊天卡片 + HTML 文件列表两个展示面，codemode 是控制
+    # 信号；心流日志只记记忆类操作，防重复清单也不被它们污染。
+    mem_stored = [s for s in stored if s.get("tool") not in pipeline.NON_MEMORY_TOOLS]
     if mem_stored:
         try:
             state_store.append_wake_log({"ts": int(time.time()), "time": pipeline.now_str(),
@@ -269,6 +280,7 @@ def finalize_chat_reply(reply: str, stored: list[dict], req: ChatRequest,
         sticker_sends=sticker_sends,
         desc_updates=[DescUpdate(**u) for u in desc_updates],
         next_wake_hint=next_wake_hint,
+        code_started=code_started,
     )
 
 
@@ -541,6 +553,302 @@ def post_pending_ack(body: AckIn, x_auth: Optional[str] = Header(default=None, a
     verify_auth(x_auth)
     state_store.outbox_ack(body.ids)
     return {"ok": True}
+
+
+# ---------- Code 模式（tmux 里一个常驻的交互式 claude）----------
+# 聊天走 `claude -p` 一次性子进程；code 模式换一条运输管道：消息 send-keys 进 tmux 会话，
+# 回复由会话里的 hook POST 回 /code/append → outbox → app 现有的轮询上屏。
+# 记忆连贯是架构自带的：这一来一回照常进 app 的 ChatStore，切回聊天时下一轮注入的历史里
+# 天然含着 code 模式说过的每一句，什么都不用"同步"。
+
+class CodeStartIn(BaseModel):
+    messages: list[Message] = []        # app 发来的最近历史（和 /chat 同结构、同条数）
+    cwd: Optional[str] = None           # 这次会话的工作目录；不给 = config.CODE_CWD
+
+
+class CodeSendIn(BaseModel):
+    text: str = ""
+    images: Optional[list[ImageInput]] = None   # 随消息带图（同 chat 的结构）
+    files: Optional[list[FileInput]] = None     # 随消息带文件；和聊天不同，这边落盘给路径
+
+
+class CodeKeysIn(BaseModel):
+    keys: str
+
+
+class CodeAppendIn(BaseModel):
+    """会话里的 hook 上报的一段正文（server/hooks/code_segments.py 发的）。"""
+    role: str = "assistant"
+    text: str = ""
+    source: str = ""                    # code-stop（这轮说完了）/ code-seg（中间过程）
+    ts: Optional[str] = None            # 正文哈希派生，重试同 ts → 服务端去重
+
+
+CODE_HISTORY_CAP = 100    # 注入 code 会话的历史条数（和 app 发 /chat 的口径对齐）
+CODE_BARK_GAP_SEC = 60    # 一轮 Stop 可能连发好几段，60s 内只推第一条
+
+
+_code_bark_state: dict = {"last": 0.0}
+
+
+def _require_code() -> None:
+    """code 模式没在 .env 打开 → 503（app 据此不显示入口）。"""
+    if not config.CODE_MODE_ENABLED:
+        raise HTTPException(status_code=503,
+                            detail="Code 模式没开：在 server/.env 里设 CODE_MODE_ENABLED=1 再重启后端")
+
+
+def _code_window_append(role: str, text: str) -> None:
+    """code 模式的对话也写进 recent_window——不然醒来时它对这段完全失明，会拿着几小时前的
+    世界说胡话。加锁口径同 finalize。"""
+    if not (text or "").strip():
+        return
+    try:
+        with state_store.WINDOW_LOCK:
+            window = state_store.read_recent_window()
+            window.append({"role": role, "text": text, "ts": int(time.time())})
+            state_store.write_recent_window(window)
+    except Exception as e:
+        logerr(f"code 写 recent_window 失败: {e}")
+
+
+# 聊天里说过的技术判断都是没工具时说的，切过来必须当传闻不当前提。
+_CODE_CTX_CAVEAT = (
+    "\n\n【关于上面这些对话】里面凡是关于代码/文件/配置/报错的具体说法，都是你在手机聊天里"
+    "**没有任何电脑工具、读不到任何文件**的情况下说的，一律当没验证过的传闻，别当既定前提。"
+    "以你现在自己读到的文件为准；对不上就以文件为准，不用照顾之前说过的话。\n"
+)
+
+
+def _code_context(conv: list[dict], scene: str, tail: str = "") -> str:
+    """拼注入给新会话的第一段话：场景 + 最近的对话（和聊天同款渲染）+ 告诫。"""
+    timeline = pipeline.build_context_timeline(conv, reflect_limit=5) if conv else "（还没聊过什么）"
+    return (scene + "\n\n【下面是你们刚才的对话】\n" + timeline + _CODE_CTX_CAVEAT + tail)
+
+
+@app.get("/code/status")
+def code_status(busy: int = 0, x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
+    """app 用它决定显不显示 Code 入口、以及回前台时对齐模式开关。
+    没开/没装 tmux 也照常回 200（enabled=false），app 静默隐藏入口即可。
+
+    busy=1 时额外探一下"TA 在不在干活"（退出模式前问一句用）。这个探测要花 0.6 秒
+    比对两帧画面，所以默认不做——回前台对齐是高频调用，不该为它等。"""
+    verify_auth(x_auth)
+    if not config.CODE_MODE_ENABLED:
+        return {"enabled": False, "alive": False, "tmux": False, "cwd": "", "busy": False}
+    return {"enabled": True, "alive": code_bridge.session_alive(),
+            "tmux": code_bridge.tmux_available(), "cwd": config.CODE_CWD,
+            "busy": bool(busy) and code_bridge.is_busy()}
+
+
+@app.post("/code/start")
+def code_start(inp: CodeStartIn, x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
+    """切进 code 模式：杀旧起新（每次都是干净会话，无漂移）+ 注入最近历史。"""
+    verify_auth(x_auth)
+    _require_code()
+    conv = [{"ts": m.ts, "role": m.role, "text": m.text} for m in inp.messages][-CODE_HISTORY_CAP:]
+    scene = (f"【场景】你刚从 {config.user_name()} 的手机聊天切到 code 模式：还是你，"
+             "只是这个会话里你手上有整台电脑的工具（读写文件、跑命令都行）。"
+             f"{config.user_name()} 多半是有活要你干，也可能只是继续聊。")
+    tail = ("\n【说明】活干到关键节点或者干完了，正常跟 TA 说话就行——你说的话会回到 TA 的"
+            "聊天气泡里。先打个招呼说你切过来了。")
+    r = code_bridge.start(_code_context(conv, scene, tail), config.AUTH_KEY, cwd=inp.cwd,
+                          mcp_configs=_code_mcp_configs())
+    if not r.get("ok"):
+        raise HTTPException(status_code=409, detail=r.get("error", "起会话失败"))
+    return r
+
+
+def _code_mcp_configs() -> list:
+    """给 code 会话挂的 MCP：长期记忆跟着走（不然切过去就失忆了）。
+    插件不挂——那些工具是给聊天用的，code 会话手上有真家伙，不需要。"""
+    if not pipeline.ombre_alive():
+        return []
+    return [str(pipeline._ombre_mcp_config())]
+
+
+@app.post("/code/send")
+def code_send(inp: CodeSendIn, x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
+    verify_auth(x_auth)
+    _require_code()
+    # 先过护栏再落图，别白存文件
+    if not code_bridge.session_alive():
+        raise HTTPException(status_code=409, detail="会话不在（先切一次 Code 模式）")
+    if code_bridge.dialog_pending():
+        raise HTTPException(status_code=409,
+                            detail="TA 正停在一个确认弹窗上，这条会被弹窗吃掉——先在终端里按掉，再发")
+    msg = (inp.text or "")
+    notes: list[str] = []
+    n_img = 0
+    if inp.images:
+        try:
+            items = [(base64.b64decode(im.data), im.media_type) for im in inp.images]
+        except Exception:
+            raise HTTPException(status_code=400, detail="图片 base64 解不开")
+        paths = code_bridge.save_uploads(items)
+        n_img = len(paths)
+        notes.append(f"〔随消息发来 {n_img} 张图，用 Read 看：{'  '.join(paths)}〕")
+    n_file = 0
+    if inp.files:
+        try:
+            items = [(base64.b64decode(f.data), f.name) for f in inp.files]
+        except Exception:
+            raise HTTPException(status_code=400, detail="文件 base64 解不开")
+        # 落盘给路径，不转 document block：那个会话手上有 Read/Grep，自己看比塞进上下文好，
+        # 大文件也不占 token。
+        paths = code_bridge.save_files(items)
+        n_file = len(paths)
+        notes.append(f"〔随消息发来 {n_file} 个文件，自己去读：{'  '.join(paths)}〕")
+    if notes:
+        body = "\n".join(notes)
+        msg = (msg + "\n\n" + body) if msg.strip() else body
+    if not msg.strip():
+        raise HTTPException(status_code=400, detail="空消息")
+    # 时间头：交互式会话里没有聊天那套时间注入，模型只能靠猜（实锤过：下午说"早点睡"）。
+    msg = f"〔现在是 {pipeline.now_str()}〕\n{msg}"
+    r = code_bridge.send(msg)
+    if not r.get("ok"):
+        raise HTTPException(status_code=409, detail=r.get("error", "没发进会话"))
+    extra = (f"〔发来{n_img}张图〕" if n_img else "") + (f"〔发来{n_file}个文件〕" if n_file else "")
+    _code_window_append("user", inp.text + extra)
+    return r
+
+
+@app.post("/code/stop")
+def code_stop(x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
+    verify_auth(x_auth)
+    _require_code()
+    return code_bridge.stop()
+
+
+@app.get("/code/capture")
+def code_capture(lines: int = 200, x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
+    """终端面板轮询：会话画面（带 scrollback）+ 当前弹窗的选项。画面可能含敏感输出，要鉴权。"""
+    verify_auth(x_auth)
+    _require_code()
+    return code_bridge.capture(lines=lines)
+
+
+@app.post("/code/keys")
+def code_keys(inp: CodeKeysIn, x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
+    """终端面板的按键透传（弹窗选项、回车、Esc、Ctrl-C 都走这儿）。"""
+    verify_auth(x_auth)
+    _require_code()
+    return code_bridge.send_keys(inp.keys)
+
+
+def _fence_code_if_needed(text: str) -> str:
+    """会话上报的大段裸代码（没带围栏的）包上围栏 → app 渲染成可横滑、可一键复制的代码卡，
+    不再纯文本刷屏。保守启发式：整段像 HTML 且够长才包，日常对话零误伤。"""
+    if "```" in text:
+        return text
+    if text.count("\n") >= 8 and re.search(r"<!DOCTYPE\s|<html[\s>]", text, re.I):
+        return "```html\n" + text.rstrip() + "\n```"
+    return text
+
+
+@app.post("/code/append")
+def code_append(inp: CodeAppendIn, x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
+    """会话里 hook 的上报口：一段正文 → 待送达盒子（app 轮询上屏）+ recent_window（醒来可见）。"""
+    verify_auth(x_auth)
+    _require_code()
+    import hashlib
+    text = _fence_code_if_needed((inp.text or "").strip())
+    if inp.role != "assistant" or not text:
+        return {"ok": True, "skipped": True}
+    # 去重：hook 超时会重试且 ts 不变 → 同 (ts, 正文) 只收一次。
+    # （踩过：Bark 同步调用把响应拖过 hook 的 8s 超时 → 重试 → 手机上连着弹三条一样的。）
+    # 查重+写入走 outbox_append_once 的同一把锁：一轮里并行调好几个工具时，几个 hook 进程
+    # 会同时打进来，分开做的话谁查重时都还没落盘，同一段话会上屏好几次。
+    dedupe_key = f"{inp.ts or ''}|{hashlib.md5(text.encode()).hexdigest()[:12]}"
+    written = state_store.outbox_append_once(
+        {"id": uuid.uuid4().hex[:12], "ts": int(time.time()),
+         "text": text, "sticker_ids": [], "delivered": False,
+         "origin": "code", "hook_key": dedupe_key},
+        dedupe_key, origin="code")
+    if not written:
+        return {"ok": True, "deduped": True}
+    _code_window_append("assistant", text)
+    # Bark 只在 TA 这一轮说完、停下来等人的时候推（source=code-stop）。中间过程（工具之间
+    # 的逐段上报）一律不推——干一小时的活能推出上百条通知，而 app 在前台本来就看得到。
+    # ⚠️ 必须线程化：同步 urlopen 会把这个响应拖过 hook 的超时，hook 重试就重复上屏。
+    if (inp.source or "").endswith("-stop"):
+        now = time.time()
+        if now - _code_bark_state.get("last", 0) > CODE_BARK_GAP_SEC:
+            _code_bark_state["last"] = now
+            threading.Thread(target=bark_push, args=(text,), daemon=True).start()
+    return {"ok": True}
+
+
+# ---------- 自己切进 code 模式（codemode 插件的转发口）----------
+class CodemodeStartIn(BaseModel):
+    task: str
+    cwd: Optional[str] = None
+
+
+@app.post("/codemode/start")
+def codemode_start(inp: CodemodeStartIn, x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
+    """聊天里 TA 自己调 code_start 工具切过去（装了 codemode 插件才有这个能力）。
+
+    已有活会话直接拒绝——杀旧起新会丢掉正在干的活。上下文用服务端的 recent_window
+    （app 不在这条链上），任务并进首条注入，避免"会话还没起完就 paste"的时序问题。"""
+    verify_auth(x_auth)
+    _require_code()
+    task = (inp.task or "").strip()
+    if not task:
+        raise HTTPException(status_code=400, detail="task 不能为空")
+    if code_bridge.session_alive():
+        return {"ok": False, "error": "会话占用中：已经有一个 code 会话在跑，别杀掉正在干的活"}
+    window = state_store.read_recent_window()
+    conv = [{"ts": w.get("ts"), "role": w.get("role"), "text": w.get("text", "")}
+            for w in window][-CODE_HISTORY_CAP:]
+    scene = (f"【场景】刚才在聊天里 {config.user_name()} 让你切到 code 模式干活，你自己调"
+             "工具切过来了——还是你，只是这个会话里你手上有整台电脑的工具。")
+    tail = (f"\n【第一件事（你切过来就是为了它）】\n〔现在是 {pipeline.now_str()}〕\n{task}\n"
+            "〔注意：上面这段任务描述是你在聊天里自己转述的，不是原话。它已经原样回显进"
+            f"{config.user_name()}的聊天了，TA 看得到，转述歪了随时会发消息来纠正——"
+            "**一纠正就以 TA 为准**，别再抱着这段。另外它跟聊天记录一个待遇：里面凡是技术判断"
+            "（哪个文件、哪段逻辑、什么原因）都是没工具时写的、没验证过，先自己读代码确认；"
+            "拿不准 TA 到底要什么，直接在聊天里问，别照着这段自己往下干。〕\n\n"
+            "【说明】活干到关键节点或者干完了，正常跟 TA 说话就行——你说的话会回到 TA 的聊天气泡里。")
+    r = code_bridge.start(_code_context(conv, scene, tail), config.AUTH_KEY, cwd=inp.cwd,
+                          mcp_configs=_code_mcp_configs())
+    if r.get("ok"):
+        logerr(f"自切 code 模式：{task[:80]}")
+        # task 是 TA 自己写的、直接进了会话，用户在手机上看不见 → 原样回显进聊天，
+        # 让 TA 能当场发现转述错了。
+        try:
+            state_store.outbox_append({"id": uuid.uuid4().hex[:12], "ts": int(time.time()),
+                                       "text": f"〔切到 Code 模式，task 如下〕\n\n{task}",
+                                       "sticker_ids": [], "delivered": False, "origin": "code"})
+        except Exception as e:
+            logerr(f"code task 回显失败: {e}")
+    return r
+
+
+CODE_DIALOG_PUSH_SEC = 300   # 确认弹窗等这么久还没人按才推一次（平时人就在旁边，别烦）
+_CODE_DIALOG_STATE = {"first": 0.0, "pushed": False}
+
+
+async def _code_dialog_watchdog() -> None:
+    """确认弹窗盯梢：卡在那儿超过 5 分钟没人按 → Bark 提醒一次（每个弹窗只推一次，按掉自动
+    复位）。覆盖"人出门了它在家干等"的场景。"""
+    while True:
+        await asyncio.sleep(60)
+        try:
+            pending = await asyncio.to_thread(code_bridge.dialog_pending)
+        except Exception:
+            continue
+        st = _CODE_DIALOG_STATE
+        if not pending:
+            st["first"], st["pushed"] = 0.0, False
+            continue
+        now = time.time()
+        if not st["first"]:
+            st["first"] = now
+        elif not st["pushed"] and now - st["first"] >= CODE_DIALOG_PUSH_SEC:
+            st["pushed"] = True
+            await asyncio.to_thread(bark_push, "Code 会话有个确认弹窗等了 5 分钟没人按")
 
 
 # ---------- 记忆页（Ombre REST 代理）----------
