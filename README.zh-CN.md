@@ -161,6 +161,8 @@ cp Config.swift.example Config.swift
 
 另外 Ombre 自己还有两个**你不动它也会变**的依赖：脱水用的压缩 LLM（`OMBRE_COMPRESS_MODEL`，指向远端模型别名，供应商下线/换指向不会通知你，而脱水失败是降级成原文截断、不报错）和向量化模型（换了模型，存量向量就和新查询不在同一个空间里了）。两个都建议写成明确的版本/型号，别用浮动别名。
 
+还有一件同类的事：那个别名可能**换成会思考的模型**，或者你在用的模型某天把思考设成了默认开。DeepSeek、Gemini 这类混合推理模型会先花 output token 想一遍，而思考和正文**共用同一份 `max_tokens`** —— 额度宽裕时只是白烧钱、变慢（实测 DeepSeek 拆一次日记要烧掉三千个思考 token），额度一紧就是思考把预算整个吃光、正文返回空字符串。落到 Ombre 上就是前面那两种静默失败：脱水降级成原文截断，日记整理（`grow`）报「返回空结果」，那天想存的东西一条都没落地 —— 而日志里只有一句 JSON 解析失败，不会告诉你是思考吃掉了预算。Ombre 对认得出的厂商是默认关的（Gemini 走原生 `thinkingConfig`，`thinking_budget` 默认 0），但 `openai_compat` 那条路后面可能是任何一家兼容端点，它没法替你决定，只能你自己在 `config.yaml` 的 `dehydration.extra_body` 里关掉（DeepSeek 是 `thinking: {type: disabled}`，各家参数并不通用，换供应商要一并改）。脱水和日记整理都是机械式转换，不需要思考，关掉既省钱又躲开这类静默失败。
+
 ## 项目结构
 
 ```
