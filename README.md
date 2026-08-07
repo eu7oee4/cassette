@@ -106,8 +106,9 @@ window), so it won't wake up amnesiac about the last hour of work.
 - **Optional: let it switch itself.** The backend also accepts a self-switch call, so the
   companion can decide mid-conversation to move to your Mac; it echoes the task it wrote into your
   chat verbatim, so a garbled restatement is something you catch immediately. Reaching it needs a
-  small separate plugin (not in the registry yet) — until you install one, that switch is yours
-  alone to flip.
+  small separate plugin, **Self-switch Code mode**, from the plugin store — **without it, that
+  switch is yours alone to flip**. Even with it installed, the wake-up path never gets this tool:
+  a self-initiated wake-up with nobody watching cannot open a session.
 
 ## History is editable (editing it = editing its memory)
 
@@ -162,6 +163,15 @@ Run it, name the two of you in the first-launch flow, and start talking.
 ### 4. Long-term memory (optional)
 
 Self-host an [Ombre-Brain](https://github.com/P0luz/Ombre-Brain) instance (P0luz's open-source memory system, one Docker command) and point `OMBRE_MCP_URL` in `.env` at it; if Ombre has static-token auth enabled (`mcp_auth_mode: "token"`, recommended), put the same secret in `OMBRE_MCP_TOKEN`. The backend probes it before every call: if Ombre isn't there — not installed, disabled, or down — it falls back to plain chat, and the memory layer can never take the app down with it.
+
+**On Ombre versions**: any version connects, but two seams are matched *by name*, and a mismatch **fails silently** (no error anywhere):
+
+- **The tool allowlist** is hardcoded as `OMBRE_TOOLS` in `pipeline.py` (written against the 2.13.x tool names). Tools added by a newer Ombre aren't on the list, so `--allowedTools` won't admit them — the companion simply can't use them, and nothing says so. The cushion: Ombre's own acceptance contract pins 12 names as unchangeable (`breath / hold / grow / dream / trace / anchor / release / pulse / plan / letter_write / letter_read / I`). **The three most likely to move are the ones *not* in that contract: `breath_search`, `breath_advanced`, `source_read`.**
+- **Writes from the memory page** go through Ombre's Dashboard REST (`ombre_rest.py`: editing a memory is `/api/bucket/{id}/edit`, deleting is `/forget`). Those two endpoints aren't in the contract either. If they change, browsing memories still works while editing and deleting break.
+
+So when you upgrade Ombre, **pin by digest rather than by tag** (tags on Docker Hub can be re-pushed), and diff the `@mcp.tool()` docstrings in its `server.py` while you're at it — those docstrings *are* the tool descriptions the companion sees every single turn, and they move with the version.
+
+Ombre also has two dependencies that **change without you touching anything**: the compression LLM used for dehydration (`OMBRE_COMPRESS_MODEL` points at a remote model alias — providers retire and re-point aliases without telling you, and a failed dehydration degrades to a truncated excerpt instead of erroring) and the embedding model (change it and your existing vectors no longer share a space with new queries). Pin both to explicit versions; avoid floating aliases.
 
 ## Project layout
 

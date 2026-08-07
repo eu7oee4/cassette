@@ -64,6 +64,16 @@ REGISTRY: dict[str, dict] = {
         "display_name": "网页工坊",
         "description": "做 / 改 / 传送 HTML 网页（第一个插件）",
     },
+    # 装这个 = 把 Code 模式的开关也交到 TA 手上（不装就只有你能按顶栏那个按钮）。
+    # 它只是个转发壳，真活在 /codemode/start；护栏全在宿主侧，插件不参与：已有会话不杀旧
+    # 起新、cwd 必须落在 CODE_CWD_ALLOW 里、权限弹窗一律保留、**醒来那条路不挂它**
+    # （见下面 NO_WAKE_PLUGINS）。前提是后端先开了 CODE_MODE_ENABLED=1，没开调用返 503。
+    "codemode": {
+        "repo": "https://github.com/eu7oee4/cassette-plugin-codemode",
+        "commit": "2388151f581f099405be49cac652402d0fe60b5e",
+        "display_name": "自己切 Code 模式",
+        "description": "让 TA 在聊天里自己切到你电脑上去干活（需后端先开启 Code 模式）",
+    },
 }
 
 _NAME_RE = re.compile(r"^[a-z0-9_-]{1,40}$")

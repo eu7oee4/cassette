@@ -95,7 +95,8 @@ Code 模式：app → POST /code/send   → tmux send-keys → 活着的 claude 
   重放历史等于再干一遍。
 - **可选：让 TA 自己切。** 后端也收「自己切过去」这个调用，TA 可以在聊天中途自己决定挪到你
   Mac 上；它写的 task 会原样回显进你的聊天，转述歪了你当场就能发现。够到这个调用需要一个单独的
-  小插件（还没上架）——没装之前，这个开关只有你能按。
+  小插件「自己切 Code 模式」（插件商店里装）——**不装的话这个开关只有你能按**。
+  装了也够不到的地方：醒来那条路不挂这个工具，一次没人看着的自发醒来开不了会话。
 
 ## 历史是可编辑的（编辑它 = 编辑 TA 的记忆）
 
@@ -150,6 +151,15 @@ cp Config.swift.example Config.swift
 ### 4. 长期记忆（可选）
 
 自部署一个 [Ombre-Brain](https://github.com/P0luz/Ombre-Brain)（P0luz 的开源记忆系统，Docker 一条命令起），在 `.env` 里把 `OMBRE_MCP_URL` 指过去；Ombre 侧开了静态密钥鉴权（`mcp_auth_mode: "token"`，推荐）就把同一个密钥填进 `OMBRE_MCP_TOKEN`。后端每次调用前会快速探活：Ombre 不在（没装、没开、中途挂了）就自动退回纯聊天，永不因记忆层断掉。
+
+**关于 Ombre 的版本**：任意版本都能接，但有两处按名字对接、**对不上时是静默失败（不报错）**，值得知道：
+
+- **工具白名单**写死在 `pipeline.py` 的 `OMBRE_TOOLS` 里（开发时对着 2.13.x 那批工具名）。新版 Ombre 加的工具不在白名单里 → `--allowedTools` 不放行 → TA 用不了，日志里也不会说。缓冲是 Ombre 自己有份契约测试钉住了 12 个工具名不许动（`breath / hold / grow / dream / trace / anchor / release / pulse / plan / letter_write / letter_read / I`）；**不在那份契约里的 `breath_search` / `breath_advanced` / `source_read` 是最可能变的三个**。
+- **记忆页的写操作**走 Ombre 的 Dashboard REST（`ombre_rest.py`：改一条记忆 = `/api/bucket/{id}/edit`，删 = `/forget`），这两个端点也不在上面那份契约里。它们变了的话，记忆页只读还正常、改和删会失败。
+
+所以升级 Ombre 建议**钉 digest 而不是只钉 tag**（tag 在 Docker Hub 上可以被重推），换版本时顺手 diff 一下它 `server.py` 里那批 `@mcp.tool()` 的 docstring —— 那就是 TA 每轮实际看到的工具说明，换版本它会跟着变。
+
+另外 Ombre 自己还有两个**你不动它也会变**的依赖：脱水用的压缩 LLM（`OMBRE_COMPRESS_MODEL`，指向远端模型别名，供应商下线/换指向不会通知你，而脱水失败是降级成原文截断、不报错）和向量化模型（换了模型，存量向量就和新查询不在同一个空间里了）。两个都建议写成明确的版本/型号，别用浮动别名。
 
 ## 项目结构
 
