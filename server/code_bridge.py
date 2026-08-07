@@ -215,60 +215,144 @@ def start(context_text: str, auth_key: str, cwd: Optional[str] = None,
 
 
 # ---------- 确认弹窗 ----------
-# 画面里出现这些字样 = 有个确认框正等着按键。这时候 paste 文本会被弹窗吃掉——消息开头
-# 是数字就等于替用户按了选项，必须挡下来。
-_DIALOG_MARKS = ("Esc to cancel", "Do you want to proceed", "Esc to exit")
+# 有确认框在等按键的时候 paste 文本会被它吃掉——消息开头是数字就等于替 TA 按了选项，
+# 所以 send 必须先挡下来；同时把选项抠给 app 渲染成按钮。
+#
+# ⚠️ **判据只能是结构，不能是「画面里出现了某个字样」。** 实锤过一次：我在聊天里解释
+# 这段代码，正文里写了 `Esc to cancel`、下面跟着「1. 2. 3.」的编号列表，整段回显进画面
+# → 面板长出三颗假按钮、怎么点都不消（正文不会自己走），/code/send 的护栏又认定"有弹窗
+# 在等"，把手机上发的每一条都挡了回去。人被锁在外面，只能杀掉整个会话才脱身。
+#
+# 真弹窗长这样（Claude Code v2.1 实抓，Write 和 Bash 两种一模一样）：
+#
+#     ────────────────────────────────────────────  ← 和输入框共用的那道横线
+#      Bash command
+#        curl -sI https://example.com | head -1
+#      Do you want to proceed?
+#      ❯ 1. Yes
+#        2. Yes, and don't ask again for: curl -sI https://example.com
+#        3. No
+#     （空行）
+#      Esc to cancel · Tab to amend · ctrl+e to explain   ← 页脚，画面**最后一行**
+#
+# 关键在于弹窗在场时**输入框和底部状态栏整个不画**——正文伪装不了这一点。于是三道闸：
+#   ① 页脚落在画面最后几行里，且它下面没有输入框的横线（正文里的同样字样下面一定还有
+#      输入框和状态栏，落不到最后）
+#   ② 页脚是一排 `·` 隔开的短按键提示，其中一段形如 "Esc to xxx"（正文是长句，段长超标）
+#   ③ 选项紧贴页脚往上连成一片，编号必须从 1 连续数上来（正文里的编号列表凑不齐这个）
+# 以后 CC 换了弹窗样式，照着上面的办法抓一份真画面再改，别凭印象加字样。
 
-# 选项行：可能被 tmux 的框线包着，前面还可能有个 ❯ 光标。形如 "│ ❯ 1. Yes  │"
+# 选项行：前面可能有个 ❯ 光标，也容忍框线（旧版本画过框）。形如 " ❯ 1. Yes"
 _OPTION_RE = re.compile(r"^[\s│|]*[❯>]?\s*(\d+)[.)]\s+(.+?)\s*[│|]?\s*$")
 # 续行（选项文字太长被折到下一行）：没有编号、缩进较深、不是框线。
 _CONT_RE = re.compile(r"^[\s│|]{3,}(\S.*?)\s*[│|]?\s*$")
+# 页脚里的按键提示段，形如 "Esc to cancel" / "esc to exit"
+_FOOTER_SEG_RE = re.compile(r"^(?:esc|escape)\s+to\s+\w+", re.I)
+# 选项尾巴上的按键注解，按钮上不用显示
+_KEYHINT_RE = re.compile(r"\s*\((?:esc|enter|tab|shift\+tab|ctrl\+\w+)\)\s*$", re.I)
+
+_FOOTER_SEG_MAX = 40    # 按键提示都很短。超过这个长度的是正文，不是页脚
+_FOOTER_LOOKBACK = 3    # 页脚在最后几行有字的里面找
+_OPTION_SCAN_MAX = 24   # 选项块再长也就几行，往上扫过头只会捞到正文
+_CONT_MAX = 3           # 一个选项最多折这么多行
 
 
-def _tail(lines: int = 24) -> str:
-    r = _tmux("capture-pane", "-t", SESSION, "-p")
-    if r.returncode != 0:
-        return ""
-    return "\n".join(r.stdout.rstrip().splitlines()[-lines:])
+def _screen(text: Optional[str] = None) -> list:
+    """画面，末尾空行掐掉——所以最后一个元素就是屏幕上最后一行有字的。
+
+    掐末尾是必须的：弹窗在场时状态栏不画，pane 底下会空出几行，不掐就找不到页脚。"""
+    if text is None:
+        r = _tmux("capture-pane", "-t", SESSION, "-p")
+        text = r.stdout if r.returncode == 0 else ""
+    return (text or "").rstrip().splitlines()
 
 
-def dialog_pending() -> bool:
-    if not session_alive():
-        return False
-    return any(m in _tail(24) for m in _DIALOG_MARKS)
+def _is_rule(line: str) -> bool:
+    """输入框上下那道横线。"""
+    s = line.strip()
+    return bool(s) and set(s) == {"─"}
 
 
-def dialog_options(tail: Optional[str] = None) -> list:
-    """把弹窗里的选项抠出来 → [{key, label}]，给 app 渲染按钮。
+def _footer_idx(lines: list) -> int:
+    """页脚那一行的下标；不是弹窗返回 -1。见上面那段注释里的闸 ① ②。"""
+    seen = 0
+    for i in range(len(lines) - 1, -1, -1):
+        line = lines[i]
+        if _is_rule(line):
+            return -1           # 撞上输入框的横线 = 底下是输入框，不是弹窗
+        if not line.strip():
+            continue
+        seen += 1
+        if seen > _FOOTER_LOOKBACK:
+            return -1
+        segs = [s.strip() for s in line.split("·")]
+        if any(len(s) > _FOOTER_SEG_MAX for s in segs):
+            continue
+        if any(_FOOTER_SEG_RE.match(s) for s in segs):
+            return i
+    return -1
 
-    以前 app 那排按钮是写死的「1 允许 / 2 总允许 / 3 拒绝」——描述不准，而且选项经常
-    不止三个（选文件、选方案的面板能有四五个）。文案一律取自弹窗原文，有几个渲染几个。
-    只在确认框真的在等键盘时才解析，别把普通输出里的「1. xxx」误认成选项。"""
-    tail = _tail(24) if tail is None else tail
-    if not any(m in tail for m in _DIALOG_MARKS):
-        return []
+
+def _parse_options(lines: list, footer: int) -> list:
+    """从页脚往上收选项。
+
+    **往上走**是要害：选项块永远紧贴页脚，正文在更上面；从上往下扫就会先撞见正文里的
+    编号列表，还会把它当成 1 号按钮——屏幕上写着一句正文，按下去执行的却是 Yes。"""
     opts: list = []
-    for line in tail.splitlines():
+    pending: list = []          # 折行的后半截，等上面那个编号行来认领
+    i = footer - 1
+    while i >= 0 and footer - i <= _OPTION_SCAN_MAX:
+        line = lines[i]
+        if not line.strip():
+            if opts or pending:
+                break           # 选项块和上面正文之间那道空行 = 到头了
+            i -= 1
+            continue            # 页脚和选项之间那道空行，跨过去
         m = _OPTION_RE.match(line)
         if m:
             label = m.group(2).strip().rstrip("│|").strip()
-            if label:
-                opts.append({"key": m.group(1), "label": label})
+            if pending:
+                label = " ".join([label, *reversed(pending)]).strip()
+                pending = []
+            # 按键注解在整句拼完之后才去——它常常落在折行的后半截上
+            label = _KEYHINT_RE.sub("", label).strip()
+            if not label:
+                break
+            opts.append({"key": m.group(1), "label": label})
+            if m.group(1) == "1":
+                break           # 数到 1 就是块顶，再往上是问题行和正文
+            i -= 1
             continue
-        # 折行的后半截接回上一个选项（"No, and tell Claude what to do / differently"）
-        if opts:
-            c = _CONT_RE.match(line)
-            if c and not any(mark in line for mark in _DIALOG_MARKS):
-                opts[-1]["label"] = (opts[-1]["label"] + " " + c.group(1).strip()).strip()
-    # 去重保序：画面上一个编号只该出现一次，重复多半是解析跑偏了
-    seen, out = set(), []
-    for o in opts:
-        if o["key"] in seen:
+        c = _CONT_RE.match(line)
+        if c and len(pending) < _CONT_MAX:
+            pending.append(c.group(1).strip())
+            i -= 1
             continue
-        seen.add(o["key"])
-        o["label"] = re.sub(r"\s*\((?:esc|enter)\)\s*$", "", o["label"], flags=re.I)
-        out.append(o)
-    return out[:9]
+        break
+    opts.reverse()
+    # 闸 ③：编号必须正好是 1..N。对不上说明收到的是正文，不是选项块。
+    if not opts or [o["key"] for o in opts] != [str(n) for n in range(1, len(opts) + 1)]:
+        return []
+    return opts[:9]
+
+
+def dialog_pending() -> bool:
+    """有没有确认框正等着按键。"""
+    if not session_alive():
+        return False
+    return _footer_idx(_screen()) >= 0
+
+
+def dialog_options(screen_text: Optional[str] = None) -> list:
+    """把弹窗里的选项抠出来 → [{key, label}]，给 app 渲染按钮。
+
+    以前 app 那排按钮是写死的「1 允许 / 2 总允许 / 3 拒绝」——描述不准，而且选项经常
+    不止三个（选文件、选方案的面板能有四五个）。文案一律取自弹窗原文，有几个渲染几个。"""
+    lines = _screen(screen_text)
+    footer = _footer_idx(lines)
+    if footer < 0:
+        return []
+    return _parse_options(lines, footer)
 
 
 # ---------- 发消息 / 按键 / 抓画面 ----------
@@ -367,15 +451,16 @@ def capture(lines: int = PANE_HEIGHT) -> dict:
         return {"ok": False, "alive": False, "content": "", "dialog": []}
     lines = max(20, min(int(lines or PANE_HEIGHT), PANE_HEIGHT))
     raw = r.stdout.splitlines()
-    tail = "\n".join(raw[-24:])
     # pane 开得比内容高，上下都会剩一堆空行：尾部的留着会让最新一行沉在空白里，
     # 顶部的留着则是一大片黑。两头都掐掉，只留真正有字的那一段。
     while raw and not raw[0].strip():
         raw.pop(0)
     while raw and not raw[-1].strip():
         raw.pop()
+    # 弹窗给的是**整屏**，别先截尾 N 行喂它：弹窗在场时状态栏不画、pane 底下空出几行，
+    # 按行数截出来的那段可能整段是空白，页脚根本不在里面。
     return {"ok": True, "alive": True, "content": "\n".join(raw[-lines:]),
-            "dialog": dialog_options(tail)}
+            "dialog": dialog_options(r.stdout)}
 
 
 def is_busy() -> bool:
