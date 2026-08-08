@@ -83,6 +83,7 @@ struct ContentView: View {
     @State private var editingMessage: ChatMessage? = nil
     @State private var editingText: String = ""
     @State private var editRefreshTick = 0   // 亲手编辑/删除的信号：ChatView 收到就手术式合并进冻结快照
+    @State private var backToNowTick = 0     // 「编辑并重新回复」的信号：ChatView 收到就解冻回底
     @State private var windowSyncTask: Task<Void, Never>? = nil   // 删/编辑后同步后端窗口（防抖）
     @State private var deleteCandidates: [ChatMessage] = []   // 长按气泡/堆叠卡 → 删除确认（组删多条）
     @State private var viewingWebpage: WebpageItem? = nil      // 点网页卡片 → 查看
@@ -202,6 +203,7 @@ struct ContentView: View {
                  },
                  onDeleteStack: { msgs in deleteCandidates = msgs },
                  editRefreshTick: editRefreshTick,
+                 backToNowTick: backToNowTick,
                  scrollTarget: chatScrollTarget,
                  onScrollTargetHandled: { chatScrollTarget = nil })
             .background(Color(.systemGroupedBackground))
@@ -952,6 +954,7 @@ struct ContentView: View {
             // 同回合附件（发送时图/文件都排在文字前面），从沙盒把数据重建出来随重发带上。
             let (imagesData, filesData) = collectAdjacentAttachments(before: message.id)
             chatStore.truncateAfter(id: message.id)   // 删掉这条之后的旧对话
+            backToNowTick += 1                        // 回底，等着看重答的那条
             Task { await generateReply(imagesData: imagesData, filesData: filesData) }
         } else {
             // 「仅修改」没有后续请求，窗口得自己去对齐；「编辑并重新回复」不用管——

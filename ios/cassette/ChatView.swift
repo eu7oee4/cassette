@@ -15,6 +15,7 @@ struct ChatView: View {
     var onTapWebpage: (String, String) -> Void = { _, _ in }  // 点网页卡片：打开网页
     var onDeleteStack: ([ChatMessage]) -> Void = { _ in }     // 长按堆叠卡：删整组
     var editRefreshTick: Int = 0   // 用户亲手编辑/删除的信号：+1 → 手术式合并进冻结快照
+    var backToNowTick: Int = 0     // 「编辑并重新回复」的信号：+1 → 解冻回底，等着看新答案
     var scrollTarget: UUID? = nil                  // 外部跳转请求（聊天记录页点行）
     var onScrollTargetHandled: () -> Void = { }    // 跳转消费完通知外面清 nil
 
@@ -139,6 +140,20 @@ struct ChatView: View {
         .onChange(of: editRefreshTick) { _, _ in
             mergeEditsIntoFrozen()
         }
+        // 「编辑并重新回复」＝明确的"回到当下、等着看新答案"：解冻 + 回底 + 恢复跟随。
+        // 以前这件事是白蹭的——truncateAfter 让 count 变小，撞进下面"自己发的消息"那条
+        // 分支顺带回了底。删除语义修好之后（下面的 guard）那条路没了，得有个显式信号。
+        .onChange(of: backToNowTick) { _, _ in
+            if frozenMessages != nil {
+                pendingOwnSnap = true       // 手指还在滚：落定时再回底
+            } else {
+                awayFrozen = nil
+                awayIsWaiting = nil
+                unseenCount = 0
+                followBottom = true
+                DispatchQueue.main.async { snapToBottom() }
+            }
+        }
         // 流式钉底：正文每长一截，只要没冻结且人在底部，就即时（无动画）钉回底边。
         // 病根：流式增长不改 messages.count，贴底动画进行中长出的内容会让偏移悄悄漂离底边，
         // 之后没有任何事件再触发贴底 → "差一截滑不到底"。逐 chunk 钉底把漂移当场归零；
@@ -183,6 +198,13 @@ struct ChatView: View {
         // （滚动中动布局正是 contentSize 污染的病根），记 pendingOwnSnap，落定解冻时补贴底。
         // 静止且在底部 → 跟随贴底；滚动中/翻旧消息 → 不动布局，角标计数。
         .onChange(of: messages.count) { oldCount, newCount in
+            // 删除也让 count 变（变小），会掉进下面任一条贴底分支 → 删完一条就被甩到底部。
+            // 删除的语义是「就地撤行、保持位置」，那条路由 editRefreshTick 负责（手术式
+            // 合并进冻结快照），这里只做状态收尾、绝不滚动。
+            guard newCount > oldCount else {
+                unseenCount = min(unseenCount, newCount)   // 删掉的那条不该还算在未读里
+                return
+            }
             if messages.last?.sender == .me {
                 if frozenMessages != nil {
                     pendingOwnSnap = true       // 手指还在滚：落定时再回底
