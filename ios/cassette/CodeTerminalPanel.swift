@@ -155,43 +155,24 @@ struct CodeTerminalPanel: View {
     // MARK: - 画面
 
     private var screen: some View {
-        ScrollView(.vertical) {
-            // 横向不换行、可横滑：终端画面按 80 列排的，硬折行会把对齐全毁掉
-            ScrollView(.horizontal, showsIndicators: false) {
-                // 不开 textSelection：两百多行等宽文本每 1.2 秒重画一次，选择支持要给
-                // 每个字建可命中的区域，生成时画面一直在变，这一项就是卡顿的大头。
-                Text(content.isEmpty ? (alive ? "连接中…" : "") : content)
-                    .font(.system(size: 11, design: .monospaced))
-                    .foregroundStyle(Color.terminalText)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 8)
-            }
-        }
-        // 滚动**不**收键盘：常有的用法是翻到前面照着上面的内容打字，一滚就收键盘反而碍事。
-        // 要收键盘点一下画面（下面那个 tap）。
-        .scrollDismissesKeyboard(.never)
-        // 手指在滑就别换内容：轮询 1.2 秒一次，正好在滑到一半时重建两百多行文本，
-        // 滚动会被打断一下（"滑一次、中间顿一下、再接着滑完"）。攒着，落定再上。
-        .onScrollPhaseChange { _, phase in
-            scrolling = phase != .idle
-            if !scrolling, let held = heldContent {
-                content = held
-                heldContent = nil
-            }
-        }
-        // 内容永远按"最大可能高度"布局、底部对齐 → 最新输出贴着窗口底边
-        .defaultScrollAnchor(.bottom)
-        .frame(height: max(1, available), alignment: .bottom)
-        // 外面这层才是"看得见多少"的裁剪窗口，换档只动它
-        .frame(height: screenHeight, alignment: .bottom)
+        TerminalScreen(
+            text: content.isEmpty ? (alive ? "连接中…" : "") : content,
+            // 手指在滑就别换内容：轮询 1.2 秒一次，正好在滑到一半时换掉整屏，
+            // 滚动会被打断一下（"滑一次、中间顿一下、再接着滑完"）。攒着，落定再上。
+            onScrollingChanged: { moving in
+                scrolling = moving
+                if !moving, let held = heldContent {
+                    content = held
+                    heldContent = nil
+                }
+            },
+            // 点画面收键盘（打字时想看终端，点一下就行，不用先收键盘再点）。
+            // 走 UIKit 的手势而不是 SwiftUI 的 simultaneousGesture：底下是个 UIScrollView，
+            // 手势谁先谁后不好赌。
+            onTap: dismissKeyboard
+        )
+        .frame(height: screenHeight)
         .clipped()
-        // ⚠️ 少了这行整个面板会像卡死一样（实机踩到）：**clipped() 只裁绘制、不裁命中测试**，
-        // 被裁掉的那部分画面（按 available 布局、向上溢出）照样吃触摸——它盖在黑条和气泡区
-        // 上面，于是黑条点不动，在气泡区滑动滑的还是终端内容。
-        .contentShape(Rectangle())
-        // 点画面收键盘（打字时想看终端，点一下就行，不用先收键盘再点）
-        .simultaneousGesture(TapGesture().onEnded { dismissKeyboard() })
         .overlay(alignment: .top) {
             if !alive {
                 notice("会话不在了（回顶栏切一次 Code 模式）", color: .red)
@@ -318,6 +299,114 @@ struct CodeTerminalPanel: View {
         if opts != dialog { dialog = opts }
         lastOk = Date()
         now = Date()
+    }
+}
+
+// MARK: - 终端画面（UIKit 的 UITextView，不是 SwiftUI 的 Text）
+//
+// 为什么不用 Text：一屏是 80 列 × 240 行 ≈ 1.9 万字，SwiftUI 的 Text 不是懒的——
+// 每换一次内容就得把整段重新排版一遍，而 TA 在跑活的时候画面每 1.2 秒变一次。
+// 那就是「生成中滑气泡/滑终端/打字都时不时卡一下、TA 一停下来就顺了」的来源：
+// 停下来时画面不变，poll() 里 `s.content != content` 那道守卫压根不赋值，也就不排版。
+// TextKit 只排看得见的那几十行，换字是增量的。
+
+/// 换内容/换档之后把最新输出重新贴到窗口底边。
+private final class BottomPinnedTextView: UITextView {
+    private var lastSize: CGSize = .zero
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        // 只在窗口尺寸真变了才重贴（换档、键盘进出）。每次布局都贴会跟用户上滑打架。
+        if bounds.size != lastSize {
+            lastSize = bounds.size
+            pinToBottom()
+        }
+    }
+
+    /// 只动纵向，横向偏移原样留着——横着翻到一半时别把人拽回行首。
+    func pinToBottom() {
+        let maxY = max(0, contentSize.height - bounds.height)
+        setContentOffset(CGPoint(x: contentOffset.x, y: maxY), animated: false)
+    }
+}
+
+private struct TerminalScreen: UIViewRepresentable {
+    let text: String
+    let onScrollingChanged: (Bool) -> Void
+    let onTap: () -> Void
+
+    private static let font = UIFont.monospacedSystemFont(ofSize: 11, weight: .regular)
+
+    func makeUIView(context: Context) -> BottomPinnedTextView {
+        let tv = BottomPinnedTextView()
+        tv.isEditable = false
+        // 不开选择：选择支持要给每个字建可命中的区域，画面一直在变的时候这一项就是大头。
+        tv.isSelectable = false
+        tv.font = Self.font
+        tv.textColor = UIColor(Color.terminalText)
+        tv.backgroundColor = UIColor(Color.terminalBG)
+        tv.textContainerInset = UIEdgeInsets(top: 8, left: 10, bottom: 8, right: 10)
+        tv.textContainer.lineFragmentPadding = 0
+        // 不折行：终端画面按 80 列排的，折一行整块对齐就毁了。宽度不跟着视图走 +
+        // 按裁剪处理换行，内容自己横向铺开，UITextView 自带的横向滚动就能翻。
+        tv.textContainer.widthTracksTextView = false
+        tv.textContainer.lineBreakMode = .byClipping
+        tv.showsHorizontalScrollIndicator = false
+        tv.contentInsetAdjustmentBehavior = .never   // 贴底算式里不用再兜安全区
+        // 滚动**不**收键盘：常有的用法是翻到前面照着上面的内容打字，一滚就收反而碍事。
+        tv.keyboardDismissMode = .none
+        tv.delegate = context.coordinator
+
+        let tap = UITapGestureRecognizer(target: context.coordinator,
+                                         action: #selector(Coordinator.handleTap))
+        tap.cancelsTouchesInView = false   // 别把触摸从滚动手势那儿抢走
+        tv.addGestureRecognizer(tap)
+        return tv
+    }
+
+    func updateUIView(_ tv: BottomPinnedTextView, context: Context) {
+        context.coordinator.onScrollingChanged = onScrollingChanged
+        context.coordinator.onTap = onTap
+        guard tv.text != text else { return }
+        tv.text = text
+        tv.textContainer.size = CGSize(width: Self.contentWidth(text),
+                                       height: .greatestFiniteMagnitude)
+        tv.layoutIfNeeded()
+        tv.pinToBottom()
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
+    /// 内容要多宽：不折行，就得把最长那行整个摆开。等宽字体按「格子数」估——
+    /// 非 ASCII（中文）占两格。**宁可估宽**（右边多出几格空白，无所谓），
+    /// 估窄了是把字切掉。
+    private static func contentWidth(_ s: String) -> CGFloat {
+        var maxCells = 0, cells = 0
+        for u in s.unicodeScalars {
+            if u == "\n" {
+                maxCells = max(maxCells, cells)
+                cells = 0
+            } else {
+                cells += u.isASCII ? 1 : 2
+            }
+        }
+        maxCells = max(maxCells, cells)
+        let cell = ("0" as NSString).size(withAttributes: [.font: font]).width
+        return CGFloat(maxCells) * cell + 24
+    }
+
+    final class Coordinator: NSObject, UITextViewDelegate {
+        var onScrollingChanged: (Bool) -> Void = { _ in }
+        var onTap: () -> Void = { }
+
+        @objc func handleTap() { onTap() }
+
+        func scrollViewWillBeginDragging(_ s: UIScrollView) { onScrollingChanged(true) }
+        func scrollViewDidEndDragging(_ s: UIScrollView, willDecelerate decelerate: Bool) {
+            if !decelerate { onScrollingChanged(false) }
+        }
+        func scrollViewDidEndDecelerating(_ s: UIScrollView) { onScrollingChanged(false) }
+        func scrollViewDidEndScrollingAnimation(_ s: UIScrollView) { onScrollingChanged(false) }
     }
 }
 
