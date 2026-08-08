@@ -15,7 +15,6 @@ struct ContentView: View {
     @State private var drawerOpen = false            // 抽屉（猫爪/左缘右滑开，阴影点击/左滑关）
     @State private var navPath: [DrawerPage] = []    // 抽屉 push 的页面栈
     @State private var chatScrollTarget: UUID? = nil // 聊天记录页点行 → 聊天跳到那条气泡
-    @State private var jumpingToChat = false         // 跳转引发的收栈：这次不重开抽屉
     @AppStorage("hasOnboarded") private var hasOnboarded = false   // 首启起名引导
 
     // 点头像 → 底部弹按钮（改昵称 / 换头像）
@@ -49,6 +48,10 @@ struct ContentView: View {
         var ids: [UUID]
         var since: Date
         var givenUp: Bool = false
+        /// 这轮的流还开着（app 在场收正文）：不驱动三个点、不参与对账判死。
+        /// 登记提前到了"轮一开始"（防补投先于流报错到达），少了这个字段整个流式期间
+        /// rescueActive 恒为 true → 三个点气泡和正在逐字长出来的气泡同时挂着。
+        var inFlight: Bool = false
     }
 
     // 断连补投等待表：req_id → RescueWait。断流**无条件登记**（没冒正文也登记，三个点靠它维持）；
@@ -56,7 +59,7 @@ struct ContentView: View {
     @State private var rescueWaiting: [String: RescueWait] = [:]
 
     /// 有没有还在等的补投（驱动"正在输入"三个点；发送禁用仍只看 isWaiting）。
-    private var rescueActive: Bool { rescueWaiting.values.contains { !$0.givenUp } }
+    private var rescueActive: Bool { rescueWaiting.values.contains { !$0.givenUp && !$0.inFlight } }
 
     // Code 模式：消息改道 tmux 交互会话（那边手上有整台电脑），回复走待送达盒子回来。
     // codeMode 的真相在后端（会话活着 = 模式开着），@AppStorage 只是冷启动前的乐观值，
@@ -115,13 +118,9 @@ struct ContentView: View {
             drawerLayer
         }
         .environmentObject(profileStore)
-        // 页面返回（栈清空）→ 回到抽屉打开态：层级是 聊天 → 抽屉 → 页面。
-        // 例外：聊天记录页点行跳气泡是"直达聊天"，不经过抽屉。
-        .onChange(of: navPath) { old, new in
-            if !old.isEmpty && new.isEmpty {
-                if jumpingToChat { jumpingToChat = false } else { drawerOpen = true }
-            }
-        }
+        // 页面返回（栈清空）不重开抽屉——直接回聊天界面。
+        // （原先按"聊天 → 抽屉 → 页面"逐层退设计，实际用起来是：从记忆页返回还得再关
+        // 一次抽屉才看得到聊天。返回想去的地方就是聊天。）
         // 待送达同步：前台时拉一次，并每 15s 轮询（断连补投的回复靠这条通道回来）。
         // .task(id: scenePhase)：进 active 启动、离开 active 自动取消循环，省电。
         .task(id: scenePhase) {
@@ -148,7 +147,6 @@ struct ContentView: View {
             MindPage()
         case .history:
             HistoryPage(messages: chatStore.messages, settingsStore: proactiveStore) { id in
-                jumpingToChat = true
                 navPath.removeAll()
                 // 等 pop 动画完、聊天列表回到台前再跳，不然滚动请求打在看不见的列表上
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
@@ -691,7 +689,8 @@ struct ContentView: View {
         // **轮一开始就登记**：半开连接下补投可能先于流报错到达（后端跑完投 pending、
         // 这边流还在 600s 空闲超时里干等）——登记晚了 syncPending 关联扑空，
         // 半截+完整双份并存。提前登记后补投任何时刻到都能撤半截。
-        rescueWaiting[reqId] = RescueWait(ids: [], since: Date())
+        // inFlight=流还开着：这条登记先不亮三个点（那是 isWaiting 的活）、也不参与对账判死。
+        rescueWaiting[reqId] = RescueWait(ids: [], since: Date(), inFlight: true)
         do {
             let stream = chatService.sendStream(history: chatStore.messages,
                                                 sessionId: sessionId,
@@ -750,8 +749,14 @@ struct ContentView: View {
                 if streamedText.isEmpty { chatStore.remove(id: id); turnIds.removeAll { $0 == id } }
                 else { chatStore.editText(id: id, newText: streamedText) }
             }
-            if sawDone { rescueWaiting.removeValue(forKey: reqId) }
-            else { rescueWaiting[reqId]?.ids = turnIds }   // 流断没 done：登记留着等补投
+            if sawDone {
+                rescueWaiting.removeValue(forKey: reqId)
+            } else {
+                // 流断没 done：登记留着等补投。流关了 → inFlight 落下，从这一刻起
+                // 三个点由它维持、对账也开始管它。
+                rescueWaiting[reqId]?.ids = turnIds
+                rescueWaiting[reqId]?.inFlight = false
+            }
         } catch {
             if let id = streamingId {
                 if streamedText.isEmpty { chatStore.remove(id: id); turnIds.removeAll { $0 == id } }
@@ -760,7 +765,9 @@ struct ContentView: View {
             // 中途断连（切后台/锁屏被掐流）不弹错：后端照跑，补投机制会把完整回复送回来，
             // 弹窗纯属误报。其余错误（连不上/4xx…）是明确失败：弹提示 + 删登记，不再空等。
             if case ChatServiceError.connectionLost = error {
-                rescueWaiting[reqId]?.ids = turnIds   // 静默：半截保留，登记等补投
+                // 静默：半截保留，登记等补投（哪怕一段正文都没冒——不然三个点一灭就死寂）。
+                rescueWaiting[reqId]?.ids = turnIds
+                rescueWaiting[reqId]?.inFlight = false
             } else {
                 rescueWaiting.removeValue(forKey: reqId)
                 errorText = (error as? ChatServiceError)?.errorDescription ?? error.localizedDescription
@@ -900,11 +907,16 @@ struct ContentView: View {
         guard let active = try? await chatService.chatActive() else { return }   // 连不上后端时不误判
         let now = Date()
         for (rid, wait) in rescueWaiting {
-            if now.timeIntervalSince(wait.since) > 1920 {   // 后端 CLAUDE_TIMEOUT+守护60s+余量
+            // 绝对清理线：后端 CLAUDE_TIMEOUT+守护60s+余量。流还开着的不算僵尸——
+            // 超长的一轮（那边干半小时的活）把登记清了，流真断的时候就没人接补投了。
+            if !wait.inFlight, now.timeIntervalSince(wait.since) > 1920 {
                 rescueWaiting.removeValue(forKey: rid)
                 continue
             }
-            if !wait.givenUp, !active.contains(rid), now.timeIntervalSince(wait.since) > 60 {
+            // inFlight（流还开着、app 就在收正文）不参与判死：这轮的死活由流自己说了算，
+            // 让对账插一脚会把"后端还没登记进 _ACTIVE_REQS 的在途请求"误判成丢了。
+            if !wait.inFlight, !wait.givenUp, !active.contains(rid),
+               now.timeIntervalSince(wait.since) > 60 {
                 rescueWaiting[rid]?.givenUp = true
                 chatStore.appendSystemMessage("刚才那条可能没送到后端，重发试试")
             }
