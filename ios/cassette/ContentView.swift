@@ -83,6 +83,7 @@ struct ContentView: View {
     @State private var editingMessage: ChatMessage? = nil
     @State private var editingText: String = ""
     @State private var editRefreshTick = 0   // 亲手编辑/删除的信号：ChatView 收到就手术式合并进冻结快照
+    @State private var windowSyncTask: Task<Void, Never>? = nil   // 删/编辑后同步后端窗口（防抖）
     @State private var deleteCandidates: [ChatMessage] = []   // 长按气泡/堆叠卡 → 删除确认（组删多条）
     @State private var viewingWebpage: WebpageItem? = nil      // 点网页卡片 → 查看
 
@@ -279,6 +280,7 @@ struct ContentView: View {
                 Button("删除", role: .destructive) {
                     for msg in deleteCandidates { chatStore.remove(id: msg.id) }
                     editRefreshTick += 1   // 离底冻结快照就地撤行，不用滑回底部
+                    scheduleWindowSync()   // 后端窗口跟上，别让 TA 醒来还看着删掉的那条
                 }
                 Button("取消", role: .cancel) { }
             }
@@ -397,6 +399,7 @@ struct ContentView: View {
                     }) {
                         chatStore.remove(id: msg.id)
                         editRefreshTick += 1
+                        scheduleWindowSync()
                     }
                 }, onClose: { enlargedImage = nil })
             }
@@ -906,6 +909,21 @@ struct ContentView: View {
         }
     }
 
+    // MARK: - 窗口同步（删/编辑消息后）
+
+    /// 删/编辑消息是纯本地操作，不触发任何后端请求——不同步的话，在下次发消息之前，
+    /// TA 每次醒来看到的都还是删改之前的世界，和眠眠的视角对不上。
+    /// 1 秒防抖：连删几条（或删整组照片）只推最后那一份。
+    /// **不用等它**：推失败也只是窗口略旧，下次发消息 /chat 会整体覆盖，没有需要提示的事。
+    private func scheduleWindowSync() {
+        windowSyncTask?.cancel()
+        windowSyncTask = Task { @MainActor in
+            try? await Task.sleep(for: .seconds(1))
+            guard !Task.isCancelled else { return }
+            try? await chatService.syncWindow(history: chatStore.messages)
+        }
+    }
+
     // MARK: - 编辑 / 重新生成
 
     /// gobackward：打开编辑弹窗（弹窗里 Edit / Regenerate 按钮按发送者不同）。
@@ -935,6 +953,10 @@ struct ContentView: View {
             let (imagesData, filesData) = collectAdjacentAttachments(before: message.id)
             chatStore.truncateAfter(id: message.id)   // 删掉这条之后的旧对话
             Task { await generateReply(imagesData: imagesData, filesData: filesData) }
+        } else {
+            // 「仅修改」没有后续请求，窗口得自己去对齐；「编辑并重新回复」不用管——
+            // 后面紧跟的 /chat 会整体覆盖窗口。
+            scheduleWindowSync()
         }
     }
 

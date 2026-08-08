@@ -300,6 +300,24 @@ struct ChatService {
         _ = try await perform(authedRequest("POST", "/pending/ack", jsonBody: body))
     }
 
+    // MARK: - 窗口同步
+
+    /// 删/编辑消息后把当前历史推给后端对齐 recent_window（**不触发生成**）。
+    /// 这类操作纯本地，不推的话在下次发消息之前，TA 每次醒来看到的都是删改之前的世界。
+    func syncWindow(history: [ChatMessage]) async throws {
+        struct Body: Encodable { let messages: [OutMessage] }
+        // 过滤和条数口径必须和 /chat 一字不差——两条路写的是同一个窗口。
+        let messages = history.filter { !$0.isMemoryNote && !$0.isSystem }
+            .suffix(Self.sendHistoryCap)
+            .map {
+                OutMessage(role: $0.sender == .me ? "user" : "assistant",
+                           text: $0.plainText,
+                           ts: Int($0.timestamp.timeIntervalSince1970))
+            }
+        let body = try JSONEncoder().encode(Body(messages: Array(messages)))
+        _ = try await perform(authedRequest("POST", "/window/sync", jsonBody: body))
+    }
+
     /// 后端正在跑的聊天轮（client_req_id 集合）。断流后对账用：不在跑=这轮丢了。
     func chatActive() async throws -> [String] {
         let data = try await perform(authedRequest("GET", "/chat/active"))

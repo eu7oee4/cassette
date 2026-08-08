@@ -201,20 +201,35 @@ def _prepare_chat(req: ChatRequest) -> tuple[str, dict]:
     return pipeline.build_prompt(req.messages, catalog), pipeline.sticker_handle_map(catalog)
 
 
-def _snapshot_incoming_window(req: ChatRequest) -> None:
-    """轮一开始就把眼下的对话（含刚收到的 user 消息）写进 recent_window——
-    这轮可能跑很久，中途 wake 醒来不该只看到上一轮的世界。收尾 finalize 用带回复的完整版覆盖。
-    ⚠️ 迷你历史护栏在这里也要设：不然 1 条历史的 curl 请求在轮开始就把 300 条窗口冲空，
-    finalize 里那道同名护栏读到的已是被冲掉的窗口，形同虚设。"""
+# ---------- recent_window 的唯一口径 ----------
+# 铁律：**任何让 app 侧历史发生变化的动作，都要让窗口跟上**——不然醒来那条路看到的是
+# 一个已经不存在的世界。三条支路都收在这儿：
+#   ① /chat(/stream)：轮开始 _overwrite_window_from、收尾 finalize_chat_reply 各写一次；
+#   ② code 模式：_code_window_append() 逐条追加（那边没有"完整历史"可覆盖）；
+#   ③ /window/sync：app 删/编辑了消息，不生成、只把窗口对齐（A1）。
+
+def _overwrite_window_from(messages: list[Message]) -> bool:
+    """用 app 发来的这份历史整体覆盖 recent_window。返回是否真写了。
+    ⚠️ 迷你历史护栏：1 条历史的 curl 请求会把 300 条窗口冲空，finalize 里那道同名护栏
+    读到的已是被冲掉的窗口，形同虚设——所以每个覆盖点都得自己设一道。"""
     try:
-        snap = [{"role": m.role, "text": m.text, "ts": m.ts} for m in req.messages]
+        snap = [{"role": m.role, "text": m.text, "ts": m.ts} for m in messages]
         with state_store.WINDOW_LOCK:
             cur = state_store.read_recent_window()
             if len(snap) < 5 and len(cur) > len(snap):
-                return   # 短历史请求不覆盖丰满窗口；新消息由 finalize 的追加分支补进
+                return False   # 短历史请求不覆盖丰满窗口
             state_store.write_recent_window(snap)
+        return True
     except Exception as e:
-        logerr(f"写 recent_window(轮开始) 失败: {e}")
+        logerr(f"写 recent_window 失败: {e}")
+        return False
+
+
+def _snapshot_incoming_window(req: ChatRequest) -> None:
+    """轮一开始就把眼下的对话（含刚收到的 user 消息）写进 recent_window——
+    这轮可能跑很久，中途 wake 醒来不该只看到上一轮的世界。收尾 finalize 用带回复的完整版覆盖。
+    被护栏挡下时新消息由 finalize 的追加分支补进。"""
+    _overwrite_window_from(req.messages)
 
 
 def finalize_chat_reply(reply: str, stored: list[dict], req: ChatRequest,
@@ -438,6 +453,23 @@ async def chat_stream(req: ChatRequest, x_auth: Optional[str] = Header(default=N
         "Connection": "keep-alive",
         "X-Accel-Buffering": "no",
     })
+
+
+# ---------- 窗口同步（app 侧历史变了但不生成）----------
+class WindowSyncIn(BaseModel):
+    messages: list[Message]   # app 侧当前历史（和 /chat 同口径，最近 ~100 条）
+
+
+@app.post("/window/sync")
+def window_sync(body: WindowSyncIn, x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
+    """删/编辑消息后把 recent_window 对齐——这类操作纯本地、不触发任何后端请求，
+    不同步的话在下次发消息之前，TA 每次醒来看到的都是删改之前的世界。
+
+    **不触发任何生成**：只覆盖窗口。护栏和 /chat 那条路共用（见 _overwrite_window_from），
+    所以删到只剩几条时窗口不会被冲空——宁可窗口略旧，也不能让醒来失忆。"""
+    verify_auth(x_auth)
+    written = _overwrite_window_from(body.messages)
+    return {"ok": True, "written": written, "n": len(body.messages)}
 
 
 # ---------- 表情描述 ----------
