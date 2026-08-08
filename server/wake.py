@@ -169,9 +169,11 @@ def wake_prompt(settings: dict, forced: bool = False) -> str:
     if pipeline.ombre_alive():
         lines = ["【你有自己的长期记忆（Ombre 工具）：想不起细节可以先 breath；"
                  "这次醒来若有值得留住的，用 hold 存下来。】"]
+        # 只算**真存下的**：没成功的（工具被拒/报错）当然要能再存一次，
+        # 摆进"别重复存"清单等于把那件事永久封杀了。
         recent_stored = [s.get("text", "") for w in state_store.read_wake_log(limit=100)
                          if int(w.get("ts", 0)) > int(time.time()) - 12 * 3600
-                         for s in (w.get("stored") or [])]
+                         for s in (w.get("stored") or []) if s.get("ok", True)]
         if recent_stored:
             lines.append("【最近 12 小时你已经存过这些，别重复存：" +
                          "；".join(t[:60] for t in recent_stored[-8:] if t) + "】")

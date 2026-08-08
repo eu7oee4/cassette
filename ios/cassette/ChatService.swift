@@ -17,10 +17,14 @@ struct DescUpdate: Decodable {
     let description: String
 }
 
-/// 一次记忆操作（tool: hold/grow/trace…，text: 内容摘要）。
+/// 一次记忆操作（tool: hold/feel/grow/trace/i…，text: 内容摘要）。
+/// ok=false ＝那次调用其实没成功（工具报错/被婉拒），error 是原因。
+/// 老后端不发这两个字段 → nil，按成功处理（和以前一样）。
 struct StoredMemory: Decodable {
     let tool: String
     let text: String
+    let ok: Bool?
+    let error: String?
 }
 
 /// 后端待送达盒子（/pending）里的一条：断连补投 / 主动消息 / 空产出错误标记。
@@ -96,7 +100,8 @@ enum ChatServiceError: LocalizedError {
 enum StreamEvent {
     case text(String)                        // 正文片段，追加进当前流式气泡
     case textBreak                           // 当前气泡定稿保留，下一段正文另起新气泡（工具调用切段）
-    case memory(tool: String, text: String)  // 这轮记忆操作 → 内联灰字
+    // 这轮的一次工具操作 → 内联灰字。ok=false 是「他想做但没做成」，照样要说（带原因）。
+    case memory(tool: String, text: String, ok: Bool, error: String)
     case error(String)                       // 出错提示
     case done(ChatResponse?)                 // 结束：附完整 ChatResponse（错误/空回复时为 nil）
 }
@@ -243,7 +248,9 @@ struct ChatService {
         case "text":       return .text(obj["content"] as? String ?? "")
         case "text_break": return .textBreak
         case "memory":     return .memory(tool: obj["tool"] as? String ?? "",
-                                          text: obj["text"] as? String ?? "")
+                                          text: obj["text"] as? String ?? "",
+                                          ok: obj["ok"] as? Bool ?? true,
+                                          error: obj["error"] as? String ?? "")
         case "error":      return .error(obj["content"] as? String ?? "出错了")
         case "done":       return .done(try? JSONDecoder().decode(ChatResponse.self, from: data))
         default:           return nil

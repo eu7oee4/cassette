@@ -167,6 +167,8 @@ class ChatRequest(BaseModel):
 class StoredItem(BaseModel):
     tool: str
     text: str
+    ok: bool = True     # 工具真的干成了吗（按 tool_result 定案，见 pipeline.StoredCollector）
+    error: str = ""     # ok=False 时的原因，给人看的一句话
 
 
 class DescUpdate(BaseModel):
@@ -274,10 +276,14 @@ def finalize_chat_reply(reply: str, stored: list[dict], req: ChatRequest,
 
     # 这轮他自己调工具切进了 code 模式：剥出来置标志（控制信号，不是记忆产物，不进 Mind），
     # app 收到 code_started 就翻 codeMode，后续消息改道 tmux 会话。
-    code_started = any(s.get("tool") == "codemode" for s in stored)
+    # 要 ok=True——切失败了（如"会话占用中"）还翻开关的话，后续消息会往一个不存在的
+    # 会话里发。万一判据把成功误读成失败，回前台的 /code/status 对齐会把它补回来。
+    code_started = any(s.get("tool") == "codemode" and s.get("ok", True) for s in stored)
 
     # 聊天里存/改的记忆也记进 wake_log（source=chat，无 thoughts 不进时间线）：
     # 醒来的"别重复存"清单靠它才看得到聊天里已存过的。
+    # 没成功的（ok=False）也记——TA 下次醒来看到「想存但缺 source_bucket」就知道该补参数；
+    # 「别重复存」那份清单会把它们滤掉（见 wake.wake_prompt），没存成的当然要能再存。
     # 网页/codemode 不进日志：网页有聊天卡片 + HTML 文件列表两个展示面，codemode 是控制
     # 信号；心流日志只记记忆类操作，防重复清单也不被它们污染。
     mem_stored = [s for s in stored if s.get("tool") not in pipeline.NON_MEMORY_TOOLS]

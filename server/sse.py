@@ -84,13 +84,22 @@ async def read_stream_events(proc):
             continue
 
 
+def _memory_events(item: dict):
+    """一条定了案的 stored → 要发给 app 的 memory 事件（0 或 1 条）。
+    codemode 是借 stored 走的控制信号（TA 自切 code 模式），不是记忆产物——
+    发成 memory 事件的话 app 会渲染出一条莫名其妙的灰字。"""
+    if item["tool"] == "codemode":
+        return
+    yield sse({"type": "memory", "tool": item["tool"], "text": item["text"],
+               "ok": item.get("ok", True), "error": item.get("error", "")})
+
+
 async def translate_events(events, finalize):
     """纯翻译：事件流 → SSE 字节块。不碰子进程，便于单测。
     events：async 迭代器，逐个产出已解析的事件 dict（含 __idle_timeout__ 哨兵）。
     finalize：拿全文 (reply, stored) 组出 done 载荷（dict）的回调。"""
     mf = MarkerStreamFilter()
-    stored: list[dict] = []
-    seen_tool_ids: set = set()
+    collector = pipeline.StoredCollector()   # tool_use 只是意图；灰字等 tool_result 定案再发
     raw_segments: list[str] = []   # 工具调用切开的正文段（原始未滤标记；最后一段以 result 为准）
     cur_raw = ""
     result_text = None
@@ -121,23 +130,14 @@ async def translate_events(events, finalize):
                     if emit:
                         yield sse({"type": "text", "content": emit})
         elif t == "assistant":
-            # 工具调用产物（记忆/网页等）抓进 stored + 往下游发 memory 灰字事件（气泡间可见）。
-            # 按块 id 去重：CLI 会按内容块重复发同一条 assistant 消息（每次带累计块）。
-            for b in ev.get("message", {}).get("content", []):
-                if b.get("type") != "tool_use":
-                    continue
-                tid = b.get("id")
-                if tid:
-                    if tid in seen_tool_ids:
-                        continue
-                    seen_tool_ids.add(tid)
-                s = pipeline._stored_from_tool_use(b.get("name", ""), b.get("input", {}) or {})
-                if s:
-                    stored.append(s)
-                    # codemode 是借 stored 走的控制信号（TA 自切 code 模式），不是记忆产物——
-                    # 发成 memory 事件的话 app 会渲染出一条莫名其妙的灰字。
-                    if s["tool"] != "codemode":
-                        yield sse({"type": "memory", "tool": s["tool"], "text": s["text"]})
+            # 工具调用先登记（去重、抓产物），**灰字这时候还不发**——这里只知道他想干什么，
+            # 干成没干成要等下面的 tool_result。先发的话失败的调用也会亮一条「记住了一件事」。
+            collector.on_assistant(ev)
+        elif t == "user":
+            # 工具返回了 → 定案，成功/失败各自往下游发一条 memory 灰字。
+            for item in collector.on_user(ev):
+                for chunk in _memory_events(item):
+                    yield chunk
         elif t == "result":
             if ev.get("is_error"):
                 is_error = True
@@ -146,6 +146,11 @@ async def translate_events(events, finalize):
             result_text = ev.get("result")
 
     # ---- 收尾 ----
+    # 还没等到返回的工具（流断在半路）：定案成失败，该说的还是要说。
+    for item in collector.finish():
+        for chunk in _memory_events(item):
+            yield chunk
+
     if is_error or not result_text or not result_text.strip():
         # 空/错：用 SSE 格式收尾（响应头已发出，不能再抛 JSON），不存空回复。
         yield sse({"type": "error", "content": "大模型好像有点神游了，这次没能说完。"})
@@ -154,7 +159,7 @@ async def translate_events(events, finalize):
 
     # 权威回复 = 全部正文段拼接（工具前说的话也是话，进历史不能丢）。
     full_reply = "\n\n".join([s.strip() for s in raw_segments if s.strip()] + [result_text.strip()])
-    payload = finalize(full_reply, stored)
+    payload = finalize(full_reply, collector.items)
     payload["type"] = "done"
     yield sse(payload)
 

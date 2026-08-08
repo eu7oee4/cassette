@@ -727,9 +727,11 @@ struct ContentView: View {
                     // 对方去用工具了，下一段还没来 → 重新亮"正在输入"，
                     // 分清"说完了"和"还在忙"（下一段 .text 一到会自动收起）
                     isWaiting = true
-                case .memory(let tool, _):
-                    // 中途记忆操作 → 就地内联灰字（网页除外：finalize 会补一张可点的卡片）
-                    if tool != "webpage" {
+                case .memory(let tool, _, let ok, let reason):
+                    // 中途工具操作 → 就地内联灰字（成功的网页除外：finalize 会补一张可点的卡片）
+                    if !ok {
+                        chatStore.appendMemoryNote(memoryFailNoteText(tool: tool, reason: reason))
+                    } else if tool != "webpage" {
                         chatStore.appendMemoryNote(memoryNoteText(tool: tool))
                     }
                 case .error(let msg):
@@ -831,7 +833,8 @@ struct ContentView: View {
             chatStore.appendSystemMessage("已切进 Code 模式")
         }
         // 他这轮做/改的网页 → 网页卡片消息（stored 只有标题，从后端反查 id）。
-        let pages = (resp.stored ?? []).filter { $0.tool == "webpage" }
+        // 只认真做成了的（ok=false 的那次页面根本没生成，反查 id 只会挂错一张卡片）。
+        let pages = (resp.stored ?? []).filter { $0.tool == "webpage" && $0.ok != false }
         if !pages.isEmpty {
             Task { @MainActor in
                 guard let list = try? await chatService.getWebpages() else { return }
@@ -849,11 +852,28 @@ struct ContentView: View {
     /// 一次工具产物的灰字文案（内容去记忆页/聊天记录页看，这里只标动作）。
     private func memoryNoteText(tool: String) -> String {
         switch tool {
+        case "feel":    return "记下了一份心情"
         case "trace":   return "调整了一条记忆"
         case "i":       return "记下了一个关于自己的念头"
         case "webpage": return "做了一个网页"
         default:        return "记住了一件事"
         }
+    }
+
+    /// 想做但没做成的那次（工具报错/被婉拒）。以前这种也显示成「记住了一件事」——
+    /// 灰字在骗人，记忆其实没落盘。带上原因，TA 下次自己就知道该补什么。
+    private func memoryFailNoteText(tool: String, reason: String) -> String {
+        let what: String
+        switch tool {
+        case "feel":    what = "想记下一份心情"
+        case "trace":   what = "想调整一条记忆"
+        case "i":       what = "想记下一个关于自己的念头"
+        case "webpage": what = "想做一个网页"
+        case "codemode": what = "想切去 Code 模式"
+        default:        what = "想记住一件事"
+        }
+        let why = reason.trimmingCharacters(in: .whitespacesAndNewlines)
+        return why.isEmpty ? "\(what)，但没成" : "\(what)，但没成：\(why)"
     }
 
     // MARK: - 待送达同步（断连补投）

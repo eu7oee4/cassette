@@ -26,6 +26,7 @@ from typing import Literal
 
 import config
 import state_store
+from notify import logerr
 
 
 # ---------- 数据结构 ----------
@@ -480,11 +481,15 @@ def _describe_trace(inp: dict) -> str:
 
 
 def _stored_from_tool_use(name: str, inp: dict) -> Optional[dict]:
-    """工具调用 → stored 条目（app 灰字提示用）。只记「写」操作，breath 等读操作不算产物。"""
+    """工具调用 → stored 条目（app 灰字提示用）。只记「写」操作，breath 等读操作不算产物。
+    ⚠️ 这里只看得到「他想干什么」。干成没干成要等 tool_result，见 StoredCollector。"""
     if name.endswith("__hold") or name.endswith("__grow"):
         text = _extract_memory_text(inp)
         if text:
-            return {"tool": "grow" if name.endswith("__grow") else "hold", "text": text}
+            # feel=True 是感受类记忆（挂在一条已有记忆上），和普通 hold 不是一回事——
+            # 分开标，心流日志里才看得出他存的是件事还是一份心情。
+            tool = "grow" if name.endswith("__grow") else ("feel" if inp.get("feel") else "hold")
+            return {"tool": tool, "text": text}
         return None
     if name.endswith("__trace"):
         return {"tool": "trace", "text": _describe_trace(inp)}
@@ -508,6 +513,133 @@ def _stored_from_tool_use(name: str, inp: dict) -> Optional[dict]:
 NON_MEMORY_TOOLS = {"webpage", "codemode"}
 
 
+# ---------- 工具「调用结果」定案 ----------
+# 只解析 tool_use（输入）的老口径抓的是**调用意图**：失败的调用照样被记成「📥 记住了一件事」，
+# 心流日志和聊天灰字都在骗人（实锤：08-06 23:13 日志显示存了两条，实际只落盘一条——
+# 第一条 feel 缺 source_bucket 被 Ombre 拒了）。所以要等 tool_result 回来才算数。
+
+def _tool_result_text(block: dict) -> str:
+    """tool_result 的正文。content 可能是字符串，也可能是 [{type:text,text:...}] 列表。"""
+    c = block.get("content")
+    if isinstance(c, str):
+        return c
+    if isinstance(c, list):
+        return "\n".join(p.get("text", "") for p in c
+                         if isinstance(p, dict) and p.get("type") == "text")
+    return ""
+
+
+# 婉拒名单：Ombre 有一类拒绝走 isError:false，只在正文里说一句，从外面完全看不出失败。
+# 这是一份**实际见过的**清单，不是通用分类器——故意不写「失败/无法/不能」这种泛词：
+# 记忆正文本身提到"那次部署失败了"是常事，泛匹配会把真存下的记忆误判成没存，
+# 那是更坏的一头（存下的东西从心流日志里消失）。名单外的拒绝先当成功（和改之前一样），
+# 见到新说法就往这儿加一条，注明出处。
+_TOOL_REJECT_MARKS = (
+    "error executing tool",      # MCP/pydantic 参数校验不过（实测 trace 少传 bucket_id）
+    "未找到记忆桶",               # 实测 trace 指向不存在的桶，isError 是 false
+    "测试数据不能创建为",          # 实测 hold(test_data+feel)
+    "必须指向一条原始记忆",        # feel 缺 source_bucket（08-06 23:13 那次实锤）
+)
+# 开头就报错的：成功的返回不会这么起头，放心按前缀认。
+_TOOL_REJECT_PREFIXES = ("error:", "错误：", "错误:", "failed", "traceback")
+
+
+def _short_reason(text: str) -> str:
+    """把工具的报错正文压成一句给人看的原因（首行、限长）。截断给个省略号——
+    不然半截路径半截话，看着像原因本身就是坏的。"""
+    stripped = (text or "").strip()
+    if not stripped:
+        return ""
+    line = stripped.splitlines()[0].strip()
+    return line if len(line) <= 80 else line[:79] + "…"
+
+
+def tool_result_error(block: dict) -> Optional[str]:
+    """这条 tool_result 算失败吗？是则返回给人看的原因，否则 None。三道判据：
+      ① is_error：MCP 标准错误（参数校验不过之类）；
+      ② 返回体是 {"ok": false, "error": ...}：插件的口径（codemode 就这么回）；
+      ③ 正文命中婉拒名单：Ombre 那种 isError:false 的软拒绝。
+    ①② 是结构判据、准；③ 是文本判据、只认见过的说法（见 _TOOL_REJECT_MARKS）。"""
+    text = _tool_result_text(block).strip()
+    if block.get("is_error") or block.get("isError"):
+        return _short_reason(text) or "工具报错了"
+    try:
+        obj = json.loads(text)
+    except Exception:
+        obj = None
+    if isinstance(obj, dict) and obj.get("ok") is False:
+        return _short_reason(str(obj.get("error") or "")) or "没成功"
+    low = text.lower()
+    if any(m in low for m in _TOOL_REJECT_MARKS) or low.startswith(_TOOL_REJECT_PREFIXES):
+        return _short_reason(text)
+    return None
+
+
+class StoredCollector:
+    """把「工具调用」和「工具返回」对上号，产出定了案的 stored 条目。
+
+    用法：assistant 事件喂 on_assistant()，user 事件（工具返回在这里）喂 on_user()，
+    流走完调一次 finish()。items 是最终清单，每条带 ok；失败的另带 error。
+    两条解析路（parse_claude_stream / sse.translate_events）共用这一份，别再各写一套。"""
+
+    def __init__(self):
+        self._pending: dict = {}      # tool_use_id → 还没等到结果的 stored 条目
+        self._seen_tool_ids: set = set()   # CLI 会按内容块重复发同一条 assistant 消息
+                                           # （每次带累计块），同一个 tool_use 会出现多次
+        self.items: list[dict] = []   # 已定案的（成功和失败都在，靠 ok 区分）
+
+    def on_assistant(self, ev: dict) -> None:
+        """吃一条 assistant 事件：把里面的 tool_use 记成「待定案」。"""
+        for b in ev.get("message", {}).get("content", []):
+            if b.get("type") != "tool_use":
+                continue
+            tid = b.get("id")
+            if tid:
+                if tid in self._seen_tool_ids:
+                    continue
+                self._seen_tool_ids.add(tid)
+            s = _stored_from_tool_use(b.get("name", ""), b.get("input", {}) or {})
+            if not s:
+                continue
+            if tid:
+                self._pending[tid] = s
+            else:
+                # 没有块 id 就没法和结果对上号（理论上不会发生）：按老口径当成功记下，别丢。
+                self.items.append({**s, "ok": True})
+
+    def on_user(self, ev: dict) -> list[dict]:
+        """吃一条 user 事件（工具返回）：给对得上号的条目定案。返回这次新定案的那些
+        （流式那条路要拿它们现发灰字）。"""
+        settled: list[dict] = []
+        for b in ev.get("message", {}).get("content", []):
+            if b.get("type") != "tool_result":
+                continue
+            s = self._pending.pop(b.get("tool_use_id") or "", None)
+            if s is None:
+                continue   # 不是我们关心的工具（breath 等读操作），或已定过案
+            err = tool_result_error(b)
+            item = {**s, "ok": err is None}
+            if err:
+                item["error"] = err
+                logerr(f"工具没成功 {s['tool']}: {err}")
+            self.items.append(item)
+            settled.append(item)
+        return settled
+
+    def finish(self) -> list[dict]:
+        """收尾：还没等到返回的（流断在半路 / 子进程被杀）。标成失败而不是默默算成功——
+        「记住了一件事」是句承诺，没看到结果就不该替他说出口。"""
+        settled: list[dict] = []
+        for s in self._pending.values():
+            item = {**s, "ok": False, "error": "没等到工具返回（这轮中断了）"}
+            self.items.append(item)
+            settled.append(item)
+        if settled:
+            logerr(f"{len(settled)} 个工具调用没等到返回，按没成功记")
+        self._pending.clear()
+        return settled
+
+
 def parse_claude_stream(stdout: str, collect_all_text: bool = False) -> tuple[Optional[str], list[dict]]:
     """解析 stream-json 事件流，返回 (文本回复, stored)。
     stored 是这轮工具调用的结构化产物（存/改了什么长期记忆），SSE 灰字/响应字段按它渲染。
@@ -516,10 +648,7 @@ def parse_claude_stream(stdout: str, collect_all_text: bool = False) -> tuple[Op
     先写一段 → 调工具 → 再写后半段，只取 result 会丢掉工具调用前的文本。"""
     result_text = None
     text_parts: list[str] = []
-    stored: list[dict] = []
-    seen_tool_ids: set = set()   # CLI 会按内容块重复发同一条 assistant 消息（每次带累计块），
-                                 # 同一个 tool_use 会出现多次——按块的唯一 id 去重（实锤：
-                                 # 一次 hold 在心流日志里记了两条）
+    collector = StoredCollector()   # tool_use 只是意图，成没成要等 tool_result 定案
     for line in stdout.splitlines():
         line = line.strip()
         if not line:
@@ -530,28 +659,24 @@ def parse_claude_stream(stdout: str, collect_all_text: bool = False) -> tuple[Op
             continue
         t = ev.get("type")
         if t == "assistant":
-            for b in ev.get("message", {}).get("content", []):
-                bt = b.get("type")
-                if bt == "text" and collect_all_text:
-                    txt = (b.get("text") or "").strip()
-                    if txt:
-                        text_parts.append(txt)
-                elif bt == "tool_use":
-                    tid = b.get("id")
-                    if tid:
-                        if tid in seen_tool_ids:
-                            continue
-                        seen_tool_ids.add(tid)
-                    s = _stored_from_tool_use(b.get("name", ""), b.get("input", {}) or {})
-                    if s:
-                        stored.append(s)
+            if collect_all_text:
+                for b in ev.get("message", {}).get("content", []):
+                    if b.get("type") == "text":
+                        txt = (b.get("text") or "").strip()
+                        if txt:
+                            text_parts.append(txt)
+            collector.on_assistant(ev)
+        elif t == "user":
+            collector.on_user(ev)   # 工具返回：定案
         elif t == "result":
             if ev.get("is_error"):
-                return None, stored
+                collector.finish()
+                return None, collector.items
             result_text = ev.get("result")
+    collector.finish()
     if collect_all_text and text_parts:
-        return "\n".join(text_parts), stored
-    return (result_text.strip() if result_text else None), stored
+        return "\n".join(text_parts), collector.items
+    return (result_text.strip() if result_text else None), collector.items
 
 
 def multimodal_stdin(prompt: str, images: list, file_blocks: Optional[list[dict]] = None) -> str:

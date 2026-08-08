@@ -17,8 +17,11 @@ struct MindEntry: Decodable {
 }
 
 struct MindStored: Decodable {
-    let tool: String              // hold | grow | trace
+    let tool: String              // hold | feel | grow | trace | i
     let text: String
+    let ok: Bool?                 // 那次调用真成了吗（老记录没这字段 → nil，当成功）
+    let error: String?            // ok=false 时的原因
+    var failed: Bool { ok == false }
 }
 
 extension ChatService {
@@ -131,10 +134,22 @@ private struct MindRow: View {
 
             if let stored = entry.stored, !stored.isEmpty {
                 ForEach(Array(stored.enumerated()), id: \.offset) { _, s in
-                    HStack(alignment: .firstTextBaseline, spacing: 8) {
-                        Text(storedIcon(s.tool))
-                        Text(s.text).font(.callout)
-                            .fixedSize(horizontal: false, vertical: true)
+                    // 没成的那次也摆出来（🚫 + 原因）：TA 下次醒来看到就知道该补什么参数，
+                    // 眠眠也不会再对着一条其实没落盘的记忆纳闷。
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack(alignment: .firstTextBaseline, spacing: 8) {
+                            Text(s.failed ? "🚫" : storedIcon(s.tool))
+                            Text(s.text).font(.callout)
+                                .foregroundStyle(s.failed ? AnyShapeStyle(.secondary)
+                                                          : AnyShapeStyle(.primary))
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        if s.failed {
+                            Text(failedReason(s))
+                                .font(.caption2)
+                                .foregroundStyle(.tertiary)
+                                .padding(.leading, 26)
+                        }
                     }
                 }
             }
@@ -155,13 +170,28 @@ private struct MindRow: View {
         return s
     }
 
-    /// stored 条目图标：✏️改记忆 / 🌱自我认知候选（I 工具，要经几轮 dream 见证才转正）/ 📥存记忆。
+    /// stored 条目图标：🫧感受类记忆（hold feel=1，挂在一条已有记忆上）/ ✏️改记忆 /
+    /// 🌱自我认知候选（I 工具，要经几轮 dream 见证才转正）/ 📥普通存记忆。
     private func storedIcon(_ tool: String) -> String {
         switch tool {
+        case "feel":  return "🫧"
         case "trace": return "✏️"
         case "i":     return "🌱"
         default:      return "📥"
         }
+    }
+
+    /// 没成的那次：这本来想干什么 + 工具给的原因。
+    private func failedReason(_ s: MindStored) -> String {
+        let what: String
+        switch s.tool {
+        case "feel":  what = "这份心情没存下"
+        case "trace": what = "这次修改没生效"
+        case "i":     what = "这个念头没存下"
+        default:      what = "这条没存下"
+        }
+        let why = (s.error ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        return why.isEmpty ? what : "\(what)——\(why)"
     }
 
     private var sourceBadge: String {
