@@ -457,6 +457,21 @@ def capture(lines: int = PANE_HEIGHT) -> dict:
         raw.pop(0)
     while raw and not raw[-1].strip():
         raw.pop()
+    # 中间那些空行也要收：pane 开到 240 行，而 CC 的 TUI 把输入框画在**最底下**，
+    # 正文和输入框之间就空出一长条（实测过一次是连续 29 行）——在手机上就是正文和
+    # 输入框中间一大块纯黑，看着像画面裂了。连续 3 行以上压成 2 行；正常输出里
+    # 连着三行空行本来就少见，压掉也只是少一点行距，不会丢字。
+    squeezed: list[str] = []
+    blanks = 0
+    for line in raw:
+        if line.strip():
+            blanks = 0
+            squeezed.append(line)
+        else:
+            blanks += 1
+            if blanks <= 2:
+                squeezed.append(line)
+    raw = squeezed
     # 弹窗给的是**整屏**，别先截尾 N 行喂它：弹窗在场时状态栏不画、pane 底下空出几行，
     # 按行数截出来的那段可能整段是空白，页脚根本不在里面。
     return {"ok": True, "alive": True, "content": "\n".join(raw[-lines:]),

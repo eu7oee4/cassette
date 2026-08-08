@@ -323,10 +323,28 @@ private final class BottomPinnedTextView: UITextView {
         }
     }
 
-    /// 只动纵向，横向偏移原样留着——横着翻到一半时别把人拽回行首。
+    /// 贴底走 `scrollRangeToVisible(结尾)`，**不要拿 contentSize 自己算**。
+    /// 踩过：`contentSize.height - bounds.height` 依赖 contentSize 此刻已经是终值，
+    /// 而长文档的布局是惰性的、刚换完内容时它还没定——算出来的落点忽对忽错，
+    /// 表现就是「展开全屏有时停在开头、还滚不动，过一会儿或者下次又好了」。
+    /// 让排版引擎自己去把结尾那一段布出来，它不会算错。
     func pinToBottom() {
-        let maxY = max(0, contentSize.height - bounds.height)
-        setContentOffset(CGPoint(x: contentOffset.x, y: maxY), animated: false)
+        let end = NSRange(location: (text as NSString).length, length: 0)
+        let keepX = contentOffset.x     // 横着翻到一半时别把人拽回行首
+        scrollRangeToVisible(end)
+        if contentOffset.x != keepX {
+            setContentOffset(CGPoint(x: keepX, y: contentOffset.y), animated: false)
+        }
+    }
+
+    /// 再补一拍：万一这一帧的布局还没落定，下一个 runloop 再贴一次。
+    /// 手指正按着的时候不抢（那是人在自己翻）。
+    func pinToBottomSoon() {
+        pinToBottom()
+        DispatchQueue.main.async { [weak self] in
+            guard let self, !self.isDragging, !self.isDecelerating else { return }
+            self.pinToBottom()
+        }
     }
 }
 
@@ -338,7 +356,14 @@ private struct TerminalScreen: UIViewRepresentable {
     private static let font = UIFont.monospacedSystemFont(ofSize: 11, weight: .regular)
 
     func makeUIView(context: Context) -> BottomPinnedTextView {
-        let tv = BottomPinnedTextView()
+        // ⚠️ 必须 TextKit 1（`usingTextLayoutManager: false`）。iOS 16 起 UITextView 默认
+        // 走 TextKit 2，那边 `textContainer.size` 只是个参考值、排版由 NSTextLayoutManager
+        // 自己说了算——设了不折行的容器宽度也照样按视图宽折行（实机截图里 80 列的画面被
+        // 折成两行，对齐全乱），而且 contentSize 是惰性估算的，贴底会算错。
+        // TextKit 1 里「容器宽度写死 + widthTracksTextView=false」是横向滚动的老配方，
+        // 惰性排版靠 allowsNonContiguousLayout 拿回来，性能不亏。
+        let tv = BottomPinnedTextView(usingTextLayoutManager: false)
+        tv.layoutManager.allowsNonContiguousLayout = true   // 只排看得见的那几十行
         tv.isEditable = false
         // 不开选择：选择支持要给每个字建可命中的区域，画面一直在变的时候这一项就是大头。
         tv.isSelectable = false
@@ -350,6 +375,7 @@ private struct TerminalScreen: UIViewRepresentable {
         // 不折行：终端画面按 80 列排的，折一行整块对齐就毁了。宽度不跟着视图走 +
         // 按裁剪处理换行，内容自己横向铺开，UITextView 自带的横向滚动就能翻。
         tv.textContainer.widthTracksTextView = false
+        tv.textContainer.heightTracksTextView = false
         tv.textContainer.lineBreakMode = .byClipping
         tv.showsHorizontalScrollIndicator = false
         tv.contentInsetAdjustmentBehavior = .never   // 贴底算式里不用再兜安全区
@@ -371,8 +397,7 @@ private struct TerminalScreen: UIViewRepresentable {
         tv.text = text
         tv.textContainer.size = CGSize(width: Self.contentWidth(text),
                                        height: .greatestFiniteMagnitude)
-        tv.layoutIfNeeded()
-        tv.pinToBottom()
+        tv.pinToBottomSoon()
     }
 
     func makeCoordinator() -> Coordinator { Coordinator() }
