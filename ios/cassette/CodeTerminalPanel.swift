@@ -1,24 +1,34 @@
 import SwiftUI
 
-/// Code 模式的内联终端：贴在输入框上方，不用切页面就能看他在干什么、按掉权限弹窗。
+/// 面板此刻画出来多高——报给 ContentView，它转手给 ChatView 当气泡的内容内边距，
+/// 让最新气泡正好停在黑条上边。**只报值、不改 frame**，所以不会反过来撑大气泡区（那就成环了）。
+struct TerminalHeightKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
+}
+
+/// Code 模式的内联终端：**盖在**气泡区上（不是压缩它），不用切页面就能看他在干什么、
+/// 按掉权限弹窗。
 ///
-/// 交互（结构从上到下：黑条 → 画面 → 按钮行 → 输入框）：
+/// 交互（结构从上到下：黑条 → 画面 → 按钮行，再往下才是输入框）：
 /// - 黑条单击开满屏、再单击收回；右侧那个「⅔」按钮切中间那一档。
-/// - **拖拽调档暂时没有**：拖的过程中会抖、停在中间有时也会自己跳。根因不在这个文件里
-///   ——面板长高会压缩 ChatView，而那边是倒置滚动 + 冻结快照那一套，布局被牵动后又反过来
-///   影响这边。要做的话得把面板改成 overlay（盖住气泡区而不是压缩它），让 ChatView 的
-///   布局全程不动，那是另一件事。**别只是把 DragGesture 加回来**。
-/// - 档位也别改回双击：双击手势一在，单击就得等判定窗口过期才响应，肉眼可见地迟钝。
+/// - 档位别改回双击：双击手势一在，单击就得等判定窗口过期才响应，肉眼可见地迟钝。
+///
+/// **高度只有一个上限：气泡区有多高**（`available`，由外面量好传进来）。
+/// 以前是拿屏高一路减（顶栏/键盘/附件条/按钮行/给输入框预留的余地）估出来的，估算链上
+/// 任一环偏了就出事：估出来的值触到 `max(100,…)` 地板时面板不再缩，多出来的从顶上溢出
+/// 盖住顶栏（实测：5 个弹窗选项 + 图 + 文件 + 键盘时盖住 86pt）。现在夹进气泡区就完事——
+/// 满档正好严丝合缝贴在顶栏下面，空间不够就自己裁，**越不过去**。
+/// 键盘、附件条、输入框长高也都不用单独算了：它们一动气泡区就变矮，`available` 自己跟上。
 ///
 /// 画面的**显示范围和内容滚动位置是两回事**——画面永远按可用高度布局、内容底部对齐，
-/// 外面那层 frame 只是个裁剪窗口。所以不管拖到哪一档，最新输出始终贴在窗口底边，
-/// 按钮行也一直在底下（它在裁剪窗口之外）。要往回翻旧内容，在画面里上滑。
+/// 外面那层 frame 只是个裁剪窗口。所以不管切到哪一档，最新输出始终贴在窗口底边。
+/// 要往回翻旧内容，在画面里上滑。
 struct CodeTerminalPanel: View {
     let service: ChatService
     @Binding var expanded: Bool
-    /// 黑条以下那些东西（待发照片条/文件条/表情面板 + 输入栏）此刻实际有多高，由外面实测传进来。
-    /// 不实测就会踩到：贴了张照片再贴个文件，输入框直接被顶出屏幕。
-    var bottomBars: CGFloat = 56
+    /// 气泡区此刻有多高 = 面板高度的唯一上限。
+    var available: CGFloat
 
     @State private var content = ""
     @State private var dialog: [ChatService.CodeDialogOption] = []
@@ -28,61 +38,49 @@ struct CodeTerminalPanel: View {
     /// 档位存**比例**不存绝对高度（0=收起 / 0.62=2/3 屏 / 1=占满）：键盘弹出、贴了照片、
     /// 弹窗按钮变多——可用空间一变，比例不动、高度自己缩放，不用记原来是哪一档。
     @State private var stopRatio: CGFloat = 0
-    @State private var keyboard: CGFloat = 0     // 键盘占了多高
     @State private var scrolling = false         // 手指正在画面里滑
     @State private var heldContent: String? = nil // 滑动期间攒下的新画面，落定再上
-    // 屏幕尺寸和安全区只在出现时读一次。**绝不能在 body 里实时读 UIKit 的这些值**：
-    // 它们在布局过程中会变，读到新值 → 高度变 → 又触发布局 → 再读到新值，来回震荡，
-    // 拖拽时看着就是疯狂频闪（实机踩到过）。
-    @State private var screenH: CGFloat = 800
-    @State private var safeTop: CGFloat = 47
-    @State private var safeBottom: CGFloat = 34
 
     /// 画面刷新间隔：展开时跟得紧；收起时只为了知道"有没有弹窗在等"，慢慢来就行。
     private let fastPoll: Duration = .milliseconds(1200)
     private let slowPoll: Duration = .seconds(6)
     private let barHeight: CGFloat = 34
     private let staleAfter: TimeInterval = 5    // 超过这么久没刷出来就明说（别无声冻住）
-    // 顶栏（猫爪/标题/开关那条）+ 它底下那道分隔线。宁可估大一两点留条看不见的缝，
-    // 也别估小——估小了就是输入框被顶掉一条边。
-    private let headerHeight: CGFloat = 50
     private let halfRatio: CGFloat = 0.62       // 中间那一档
-    /// 布局上给输入框留的生长余地（它 1~5 行自动长高，每行约 20pt）。
-    /// 不留的话面板把空间占死，输入框换行了也长不起来。这块留白**不会露出来**——
-    /// 底下的负 padding 让面板向上盖住它。
-    private let growRoom: CGFloat = 80
 
-    /// 按钮行占多高（弹窗选项是竖排的，五个选项就是一大条，底下还有一排方向键）。
-    private var keyBarHeight: CGFloat {
+    /// 按钮行想占多高（弹窗选项是竖排的，五个选项就是一大条，底下还有一排方向键）。
+    private var keyBarWants: CGFloat {
         dialog.isEmpty ? 50 : CGFloat(dialog.count) * 46 + 55
     }
 
-    /// 画面此刻最多能占多高 = 屏幕减掉所有别人要用的。键盘顶掉底部安全区（两者取大，
-    /// 别重复扣）。
-    private var maxHeight: CGFloat {
-        let taken = safeTop + headerHeight + barHeight + keyBarHeight
-                    + bottomBars + max(keyboard, safeBottom) + growRoom
-        return max(100, screenH - taken)
+    /// 面板总高：收起时只剩黑条；展开时按比例取气泡区的一段，夹进气泡区。
+    private var totalHeight: CGFloat {
+        guard stopRatio > 0 else { return barHeight }
+        return max(barHeight, min(stopRatio * available, available))
     }
-    private var height: CGFloat { stopRatio * maxHeight }
+    /// 黑条以下还剩多少，给「画面 + 按钮行」分。
+    private var below: CGFloat { max(0, totalHeight - barHeight) }
+    /// ⚠️ 按钮行装不下时让它**自己滚**，绝不去裁黑条：黑条一没，人就没法收回终端了
+    /// （5 个选项 + 键盘时是真的装不下，只能靠人先收键盘——那也得有个黑条可点）。
+    private var keyBarHeight: CGFloat { min(keyBarWants, below) }
+    private var screenHeight: CGFloat { max(0, below - keyBarHeight) }
 
     private var isStale: Bool { now.timeIntervalSince(lastOk) > staleAfter }
 
     var body: some View {
         VStack(spacing: 0) {
             grabBar
-            if height > 0 {
+            if below > 0 {
                 screen
                 keyBar
             }
         }
         .background(Color.terminalBG)
-        // 展开时向上盖住那块 growRoom 留白（外加几点估算误差）：布局上它是给输入框长高
-        // 留的余地、气泡区那一条就剩这么高，视觉上被面板自己的背景盖掉，所以顶上不会
-        // 漏出半条气泡。负 padding 只减自己的占位、内容照样画出去。
-        // 收起时必须归零，不然黑条会往上跑去盖住气泡。
-        .padding(.top, height > 0 ? -(growRoom + 6) : 0)
-        .animation(.easeOut(duration: 0.22), value: height)
+        .frame(height: totalHeight, alignment: .top)
+        .clipped()
+        // ⚠️ clipped() 只裁绘制、不裁命中测试——补这句，不然看不见的部分照样吃触摸。
+        .contentShape(Rectangle())
+        .preference(key: TerminalHeightKey.self, value: totalHeight)
         // 外部改了展开状态（点黑条 / 退出 Code 模式）→ 档位跟上。
         // ⚠️ 收起时才无条件归零；打开时**只在原本收着的情况下**给满档——否则从收起状态点
         // 「⅔」时，setRatio 先设好 0.62、再把 expanded 翻成 true，这里会顺手把它重置成
@@ -90,22 +88,8 @@ struct CodeTerminalPanel: View {
         .onChange(of: expanded) { _, on in
             if !on { stopRatio = 0 } else if stopRatio == 0 { stopRatio = 1 }
         }
-        .onAppear {
-            let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene
-            screenH = scene?.screen.bounds.height ?? 800
-            safeTop = scene?.windows.first?.safeAreaInsets.top ?? 47
-            safeBottom = scene?.windows.first?.safeAreaInsets.bottom ?? 34
-            stopRatio = expanded ? 1 : 0
-        }
-        .onReceive(NotificationCenter.default.publisher(
-            for: UIResponder.keyboardWillShowNotification)) { note in
-            let frame = note.userInfo?[UIResponder.keyboardFrameEndUserInfoKey] as? CGRect
-            keyboard = frame?.height ?? 0
-        }
-        .onReceive(NotificationCenter.default.publisher(
-            for: UIResponder.keyboardWillHideNotification)) { _ in
-            keyboard = 0
-        }
+        // 键盘不用自己监听了：键盘一弹，气泡区就变矮，available 自己跟上。
+        .onAppear { stopRatio = expanded ? 1 : 0 }
         .task(id: expanded) {
             // 轮询：展开时 1.2s，收起时 6s。离开这个视图（退出 Code 模式）自动取消。
             await poll()
@@ -122,13 +106,13 @@ struct CodeTerminalPanel: View {
     private var grabBar: some View {
         HStack(spacing: 8) {
             Image(systemName: "chevron.compact.up")
-                .rotationEffect(.degrees(height > 0 ? 180 : 0))
+                .rotationEffect(.degrees(below > 0 ? 180 : 0))
                 .foregroundStyle(.white.opacity(0.75))
-            Text(height > 0 ? "点击此处收回终端窗口" : "点击此处展开终端窗口")
+            Text(below > 0 ? "点击此处收回终端窗口" : "点击此处展开终端窗口")
                 .font(.system(size: 12))
                 .foregroundStyle(.white.opacity(0.9))
             // 收起时也要知道他卡在弹窗上了——不然人在聊天里干等，那边等着按键。
-            if height == 0 && !dialog.isEmpty {
+            if below == 0 && !dialog.isEmpty {
                 Text("待确认")
                     .font(.system(size: 10, weight: .semibold))
                     .foregroundStyle(.black)
@@ -157,9 +141,15 @@ struct CodeTerminalPanel: View {
         }
     }
 
+    /// 换档：**动画只加在这儿**，不用 `.animation(value:)` 罩着整个面板。
+    /// 罩着的话，弹窗选项一出现（keyBar 变高 → 总高变）也会被当成一次动画，把同批变化的
+    /// 按钮换人、终端正文换字一起交叉淡出——那就是"选项卡弹出时卡一下、还带个虚影"。
+    /// 高度因为选项/键盘/附件条变化时应该是瞬时的，只有人主动换档才滑。
     private func setRatio(_ r: CGFloat) {
-        stopRatio = r
-        expanded = r > 0
+        withAnimation(.easeOut(duration: 0.22)) {
+            stopRatio = r
+            expanded = r > 0
+        }
     }
 
     // MARK: - 画面
@@ -190,15 +180,15 @@ struct CodeTerminalPanel: View {
                 heldContent = nil
             }
         }
-        // 内容永远按全屏高度布局、底部对齐 → 最新输出贴着窗口底边
+        // 内容永远按"最大可能高度"布局、底部对齐 → 最新输出贴着窗口底边
         .defaultScrollAnchor(.bottom)
-        .frame(height: maxHeight, alignment: .bottom)
-        // 外面这层才是"看得见多少"的裁剪窗口，拖拽只动它
-        .frame(height: height, alignment: .bottom)
+        .frame(height: max(1, available), alignment: .bottom)
+        // 外面这层才是"看得见多少"的裁剪窗口，换档只动它
+        .frame(height: screenHeight, alignment: .bottom)
         .clipped()
         // ⚠️ 少了这行整个面板会像卡死一样（实机踩到）：**clipped() 只裁绘制、不裁命中测试**，
-        // 被裁掉的那部分画面（按 maxHeight 布局、向上溢出）照样吃触摸——它盖在黑条和气泡区
-        // 上面，于是黑条点不动也拖不动，在气泡区滑动滑的还是终端内容。
+        // 被裁掉的那部分画面（按 available 布局、向上溢出）照样吃触摸——它盖在黑条和气泡区
+        // 上面，于是黑条点不动，在气泡区滑动滑的还是终端内容。
         .contentShape(Rectangle())
         // 点画面收键盘（打字时想看终端，点一下就行，不用先收键盘再点）
         .simultaneousGesture(TapGesture().onEnded { dismissKeyboard() })
@@ -221,8 +211,18 @@ struct CodeTerminalPanel: View {
     }
 
     // MARK: - 按钮行（永远贴底）
+    //
+    // 装进一个 ScrollView：五个选项 + 键盘弹着的时候，黑条以下的空间放不下整排按钮。
+    // 让它自己滚，**绝不靠裁**——从上往下裁第一个没的就是黑条，人就再也收不回终端了。
 
     private var keyBar: some View {
+        ScrollView(.vertical) { keyBarContent }
+            .scrollBounceBehavior(.basedOnSize)
+            .frame(height: keyBarHeight)
+            .background(Color.terminalBar)
+    }
+
+    private var keyBarContent: some View {
         VStack(spacing: 6) {
             if dialog.isEmpty {
                 HStack(spacing: 6) {
@@ -264,7 +264,6 @@ struct CodeTerminalPanel: View {
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 8)
-        .background(Color.terminalBar)
     }
 
     /// 没弹窗时的常用键（顺序就是屏幕上从左到右的顺序）。

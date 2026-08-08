@@ -69,18 +69,16 @@ struct ContentView: View {
     @State private var codeSwitching = false          // 正在切换中：按钮转圈、挡住连点
     @State private var terminalExpanded = false       // 内联终端面板展开着吗
     @State private var confirmStopBusy = false        // 退出时那边正干着活 → 先问一句
-    /// 终端以下那一摞（附件条 + 输入栏）有多高，**按内容算，不去量**。
-    /// 量过一版，结果是正反馈震荡：终端变高 → 底下空间不够 → 输入栏被压 → 量出更小的值
-    /// → 终端算出自己还能更高 → 再压……静止时黑条都会自己上下跳。这些条子都是自己写的，
-    /// 高度可控，算出来就不再依赖布局结果，环就断了。
-    private var bottomBarsHeight: CGFloat {
-        var h: CGFloat = 52                                  // InputBar 单行
-        if showStickers { h += 301 }                         // 表情面板 300 + 分隔线
-        if pendingSticker != nil { h += 77 }
-        if !pendingImages.isEmpty { h += 73 }
-        if !pendingFiles.isEmpty { h += 48 }
-        return h   // 输入框长高的余地由面板自己的 growRoom 留，不用在这儿算行数
-    }
+    /// 气泡区此刻有多高。终端面板是**盖在**气泡区上的 overlay，高度以它为唯一上限——
+    /// 所以面板绝不可能越过顶栏，键盘/附件条/输入框长高也都不用单独算：那些一动，
+    /// 气泡区就变矮，这个值自己跟上。
+    /// 量它不会成环，正因为面板是 overlay：面板高度影响不了气泡区的 frame。
+    /// （压缩式布局那版量过一次，是正反馈震荡——终端变高 → 输入栏被压 → 量出更小的值
+    /// → 终端算出自己还能更高 → 静止时黑条都会自己上下跳。overlay 把那条链断了。）
+    @State private var chatAreaHeight: CGFloat = 0
+    /// 终端面板此刻画出来多高（面板自己报上来）→ 转给 ChatView 当气泡的内容内边距，
+    /// 最新气泡就正好停在黑条上边、不被盖住。
+    @State private var terminalHeight: CGFloat = 0
 
     // 编辑消息弹窗状态
     @State private var editingMessage: ChatMessage? = nil
@@ -202,19 +200,26 @@ struct ContentView: View {
                  onDeleteStack: { msgs in deleteCandidates = msgs },
                  editRefreshTick: editRefreshTick,
                  backToNowTick: backToNowTick,
+                 // Code 模式：终端盖在气泡区上，气泡得留出这么高才不会被压在底下
+                 bottomOverlayHeight: codeMode ? terminalHeight : 0,
                  scrollTarget: chatScrollTarget,
                  onScrollTargetHandled: { chatScrollTarget = nil })
             .background(Color(.systemGroupedBackground))
+            .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { chatAreaHeight = $0 }
+            // Code 模式的终端：**盖在**气泡区上，不压缩它。压缩那版的代价见
+            // CodeTerminalPanel 的开头注释——一句话：气泡区布局全程不动，面板才有
+            // 一个诚实的高度上限，也才不会每次改高度都把整个气泡列表重排一遍。
+            // ⚠️ 顺序要紧：overlay 挂在 safeAreaInset **之前**，它才对齐到「输入栏顶」
+            // 而不是屏幕底。
+            .overlay(alignment: .bottom) {
+                if codeMode {
+                    CodeTerminalPanel(service: chatService, expanded: $terminalExpanded,
+                                      available: chatAreaHeight)
+                }
+            }
+            .onPreferenceChange(TerminalHeightKey.self) { terminalHeight = $0 }
             .safeAreaInset(edge: .bottom, spacing: 0) {
                 VStack(spacing: 0) {
-                    // Code 模式：终端内联在输入框上方。它长高时气泡区自然被压短（safeAreaInset
-                    // 的语义），气泡区底部因此永远贴着终端窗口顶部。
-                    // bottomBars 把下面这一摞的实测高度告诉它，它才知道自己最多能占多高——
-                    // 表情面板、待发照片条、文件条都会让可用空间变，估算撑不住。
-                    if codeMode {
-                        CodeTerminalPanel(service: chatService, expanded: $terminalExpanded,
-                                          bottomBars: bottomBarsHeight)
-                    }
                     if showStickers {
                         Divider()
                         StickerPanel(store: stickerStore, onPick: stageSticker)

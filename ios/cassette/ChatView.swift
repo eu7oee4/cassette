@@ -16,6 +16,9 @@ struct ChatView: View {
     var onDeleteStack: ([ChatMessage]) -> Void = { _ in }     // 长按堆叠卡：删整组
     var editRefreshTick: Int = 0   // 用户亲手编辑/删除的信号：+1 → 手术式合并进冻结快照
     var backToNowTick: Int = 0     // 「编辑并重新回复」的信号：+1 → 解冻回底，等着看新答案
+    /// 底部盖着多高的东西（Code 模式的终端面板）。给的是**内容内边距**不是 frame——
+    /// 改 frame 就把布局和面板高度绑一起了，那正是终端面板压缩式布局的病根。
+    var bottomOverlayHeight: CGFloat = 0
     var scrollTarget: UUID? = nil                  // 外部跳转请求（聊天记录页点行）
     var onScrollTargetHandled: () -> Void = { }    // 跳转消费完通知外面清 nil
 
@@ -80,7 +83,10 @@ struct ChatView: View {
                 }
             }
             .padding(.horizontal, 12)
-            .padding(.vertical, 12)
+            // ⚠️ 翻转布局：**layout 的 top 就是视觉的底**。所以底部盖着的终端要用
+            // padding(.top) 让开——加在 .bottom 上会跑到屏幕顶去（实测过）。
+            .padding(.top, 12 + bottomOverlayHeight)
+            .padding(.bottom, 12)
         }
         .flippedUpsideDown()
         // 贴底动作全走 ScrollPosition.scrollTo(edge:)：翻转布局"底"=滚动坐标顶边，
