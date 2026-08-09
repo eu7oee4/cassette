@@ -479,46 +479,89 @@ private struct TerminalScreen: UIViewRepresentable {
         context.coordinator.onScrollingChanged = onScrollingChanged
         context.coordinator.onTap = onTap
         guard tv.text != text else { return }
-        tv.growDesiredWidth(to: Self.contentWidth(text))   // 见 applyWidth / growDesiredWidth
-        tv.text = text                                     // 横向偏移由 restorePinnedX 兜住
+        let (attributed, width) = Self.gridded(text)
+        tv.growDesiredWidth(to: width)      // 见 applyWidth / growDesiredWidth
+        tv.attributedText = attributed      // 横向偏移由 restorePinnedX 兜住
         tv.pinToBottomSoon()
     }
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
-    /// 终端 pane 的列数（后端 code_bridge.PANE_WIDTH）。等宽字体下「80 列」就是画面的
-    /// 右边界，也是任何一行的宽度上限——中文占 2 列但只渲染 1.6 格，不会超出自己的格子。
-    /// 拿它当画布宽度的**下限**：这样画布从第一帧起就是个常量，不会随内容忽宽忽窄。
-    private static let paneColumns: CGFloat = 80
+    /// 终端 pane 的列数（后端 `code_bridge.PANE_WIDTH`）。
+    private static let paneColumns = 80
+    private static let cell = ("0" as NSString).size(withAttributes: [.font: font]).width
 
-    /// 画布要多宽 = 最长那行**真实排出来**有多宽（不低于 80 列）。
-    ///
-    /// 别按「格子数」估：终端画面里全是框线字符（`─│╭`），它们是非 ASCII 但只占一格，
-    /// 按两格估会把画布撑出一大片死黑——实测那帧估出 1111、实际只有 544，多出来的
-    /// 567pt 比整块屏幕还宽，滑到最右边就是一片黑，看着像内容被一刀切了。
-    ///
-    /// 逐行全量实测又太贵（212 行 54ms，每 1.2 秒来一次就是新的卡顿），所以走上界剪枝：
-    /// 先给每行算一个**宽松的**上界排序，量到「剩下的上界都超不过当前最宽」就停。
-    /// 实测同一帧：结果和全量一字不差，只量 81 行、3.2ms。
-    /// ⚠️ 上界必须宽松（这里非 ASCII 按 2.5 格）——上界估窄了会提前收工漏掉真正最宽的行，
-    /// 那就又开始切字了。宽一点只是多量几行。
-    private static func contentWidth(_ s: String) -> CGFloat {
-        let cell = ("0" as NSString).size(withAttributes: [.font: font]).width
-        let lines = s.split(separator: "\n", omittingEmptySubsequences: false)
-        let upper = lines.map { line -> CGFloat in
-            var units: CGFloat = 0
-            for u in line.unicodeScalars { units += u.isASCII ? 1 : 2.5 }
-            return units * cell
+    /// 全角字符要补多少间距，才正好占满两格。
+    /// ⚠️ **必须在上下文里量**（连排 10 个再除以 10），不能孤立量一个字：
+    /// 中日韩标点（。，：「」〔〕）孤立量出来只有 5.6，可它排在一行字里实际是 10.9——
+    /// 按孤立值算 kern 会多补 8pt，一行里几个标点就把行撑宽 40 多 pt，
+    /// 超出画布就开始裁字（实机第三轮报的「最右侧被一刀切掉」就是它）。
+    private static let wideKern: CGFloat = {
+        let advance = (String(repeating: "汉", count: 10) as NSString)
+            .size(withAttributes: [.font: font]).width / 10
+        return 2 * cell - advance
+    }()
+
+    /// 这个字符占几列（东亚宽度）。终端是**按列**排版的，这里必须跟它一致。
+    /// 中日韩/全角/emoji 占两列，其余一列（框线 ─│╭ 是非 ASCII 但只占一列）。
+    private static func isWide(_ ch: Character) -> Bool {
+        for u in ch.unicodeScalars {
+            switch u.value {
+            case 0x1100...0x115F, 0x2E80...0x303E, 0x3041...0x33FF, 0x3400...0x4DBF,
+                 0x4E00...0x9FFF, 0xA000...0xA4CF, 0xAC00...0xD7A3, 0xF900...0xFAFF,
+                 0xFE30...0xFE6F, 0xFF00...0xFF60, 0xFFE0...0xFFE6,
+                 0x1F300...0x1FAFF, 0x20000...0x3FFFD:
+                return true
+            default:
+                if u.properties.isEmojiPresentation { return true }
+            }
         }
-        var order = Array(upper.indices)
-        order.sort { upper[$0] > upper[$1] }
-        var widest = paneColumns * cell
-        for i in order {
-            if upper[i] <= widest { break }
-            widest = max(widest, (String(lines[i]) as NSString)
-                .size(withAttributes: [.font: font]).width)
+        return false
+    }
+
+    /// 把一屏画面排到**终端的格子上**：全角字符补足两格。
+    /// 返回排好的富文本 + 这屏要多宽（= 最长行的列数 × 单格宽）。
+    ///
+    /// 为什么非这么干不可：iOS 的中文回退字体里一个中文只有 **1.6 格**宽，不是 2 格。
+    /// 同样 80 列，一行框线排出来 544pt、一行中文只有 437pt——短了 107pt。
+    /// 画布得按最宽的行（框线 544）来，看中文行时右边就空出这 107pt 的死黑，
+    /// 看着像内容被一刀切了（实机报了三轮的就是它）。真终端里中文严格占两格，
+    /// 补齐之后所有满行都停在同一条右边界上：黑边没了，中文和框线也终于对得齐。
+    ///
+    /// 顺带：宽度直接由列数算出，不用再逐行去量文字。
+    private static func gridded(_ s: String) -> (NSAttributedString, CGFloat) {
+        let out = NSMutableAttributedString(string: s, attributes: [
+            .font: font, .foregroundColor: UIColor(Color.terminalText),
+        ])
+        var utf16 = 0, runStart = 0, inWide = false
+        var cols = 0, maxCols = 0
+        func flushRun(_ end: Int) {
+            guard inWide, end > runStart else { return }
+            out.addAttribute(.kern, value: wideKern,
+                             range: NSRange(location: runStart, length: end - runStart))
         }
-        return ceil(widest)
+        for ch in s {
+            let newline = ch == "\n"
+            let wide = !newline && isWide(ch)
+            if newline {
+                maxCols = max(maxCols, cols)
+                cols = 0
+            } else {
+                cols += wide ? 2 : 1
+            }
+            if wide != inWide {
+                flushRun(utf16)
+                runStart = utf16
+                inWide = wide
+            }
+            utf16 += ch.utf16.count
+        }
+        flushRun(utf16)
+        maxCols = max(maxCols, cols)
+        // 下限 80 列：画布从第一帧起就是常量，不会因为这屏碰巧没有满行就缩窄
+        // （缩窄会让 UIScrollView 把横向偏移夹回去）。
+        // 多给一列：个别符号（宽度分类拿不准的）排出来可能比格子略宽，宁可空一格也别裁字。
+        return (out, CGFloat(max(maxCols, paneColumns) + 1) * cell)
     }
 
     final class Coordinator: NSObject, UITextViewDelegate {
