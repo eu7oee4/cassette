@@ -338,8 +338,16 @@ private final class BottomPinnedTextView: UITextView {
     /// ⚠️ 光在换内容时设一次 `textContainer.size` 没用——**UITextView 每次
     /// layoutSubviews 都会把容器宽度重设回自己的 bounds**（实测：设成 1111，一次布局
     /// 之后变回 370），于是照样按屏宽折行。必须每次布局之后再盖回去。
-    var desiredWidth: CGFloat = 0 {
-        didSet { setNeedsLayout() }
+    private(set) var desiredWidth: CGFloat = 0
+
+    /// 画布宽**只增不减**。
+    /// ⚠️ 别每帧照着当前内容重设：这个值会随画面变（顶上那条 80 列框线随输出往上滚，
+    /// 滚出 pane 之后最长行就从 544 掉到 430）。contentSize 一缩，UIScrollView 就把
+    /// 横向偏移夹回去——表现是「往右滑，过一会儿自己弹回最左」（实机报的）。
+    func growDesiredWidth(to w: CGFloat) {
+        guard w > desiredWidth else { return }
+        desiredWidth = w
+        setNeedsLayout()
     }
 
     private func applyWidth() {
@@ -361,6 +369,7 @@ private final class BottomPinnedTextView: UITextView {
         applyWidth()
         super.layoutSubviews()
         applyWidth()
+        restorePinnedX()
         // 只在窗口尺寸真变了才重贴（换档、键盘进出）。每次布局都贴会跟用户上滑打架。
         if bounds.size != lastSize {
             lastSize = bounds.size
@@ -368,17 +377,48 @@ private final class BottomPinnedTextView: UITextView {
         }
     }
 
-    /// 贴底走 `scrollRangeToVisible(结尾)`，**不要拿 contentSize 自己算**。
-    /// 踩过：`contentSize.height - bounds.height` 依赖 contentSize 此刻已经是终值，
-    /// 而长文档的布局是惰性的、刚换完内容时它还没定——算出来的落点忽对忽错，
-    /// 表现就是「展开全屏有时停在开头、还滚不动，过一会儿或者下次又好了」。
-    /// 让排版引擎自己去把结尾那一段布出来，它不会算错。
+    /// 贴底：拿**最后一个字的排版矩形**算落点，然后自己设偏移。
+    ///
+    /// 两条都别走：
+    /// - `contentSize.height - bounds.height`：contentSize 是惰性估的，刚换完内容还没定，
+    ///   落点忽对忽错（症状：展开全屏有时停在开头还滚不动，下次又好了）。
+    /// - `scrollRangeToVisible(结尾)`：它**连横向一起滚**——最后一行短，"露出最后一个字"
+    ///   就等于把人拽回行首；而且是延后执行的，事后再把横向偏移改回来追不上。
+    ///   症状：往右滑，一到下次刷新（1.2 秒）就弹回最左（实机报的）。
+    ///
+    /// `boundingRect(forGlyphRange:)` 只会把要问的那一小段排出来，惰性不丢，落点又准。
     func pinToBottom() {
-        let end = NSRange(location: (text as NSString).length, length: 0)
-        let keepX = contentOffset.x     // 横着翻到一半时别把人拽回行首
-        scrollRangeToVisible(end)
-        if contentOffset.x != keepX {
-            setContentOffset(CGPoint(x: keepX, y: contentOffset.y), animated: false)
+        let ns = text as NSString
+        guard ns.length > 0 else { return }
+        let last = NSRange(location: ns.length - 1, length: 1)
+        let glyphs = layoutManager.glyphRange(forCharacterRange: last, actualCharacterRange: nil)
+        let rect = layoutManager.boundingRect(forGlyphRange: glyphs, in: textContainer)
+        guard rect.height > 0 else { return }
+        let bottom = rect.maxY + textContainerInset.top + textContainerInset.bottom
+        let y = max(0, bottom - bounds.height)
+        if abs(contentOffset.y - y) > 0.5 {
+            // 只动纵向，横向原样留着
+            setContentOffset(CGPoint(x: contentOffset.x, y: y), animated: false)
+        }
+    }
+
+    /// 用户此刻横向停在哪。
+    /// ⚠️ **给 `text` 赋值会把滚动位置清零**，而且是**延后**清的——画面每 1.2 秒换一次，
+    /// 就等于每 1.2 秒把横向偏移抹一次（实机症状：往右滑，过一会儿自己弹回最左）。
+    /// 赋值后立刻读 contentOffset 还是旧值，当场"恢复"根本判不出来要恢复。
+    /// 所以和容器宽度同一个套路：**每次布局之后照着这个值盖回去**；用户自己在滑的时候
+    /// 才更新它。
+    private var pinnedX: CGFloat = 0
+
+    /// 手指驱动的横向滚动 → 记下新位置（由 delegate 调）。
+    func rememberScrollX() { pinnedX = contentOffset.x }
+
+    private func restorePinnedX() {
+        guard !isDragging, !isDecelerating else { return }   // 人在滑，别抢
+        let maxX = max(0, contentSize.width - bounds.width)
+        let want = min(pinnedX, maxX)
+        if abs(contentOffset.x - want) > 0.5 {
+            contentOffset.x = want
         }
     }
 
@@ -439,14 +479,19 @@ private struct TerminalScreen: UIViewRepresentable {
         context.coordinator.onScrollingChanged = onScrollingChanged
         context.coordinator.onTap = onTap
         guard tv.text != text else { return }
-        tv.text = text
-        tv.desiredWidth = Self.contentWidth(text)   // 见 applyWidth：每次布局都得盖回去
+        tv.growDesiredWidth(to: Self.contentWidth(text))   // 见 applyWidth / growDesiredWidth
+        tv.text = text                                     // 横向偏移由 restorePinnedX 兜住
         tv.pinToBottomSoon()
     }
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
-    /// 画布要多宽 = 最长那行**真实排出来**有多宽。
+    /// 终端 pane 的列数（后端 code_bridge.PANE_WIDTH）。等宽字体下「80 列」就是画面的
+    /// 右边界，也是任何一行的宽度上限——中文占 2 列但只渲染 1.6 格，不会超出自己的格子。
+    /// 拿它当画布宽度的**下限**：这样画布从第一帧起就是个常量，不会随内容忽宽忽窄。
+    private static let paneColumns: CGFloat = 80
+
+    /// 画布要多宽 = 最长那行**真实排出来**有多宽（不低于 80 列）。
     ///
     /// 别按「格子数」估：终端画面里全是框线字符（`─│╭`），它们是非 ASCII 但只占一格，
     /// 按两格估会把画布撑出一大片死黑——实测那帧估出 1111、实际只有 544，多出来的
@@ -467,7 +512,7 @@ private struct TerminalScreen: UIViewRepresentable {
         }
         var order = Array(upper.indices)
         order.sort { upper[$0] > upper[$1] }
-        var widest: CGFloat = 0
+        var widest = paneColumns * cell
         for i in order {
             if upper[i] <= widest { break }
             widest = max(widest, (String(lines[i]) as NSString)
@@ -483,6 +528,11 @@ private struct TerminalScreen: UIViewRepresentable {
         @objc func handleTap() { onTap() }
 
         func scrollViewWillBeginDragging(_ s: UIScrollView) { onScrollingChanged(true) }
+        /// 手指/惯性驱动的滚动才记横向位置——换内容那种程序性的滚动不算。
+        func scrollViewDidScroll(_ s: UIScrollView) {
+            guard s.isDragging || s.isDecelerating || s.isTracking else { return }
+            (s as? BottomPinnedTextView)?.rememberScrollX()
+        }
         func scrollViewDidEndDragging(_ s: UIScrollView, willDecelerate decelerate: Bool) {
             if !decelerate { onScrollingChanged(false) }
         }
