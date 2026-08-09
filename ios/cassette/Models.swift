@@ -25,6 +25,7 @@ struct ChatMessage: Identifiable, Codable, Equatable {
         case webpage(String, String)  // TA 做的网页：page_id + 标题，渲染成网页卡片（点开看）
         case system(String)       // 系统提示（居中灰字）
         case memoryNote(String)   // 「存了记忆」等提示（居中灰字，纯 UI，不发回后端）
+        case browseNote([String]) // 「浏览了 N 个网页」灰字：点击展开网址列表（纯 UI，不发回后端）
     }
 
     init(id: UUID = UUID(), sender: MessageSender, kind: Kind, timestamp: Date,
@@ -51,6 +52,7 @@ struct ChatMessage: Identifiable, Codable, Equatable {
         case .webpage(_, let t): return "[网页:\(t)]"
         case .system(let t):     return t
         case .memoryNote(let t): return t
+        case .browseNote(let u): return "[浏览了 \(u.count) 个网页]"
         }
     }
 
@@ -63,6 +65,12 @@ struct ChatMessage: Identifiable, Codable, Equatable {
     /// 是否是「存了记忆」提示（居中灰字渲染、但不发回后端）。
     var isMemoryNote: Bool {
         if case .memoryNote = kind { return true }
+        return false
+    }
+
+    /// 是否是「浏览了 N 个网页」提示（可展开灰字，纯 UI，不发回后端）。
+    var isBrowseNote: Bool {
+        if case .browseNote = kind { return true }
         return false
     }
 }

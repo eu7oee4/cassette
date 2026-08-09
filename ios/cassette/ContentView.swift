@@ -861,6 +861,16 @@ struct ContentView: View {
                 }
             }
         }
+        // 他这轮浏览过的网页（后端已聚合成一条：text=网址列表，\n 分隔）→ 可展开灰字。
+        // 流式中途不发（sse 跳过 browse），done 这里是唯一入口；失败的 navigate 后端已滤掉。
+        for b in (resp.stored ?? []) where b.tool == "browse" && b.ok != false {
+            let urls = b.text.split(separator: "\n").map(String.init)
+                .filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
+            if !urls.isEmpty {
+                chatStore.append(ChatMessage(sender: .other, kind: .browseNote(urls),
+                                             timestamp: Date()))
+            }
+        }
     }
 
     /// 一次工具产物的灰字文案（内容去记忆页/聊天记录页看，这里只标动作）。

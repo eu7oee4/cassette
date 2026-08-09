@@ -53,6 +53,9 @@ struct ChatView: View {
                                 SystemMessageRow(text: message.plainText)
                                     .contentShape(Rectangle())
                                     .onLongPressGesture { onDelete(message) }
+                            } else if case .browseNote(let urls) = message.kind {
+                                BrowseNoteRow(urls: urls)
+                                    .onLongPressGesture { onDelete(message) }
                             } else {
                                 MessageRow(message: message,
                                            contentWidth: geo.size.width - 24,
@@ -492,6 +495,51 @@ private struct SystemMessageRow: View {
     }
 }
 
+/// 浏览灰字：收起=「浏览了 N 个网页 ›」，点击展开网址列表（再点收起），网址点开进 Safari。
+/// 展开状态是行内瞬态（@State）：滚远被 LazyVStack 回收就回到收起——这是提示不是页面，够用。
+/// 长按删除挂在收起头上（外层给的手势）；网址行自己是按钮，不参与长按。
+private struct BrowseNoteRow: View {
+    let urls: [String]
+    @State private var expanded = false
+    @Environment(\.openURL) private var openURL
+
+    var body: some View {
+        VStack(spacing: 4) {
+            HStack(spacing: 3) {
+                Text("浏览了 \(urls.count) 个网页")
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 9, weight: .semibold))
+                    .rotationEffect(.degrees(expanded ? 90 : 0))
+            }
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .contentShape(Rectangle())
+            .onTapGesture {
+                withAnimation(.easeInOut(duration: 0.15)) { expanded.toggle() }
+            }
+            if expanded {
+                VStack(spacing: 3) {
+                    ForEach(Array(urls.enumerated()), id: \.offset) { _, u in
+                        Button {
+                            if let url = URL(string: u) { openURL(url) }
+                        } label: {
+                            Text(u)
+                                .font(.caption2)
+                                .foregroundStyle(Color.theme)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .padding(.horizontal, 24)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .center)
+        .padding(.vertical, 2)
+    }
+}
+
 /// 单行消息：根据发送方决定左右布局与头像位置。
 private struct MessageRow: View {
     let message: ChatMessage
@@ -603,7 +651,7 @@ private struct MessageRow: View {
             .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous)
                 .strokeBorder(Color(.systemGray4), lineWidth: 0.5))
             .onTapGesture { onTapWebpage(pid, title) }
-        case .system, .memoryNote:
+        case .system, .memoryNote, .browseNote:
             EmptyView()
         }
     }

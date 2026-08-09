@@ -13,7 +13,10 @@ AUTH_KEY = os.environ.get("CASSETTE_AUTH_KEY", "")
 
 # claude CLI（需已安装并登录；凭据走 CLI 登录态，后端不碰 API key）
 MODEL = os.environ.get("CLAUDE_MODEL", "opus")
-CLAUDE_TIMEOUT_SEC = int(os.environ.get("CLAUDE_TIMEOUT_SEC", "300"))
+# 默认 300→900（2026-08-10）：浏览器插件上架后一轮可能真的在网上逛——超时上限跟着
+# 能力面长，纯聊 300 够、带浏览器就不够了。sse 那边这个值是空闲超时（每行之间），
+# 非流式/wake 是总时长，取同一个够用的上限。
+CLAUDE_TIMEOUT_SEC = int(os.environ.get("CLAUDE_TIMEOUT_SEC", "900"))
 STREAM_PING_SEC = 25   # 流式心跳间隔：工具调用期没有正文可发，定期 ping 撑住连接
 
 # 人设文件：--system-prompt-file 完整替换默认系统提示词（实时读取，改人设不用重启）。

@@ -274,6 +274,25 @@ def finalize_chat_reply(reply: str, stored: list[dict], req: ChatRequest,
     except Exception as e:
         logerr(f"写 recent_window 失败: {e}")
 
+    # 浏览器插件：逐条 navigate 聚合成一条 browse（text=网址列表，\n 分隔，去重保序）。
+    # app 收起显示「浏览了 N 个网页」、点开展开网址；sse 那边逐条是不发灰字的，这里是
+    # 唯一出口。失败的 navigate 不算浏览过。顺手落 browse_log（Mind 页未来素材）。
+    browse_urls: list[str] = []
+    for s in stored:
+        if s.get("tool") == "browse" and s.get("ok", True):
+            u = (s.get("text") or "").strip()
+            if u and u not in browse_urls:
+                browse_urls.append(u)
+    if any(s.get("tool") == "browse" for s in stored):
+        stored = [s for s in stored if s.get("tool") != "browse"]
+        if browse_urls:
+            stored.append({"tool": "browse", "text": "\n".join(browse_urls)})
+            try:
+                state_store.append_browse_log({"ts": int(time.time()), "time": pipeline.now_str(),
+                                               "source": "chat", "urls": browse_urls})
+            except Exception as e:
+                logerr(f"记 browse_log 失败: {e}")
+
     # 这轮他自己调工具切进了 code 模式：剥出来置标志（控制信号，不是记忆产物，不进 Mind），
     # app 收到 code_started 就翻 codeMode，后续消息改道 tmux 会话。
     # 要 ok=True——切失败了（如"会话占用中"）还翻开关的话，后续消息会往一个不存在的
@@ -966,6 +985,15 @@ def plugins_toggle(body: PluginIn, x_auth: Optional[str] = Header(default=None, 
     if body.enabled is None:
         raise HTTPException(status_code=400, detail="缺 enabled 字段")
     return plugins.toggle(body.name, body.enabled)
+
+
+@app.post("/plugins/wake_toggle")
+def plugins_wake_toggle(body: PluginIn, x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
+    """「醒来能用」开关（只有 plugins.WAKE_TOGGLEABLE 里的插件有；零联网，下次醒来生效）。"""
+    verify_auth(x_auth)
+    if body.enabled is None:
+        raise HTTPException(status_code=400, detail="缺 enabled 字段")
+    return plugins.wake_toggle(body.name, body.enabled)
 
 
 @app.post("/plugins/update")

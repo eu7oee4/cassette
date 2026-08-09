@@ -374,6 +374,20 @@ def do_wake_sync(settings: dict, trigger: str, force: bool = False) -> dict:
     now_ts = int(time.time())
 
     raw, stored = run_claude_wake(wake_prompt(settings, forced=force))
+    # 醒来时浏览过的网页：落 browse_log（Mind 页未来素材；一期 wake_log 不收 browse——
+    # 它在 NON_MEMORY_TOOLS 里，下一行就被滤掉。二期进 Mind 时间线再回头）。
+    browse_urls: list[str] = []
+    for s in stored or []:
+        if s.get("tool") == "browse" and s.get("ok", True):
+            u = (s.get("text") or "").strip()
+            if u and u not in browse_urls:
+                browse_urls.append(u)
+    if browse_urls:
+        try:
+            state_store.append_browse_log({"ts": now_ts, "time": pipeline.now_str(),
+                                           "source": "wake", "urls": browse_urls})
+        except Exception as e:
+            logerr(f"记 browse_log 失败: {e}")
     # 非记忆类操作不进日志（用 chat 侧同一份常量，别再写字面量——漏一个就会有控制信号
     # 混进心流日志和"别重复存"清单里，当成记忆产物）
     stored = [s for s in (stored or []) if s.get("tool") not in pipeline.NON_MEMORY_TOOLS]

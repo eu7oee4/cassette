@@ -61,6 +61,36 @@ MCP_CONFIG_PATHS = {
 # mianmian 同口径（main_v2.py base_claude_args：「自切 code：只主 chat，wake 不挂」）。
 NO_WAKE_PLUGINS = {"codemode"}
 
+# 醒来那条路**默认不挂、但把开关交给用户**的插件（插件商店里该插件条目下的「醒来能用」）。
+# 三层口径：不在任何名单 = 醒来照挂；NO_WAKE_PLUGINS = 宿主硬禁，没有开关（作者和用户
+# 都说了不算）；这里 = 宿主认为「给不给凌晨三点的进程」是机主自己的取舍，默认关、
+# 用户显式打开才挂。browser：带登录态的真浏览器，打开=允许一次没人看着的醒来以你的
+# 身份上网——这个决定只能机主自己做。
+WAKE_TOGGLEABLE = {"browser"}
+WAKE_ENABLED_PATH = state_store.STATE_DIR / "plugins_wake_enabled.json"
+
+
+def _read_wake_enabled() -> dict:
+    try:
+        return json.loads(WAKE_ENABLED_PATH.read_text("utf-8"))
+    except Exception:
+        return {}
+
+
+def wake_toggle(name: str, on: bool) -> dict:
+    """「醒来能用」开关（零联网，下一次醒来生效）。只对 WAKE_TOGGLEABLE 里的插件开放——
+    NO_WAKE_PLUGINS 是硬禁没有开关，普通插件醒来本来就挂、不需要开关。"""
+    _check_name(name)
+    if name not in WAKE_TOGGLEABLE:
+        raise HTTPException(status_code=400, detail="这个插件没有「醒来能用」开关")
+    if not (PLUGINS_DIR / name).is_dir():
+        raise HTTPException(status_code=404, detail="没装这个插件")
+    with _LOCK:
+        d = _read_wake_enabled()
+        d[name] = bool(on)
+        _atomic_write(WAKE_ENABLED_PATH, d)
+    return {"ok": True, "wake_enabled": bool(on)}
+
 # 写死的插件 registry：只认自己名下的仓，且**钉死 commit**——审过哪份代码就装哪份，
 # main 后续怎么动都影响不到已发版本。升级插件 = 改这里的 commit + 发版。
 REGISTRY: dict[str, dict] = {
@@ -151,6 +181,7 @@ def _installed_commit(name: str) -> str:
 def list_status() -> list[dict]:
     """registry ∪ 已安装 → 三态清单（not_installed / disabled / enabled）。"""
     enabled = _read_enabled()
+    wake_on = _read_wake_enabled()
     out = []
     names = list(REGISTRY.keys())
     if PLUGINS_DIR.is_dir():
@@ -173,6 +204,9 @@ def list_status() -> list[dict]:
             # 不一样 = 这份没跟上（app 据此提示可更新）；installed 空 = 手放的开发副本。
             "commit": reg.get("commit", "")[:7],
             "installed_commit": _installed_commit(name) if installed else "",
+            # 「醒来能用」开关（见 WAKE_TOGGLEABLE）：toggleable 才画开关，默认关。
+            "wake_toggleable": name in WAKE_TOGGLEABLE,
+            "wake_enabled": name in WAKE_TOGGLEABLE and bool(wake_on.get(name)),
         }
         out.append(item)
     return out
@@ -274,7 +308,12 @@ def mounted(context: str = "chat") -> tuple[Optional[str], list[str]]:
     context＝这次是给谁挂：'chat'（聊天，全挂）或 'wake'（醒来，摘掉 NO_WAKE_PLUGINS）。
     认不出的 context 一律按 chat 处理——多挂比少挂容易被发现，静默少挂会让人以为工具坏了。"""
     cfg_path = MCP_CONFIG_PATHS.get(context, MCP_CONFIG_PATHS["chat"])
-    blocked = NO_WAKE_PLUGINS if context == "wake" else set()
+    if context == "wake":
+        # 硬禁的 + 有开关但用户没打开的，醒来都不挂。
+        wake_on = _read_wake_enabled()
+        blocked = NO_WAKE_PLUGINS | {n for n in WAKE_TOGGLEABLE if not wake_on.get(n)}
+    else:
+        blocked = set()
     enabled = _read_enabled()
     servers: dict = {}
     tools: list[str] = []

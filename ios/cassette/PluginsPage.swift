@@ -12,6 +12,8 @@ struct PluginItem: Decodable, Identifiable {
     let valid: Bool?
     let commit: String?              // registry 钉的短 sha（该装哪个）
     let installed_commit: String?    // 实际装着的短 sha；空 = 手放的开发副本，来源不可考
+    let wake_toggleable: Bool?       // 有「醒来能用」开关（宿主 WAKE_TOGGLEABLE 里的才有）
+    let wake_enabled: Bool?          // 开关当前状态（默认关）
     var id: String { name }
 
     /// version 是作者手写的、靠自觉（两个不同 commit 可以都自称 0.1.0），sha 才是真身份。
@@ -44,6 +46,11 @@ extension ChatService {
     func togglePlugin(name: String, enabled: Bool) async throws {
         let body = try JSONEncoder().encode(PluginBody(name: name, enabled: enabled))
         _ = try await perform(authedRequest("POST", "/plugins/toggle", jsonBody: body))
+    }
+
+    func wakeTogglePlugin(name: String, enabled: Bool) async throws {
+        let body = try JSONEncoder().encode(PluginBody(name: name, enabled: enabled))
+        _ = try await perform(authedRequest("POST", "/plugins/wake_toggle", jsonBody: body))
     }
 
     func updatePlugin(name: String) async throws {
@@ -123,44 +130,66 @@ struct PluginsPage: View {
 
     @ViewBuilder
     private func row(_ p: PluginItem) -> some View {
-        HStack(spacing: 12) {
-            VStack(alignment: .leading, spacing: 3) {
-                HStack(spacing: 6) {
-                    Text(p.display_name).font(.body.weight(.medium))
-                    if let v = p.version, !v.isEmpty {
-                        Text("v\(v)").font(.caption2).foregroundStyle(.tertiary)
+        VStack(spacing: 10) {
+            HStack(spacing: 12) {
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack(spacing: 6) {
+                        Text(p.display_name).font(.body.weight(.medium))
+                        if let v = p.version, !v.isEmpty {
+                            Text("v\(v)").font(.caption2).foregroundStyle(.tertiary)
+                        }
+                        // 装着的那个 commit：这才是"我装的到底是哪一份"的确定答案
+                        if let c = p.installed_commit, !c.isEmpty {
+                            Text(c).font(.caption2.monospaced()).foregroundStyle(.tertiary)
+                        }
+                        if p.isStale {
+                            Text("可更新").font(.caption2).foregroundStyle(Color.theme)
+                        }
+                        if p.valid == false {
+                            Text("清单损坏").font(.caption2).foregroundStyle(.red)
+                        }
                     }
-                    // 装着的那个 commit：这才是"我装的到底是哪一份"的确定答案
-                    if let c = p.installed_commit, !c.isEmpty {
-                        Text(c).font(.caption2.monospaced()).foregroundStyle(.tertiary)
-                    }
-                    if p.isStale {
-                        Text("可更新").font(.caption2).foregroundStyle(Color.theme)
-                    }
-                    if p.valid == false {
-                        Text("清单损坏").font(.caption2).foregroundStyle(.red)
-                    }
+                    Text(p.description).font(.footnote).foregroundStyle(.secondary)
                 }
-                Text(p.description).font(.footnote).foregroundStyle(.secondary)
+                Spacer()
+                if busyName == p.name {
+                    ProgressView()
+                } else if p.state == "not_installed" {
+                    Button("下载") {
+                        Task { await run(p.name, note: "已安装") { try await service.installPlugin(name: p.name) } }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(Color.theme)
+                    .font(.footnote.weight(.medium))
+                } else {
+                    Toggle("", isOn: Binding(
+                        get: { p.state == "enabled" },
+                        set: { on in Task { await run(p.name) { try await service.togglePlugin(name: p.name, enabled: on) } } }
+                    ))
+                    .labelsHidden()
+                    .tint(Color.theme)
+                    .disabled(p.valid == false)
+                }
             }
-            Spacer()
-            if busyName == p.name {
-                ProgressView()
-            } else if p.state == "not_installed" {
-                Button("下载") {
-                    Task { await run(p.name, note: "已安装") { try await service.installPlugin(name: p.name) } }
+            // 「醒来能用」：只有宿主标了 wake_toggleable 的插件（browser）才有，且要装了并
+            // 开着才画——关掉插件时开关跟着藏（醒来那条路本来就要求 enabled，藏了不骗人）。
+            // 默认关：要不要让一次没人看着的自发醒来摸到这个插件，是机主自己的决定。
+            if p.state == "enabled", p.wake_toggleable == true {
+                HStack(spacing: 12) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("醒来能用").font(.footnote)
+                        Text("打开后 TA 自发醒来时也能用它（默认关）")
+                            .font(.caption2).foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Toggle("", isOn: Binding(
+                        get: { p.wake_enabled == true },
+                        set: { on in Task { await run(p.name) { try await service.wakeTogglePlugin(name: p.name, enabled: on) } } }
+                    ))
+                    .labelsHidden()
+                    .tint(Color.theme)
                 }
-                .buttonStyle(.borderedProminent)
-                .tint(Color.theme)
-                .font(.footnote.weight(.medium))
-            } else {
-                Toggle("", isOn: Binding(
-                    get: { p.state == "enabled" },
-                    set: { on in Task { await run(p.name) { try await service.togglePlugin(name: p.name, enabled: on) } } }
-                ))
-                .labelsHidden()
-                .tint(Color.theme)
-                .disabled(p.valid == false)
+                .padding(.leading, 12)
             }
         }
         .padding(.vertical, 4)

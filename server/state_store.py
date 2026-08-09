@@ -106,6 +106,17 @@ def read_wake_log(limit: Optional[int] = None) -> list[dict]:
     return out[-limit:] if limit else out
 
 
+# ---------- browse log（TA 浏览过哪些网页，append-only）----------
+# 聊天/醒来两条路的 navigate 都进这里。眼下只落盘不做读取端点：聊天里有聚合灰字可看，
+# 这份留给以后的 Mind 页当素材（同 wake_log 的思路，别清理）。
+BROWSE_LOG_PATH = STATE_DIR / "browse_log.jsonl"
+
+
+def append_browse_log(entry: dict) -> None:
+    with BROWSE_LOG_PATH.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+
+
 # ---------- 表情库清单（app 每次 /chat 存一份，醒来时后端不在 app 手里也能挑表情发）----------
 STICKER_CATALOG_PATH = STATE_DIR / "sticker_catalog.json"
 

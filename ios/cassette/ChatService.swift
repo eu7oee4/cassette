@@ -127,7 +127,7 @@ struct ChatService {
         }
         // 灰字提示和 app 自己的系统提示（「已切进 Code 模式」「重发试试」）都不发回后端——
         // 它们是 UI 说给人看的，混进历史就成了以 role:user 冒充用户说过的话。
-        let outMessages = history.filter { !$0.isMemoryNote && !$0.isSystem }
+        let outMessages = history.filter { !$0.isMemoryNote && !$0.isSystem && !$0.isBrowseNote }
             .suffix(Self.sendHistoryCap)
             .map {
                 OutMessage(role: $0.sender == .me ? "user" : "assistant",
@@ -314,7 +314,7 @@ struct ChatService {
     func syncWindow(history: [ChatMessage]) async throws {
         struct Body: Encodable { let messages: [OutMessage] }
         // 过滤和条数口径必须和 /chat 一字不差——两条路写的是同一个窗口。
-        let messages = history.filter { !$0.isMemoryNote && !$0.isSystem }
+        let messages = history.filter { !$0.isMemoryNote && !$0.isSystem && !$0.isBrowseNote }
             .suffix(Self.sendHistoryCap)
             .map {
                 OutMessage(role: $0.sender == .me ? "user" : "assistant",
@@ -376,7 +376,7 @@ struct ChatService {
             let messages: [OutMessage]
             let cwd: String?
         }
-        let messages = history.filter { !$0.isMemoryNote && !$0.isSystem }   // 同上，别把 UI 提示当用户的话
+        let messages = history.filter { !$0.isMemoryNote && !$0.isSystem && !$0.isBrowseNote }   // 同上，别把 UI 提示当用户的话
             .suffix(Self.sendHistoryCap)
             .map {
                 OutMessage(role: $0.sender == .me ? "user" : "assistant",
