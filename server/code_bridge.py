@@ -240,10 +240,31 @@ def start(context_text: str, auth_key: str, cwd: Optional[str] = None,
 #      输入框和状态栏，落不到最后）
 #   ② 页脚是一排 `·` 隔开的短按键提示，其中一段形如 "Esc to xxx"（正文是长句，段长超标）
 #   ③ 选项紧贴页脚往上连成一片，编号必须从 1 连续数上来（正文里的编号列表凑不齐这个）
+#
+# ⚠️ 还有一种**不画页脚**的变体（WebFetch 权限框实抓，08-10 真机漏过一次——弹窗没被
+# 认出来，发进去的消息被它吃掉，结尾那个 Enter 正好按在 ❯ 1. Yes 上，等于替 TA 放行）：
+#
+#     ────────────────────────────────────────────
+#      Fetch
+#        url: "https://example.com", prompt: "…"
+#        Claude wants to fetch content from example.com
+#     （空行）
+#      Do you want to allow Claude to fetch this content?
+#      ❯ 1. Yes
+#        2. Yes, and don't ask again for example.com
+#        3. No, and tell Claude what to do differently (esc)   ← 画面**最后一行**
+#
+# esc 提示折进了 3 号选项自己的尾巴，整屏以选项块收尾。这个变体的闸：
+#   ④ 选项块就是画面**最后**几行（正文里的编号列表下面一定还有输入框，落不到底；
+#      输入框自己的内容也够不着底——它下面还有一道横线兜着）
+#   ⑤ 块里必须有 TUI 画的 ❯ 选择光标（require_cursor；有页脚兜底时不苛求这个，
+#      别把老路收紧）
+#   ⑥ 编号照旧必须 1..N 连续
 # 以后 CC 换了弹窗样式，照着上面的办法抓一份真画面再改，别凭印象加字样。
 
-# 选项行：前面可能有个 ❯ 光标，也容忍框线（旧版本画过框）。形如 " ❯ 1. Yes"
-_OPTION_RE = re.compile(r"^[\s│|]*[❯>]?\s*(\d+)[.)]\s+(.+?)\s*[│|]?\s*$")
+# 选项行：前面可能有个 ❯ 光标（单捕获出来，闸 ⑤ 要用），也容忍框线（旧版本画过框）。
+# 形如 " ❯ 1. Yes"
+_OPTION_RE = re.compile(r"^[\s│|]*([❯›>])?\s*(\d+)[.)]\s+(.+?)\s*[│|]?\s*$")
 # 续行（选项文字太长被折到下一行）：没有编号、缩进较深、不是框线。
 _CONT_RE = re.compile(r"^[\s│|]{3,}(\S.*?)\s*[│|]?\s*$")
 # 页脚里的按键提示段，形如 "Esc to cancel" / "esc to exit"
@@ -293,13 +314,17 @@ def _footer_idx(lines: list) -> int:
     return -1
 
 
-def _parse_options(lines: list, footer: int) -> list:
-    """从页脚往上收选项。
+def _parse_options(lines: list, footer: int, require_cursor: bool = False) -> list:
+    """从 footer 往上收选项（无页脚的变体传 len(lines)，即从画面最底往上收）。
 
-    **往上走**是要害：选项块永远紧贴页脚，正文在更上面；从上往下扫就会先撞见正文里的
-    编号列表，还会把它当成 1 号按钮——屏幕上写着一句正文，按下去执行的却是 Yes。"""
+    **往上走**是要害：选项块永远紧贴页脚/画面底部，正文在更上面；从上往下扫就会先撞见
+    正文里的编号列表，还会把它当成 1 号按钮——屏幕上写着一句正文，按下去执行的却是 Yes。
+
+    require_cursor（闸 ⑤）：块里必须见到 ❯ 选择光标才算数——无页脚变体没有闸 ①②
+    兜底，全靠它挡正文里恰好落到扫描区的编号列表。"""
     opts: list = []
     pending: list = []          # 折行的后半截，等上面那个编号行来认领
+    saw_cursor = False
     i = footer - 1
     while i >= 0 and footer - i <= _OPTION_SCAN_MAX:
         line = lines[i]
@@ -310,7 +335,8 @@ def _parse_options(lines: list, footer: int) -> list:
             continue            # 页脚和选项之间那道空行，跨过去
         m = _OPTION_RE.match(line)
         if m:
-            label = m.group(2).strip().rstrip("│|").strip()
+            saw_cursor = saw_cursor or bool(m.group(1))
+            label = m.group(3).strip().rstrip("│|").strip()
             if pending:
                 label = " ".join([label, *reversed(pending)]).strip()
                 pending = []
@@ -318,8 +344,8 @@ def _parse_options(lines: list, footer: int) -> list:
             label = _KEYHINT_RE.sub("", label).strip()
             if not label:
                 break
-            opts.append({"key": m.group(1), "label": label})
-            if m.group(1) == "1":
+            opts.append({"key": m.group(2), "label": label})
+            if m.group(2) == "1":
                 break           # 数到 1 就是块顶，再往上是问题行和正文
             i -= 1
             continue
@@ -330,17 +356,24 @@ def _parse_options(lines: list, footer: int) -> list:
             continue
         break
     opts.reverse()
-    # 闸 ③：编号必须正好是 1..N。对不上说明收到的是正文，不是选项块。
+    if require_cursor and not saw_cursor:
+        return []
+    # 闸 ③/⑥：编号必须正好是 1..N。对不上说明收到的是正文，不是选项块。
     if not opts or [o["key"] for o in opts] != [str(n) for n in range(1, len(opts) + 1)]:
         return []
     return opts[:9]
 
 
 def dialog_pending() -> bool:
-    """有没有确认框正等着按键。"""
+    """有没有确认框正等着按键。send 的护栏靠它——**两种形态都得认**：
+    只认页脚的话，无页脚的 Fetch 弹窗会放 send 过去，粘贴的文字被弹窗吃掉、
+    结尾的 Enter 直接按在 ❯ 1. Yes 上（08-10 实锤，弹窗被无声放行）。"""
     if not session_alive():
         return False
-    return _footer_idx(_screen()) >= 0
+    lines = _screen()
+    if _footer_idx(lines) >= 0:
+        return True
+    return bool(_parse_options(lines, len(lines), require_cursor=True))
 
 
 def dialog_options(screen_text: Optional[str] = None) -> list:
@@ -350,9 +383,10 @@ def dialog_options(screen_text: Optional[str] = None) -> list:
     不止三个（选文件、选方案的面板能有四五个）。文案一律取自弹窗原文，有几个渲染几个。"""
     lines = _screen(screen_text)
     footer = _footer_idx(lines)
-    if footer < 0:
-        return []
-    return _parse_options(lines, footer)
+    if footer >= 0:
+        return _parse_options(lines, footer)
+    # 无页脚变体：从画面最底往上收，闸 ④⑤⑥ 把关（见模块顶部那段注释）。
+    return _parse_options(lines, len(lines), require_cursor=True)
 
 
 # ---------- 发消息 / 按键 / 抓画面 ----------
@@ -416,6 +450,13 @@ def send(text: str) -> dict:
     if r.returncode != 0:
         return {"ok": False, "error": f"paste 失败：{r.stderr[:200]}"}
     time.sleep(0.2)
+    # 入口查过一次还得再查：TA 正跑着活的话，弹窗可能恰好在 paste 前后冒出来——这时
+    # 按下 Enter 就是替 TA 选中 ❯ 停着的那项（多半是 Yes，等于无声放行）。不按的话：
+    # 弹窗冒在 paste 前，文字已被弹窗吃了，重发就行；冒在 paste 后，文字还留在输入框里，
+    # 下次 send 的 _clear_input 会收拾掉。两种都比替 TA 按掉权限强。
+    if dialog_pending():
+        return {"ok": False, "dialog": True,
+                "error": "刚要提交时弹窗冒了出来，这条没发出去——先按掉弹窗再发一次"}
     _tmux("send-keys", "-t", SESSION, "Enter")   # 这才是唯一的提交动作
     return {"ok": True}
 
