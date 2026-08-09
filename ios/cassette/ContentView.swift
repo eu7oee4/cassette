@@ -79,6 +79,10 @@ struct ContentView: View {
     /// 终端面板此刻画出来多高（面板自己报上来）→ 转给 ChatView 当气泡的内容内边距，
     /// 最新气泡就正好停在黑条上边、不被盖住。
     @State private var terminalHeight: CGFloat = 0
+    /// 终端当前档位。只用来判断「这次高度变化要不要让气泡跟着做动画」——
+    /// 人主动换档才动画（气泡和面板一起走，不然气泡先跳、面板后滑，看着像自己滚了一下）；
+    /// 弹窗选项进出导致的高度变化保持瞬时，别把整个气泡列表拖进 220 毫秒的重排。
+    @State private var terminalRatio: CGFloat = 0
 
     // 编辑消息弹窗状态
     @State private var editingMessage: ChatMessage? = nil
@@ -218,6 +222,11 @@ struct ContentView: View {
                 }
             }
             .onPreferenceChange(TerminalHeightKey.self) { terminalHeight = $0 }
+            .onPreferenceChange(TerminalRatioKey.self) { terminalRatio = $0 }
+            // 换档时气泡跟着面板一起动（同一条曲线、同一段时长）——不加这句气泡是瞬时
+            // 跳到位、面板还在滑，看着就是「上面的气泡自己滚了一下」。
+            // 挂在 ratio 上而不是 height 上：弹窗选项进出只改 height，那一路保持瞬时。
+            .animation(.easeOut(duration: 0.22), value: terminalRatio)
             .safeAreaInset(edge: .bottom, spacing: 0) {
                 VStack(spacing: 0) {
                     if showStickers {

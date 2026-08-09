@@ -7,6 +7,14 @@ struct TerminalHeightKey: PreferenceKey {
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
 }
 
+/// 当前档位（0/⅔/1）。ContentView 拿它当「气泡那边要不要跟着动画」的开关：
+/// **只有人主动换档才动画**，弹窗选项进出导致的高度变化保持瞬时——
+/// 后者一动画就是整个气泡列表跟着重排 220 毫秒，正是之前那个卡顿+虚影。
+struct TerminalRatioKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
+}
+
 /// Code 模式的内联终端：**盖在**气泡区上（不是压缩它），不用切页面就能看他在干什么、
 /// 按掉权限弹窗。
 ///
@@ -81,6 +89,7 @@ struct CodeTerminalPanel: View {
         // ⚠️ clipped() 只裁绘制、不裁命中测试——补这句，不然看不见的部分照样吃触摸。
         .contentShape(Rectangle())
         .preference(key: TerminalHeightKey.self, value: totalHeight)
+        .preference(key: TerminalRatioKey.self, value: stopRatio)
         // 外部改了展开状态（点黑条 / 退出 Code 模式）→ 档位跟上。
         // ⚠️ 收起时才无条件归零；打开时**只在原本收着的情况下**给满档——否则从收起状态点
         // 「⅔」时，setRatio 先设好 0.62、再把 expanded 翻成 true，这里会顺手把它重置成
@@ -193,14 +202,25 @@ struct CodeTerminalPanel: View {
 
     // MARK: - 按钮行（永远贴底）
     //
-    // 装进一个 ScrollView：五个选项 + 键盘弹着的时候，黑条以下的空间放不下整排按钮。
+    // 装不下才套 ScrollView：五个选项 + 键盘弹着的时候，黑条以下的空间放不下整排按钮，
     // 让它自己滚，**绝不靠裁**——从上往下裁第一个没的就是黑条，人就再也收不回终端了。
+    //
+    // ⚠️ 但**装得下就别套**：ScrollView 底下那个 UIScrollView 的 delaysContentTouches
+    // 会把触摸先扣住一会儿等着看是不是滑动，按钮就变成「轻点没反应、按久一点才亮」
+    // （实机报的）。弹窗按钮是要一点就中的东西，平时这条路上不该有滚动视图。
 
+    @ViewBuilder
     private var keyBar: some View {
-        ScrollView(.vertical) { keyBarContent }
-            .scrollBounceBehavior(.basedOnSize)
-            .frame(height: keyBarHeight)
-            .background(Color.terminalBar)
+        Group {
+            if keyBarWants > keyBarHeight {
+                ScrollView(.vertical) { keyBarContent }
+                    .scrollBounceBehavior(.basedOnSize)
+            } else {
+                keyBarContent
+            }
+        }
+        .frame(height: keyBarHeight)
+        .background(Color.terminalBar)
     }
 
     private var keyBarContent: some View {
@@ -310,12 +330,35 @@ struct CodeTerminalPanel: View {
 // 停下来时画面不变，poll() 里 `s.content != content` 那道守卫压根不赋值，也就不排版。
 // TextKit 只排看得见的那几十行，换字是增量的。
 
-/// 换内容/换档之后把最新输出重新贴到窗口底边。
+/// 不折行 + 能横滑 + 换内容/换档之后把最新输出重新贴到窗口底边。
 private final class BottomPinnedTextView: UITextView {
     private var lastSize: CGSize = .zero
 
+    /// 内容想要多宽（不折行的话最长那行得摆得下）。
+    /// ⚠️ 光在换内容时设一次 `textContainer.size` 没用——**UITextView 每次
+    /// layoutSubviews 都会把容器宽度重设回自己的 bounds**（实测：设成 1111，一次布局
+    /// 之后变回 370），于是照样按屏宽折行。必须每次布局之后再盖回去。
+    var desiredWidth: CGFloat = 0 {
+        didSet { setNeedsLayout() }
+    }
+
+    private func applyWidth() {
+        guard desiredWidth > 0 else { return }
+        let w = max(desiredWidth, bounds.width)
+        if textContainer.size.width != w {
+            textContainer.size = CGSize(width: w, height: .greatestFiniteMagnitude)
+        }
+        // contentSize.width 也不会自己跟着容器走（UITextView 把它钉在 bounds 宽），
+        // 不盖这一下就是「不折行了，但横着滑不动、右边看不到」。
+        if abs(contentSize.width - w) > 0.5 {
+            contentSize = CGSize(width: w, height: contentSize.height)
+        }
+    }
+
     override func layoutSubviews() {
+        applyWidth()
         super.layoutSubviews()
+        applyWidth()
         // 只在窗口尺寸真变了才重贴（换档、键盘进出）。每次布局都贴会跟用户上滑打架。
         if bounds.size != lastSize {
             lastSize = bounds.size
@@ -395,8 +438,7 @@ private struct TerminalScreen: UIViewRepresentable {
         context.coordinator.onTap = onTap
         guard tv.text != text else { return }
         tv.text = text
-        tv.textContainer.size = CGSize(width: Self.contentWidth(text),
-                                       height: .greatestFiniteMagnitude)
+        tv.desiredWidth = Self.contentWidth(text)   // 见 applyWidth：每次布局都得盖回去
         tv.pinToBottomSoon()
     }
 
