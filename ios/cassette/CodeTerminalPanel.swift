@@ -329,47 +329,24 @@ struct CodeTerminalPanel: View {
 // 那就是「生成中滑气泡/滑终端/打字都时不时卡一下、TA 一停下来就顺了」的来源：
 // 停下来时画面不变，poll() 里 `s.content != content` 那道守卫压根不赋值，也就不排版。
 // TextKit 只排看得见的那几十行，换字是增量的。
+//
+// 结构：**横向 UIScrollView 套一个只竖滚的 UITextView**，文本视图的 frame 宽度直接
+// 设成画布宽（最长行）。为什么非套一层不可：UITextView 内部会把 textContainer 宽度
+// 重置回自己的 bounds（layoutSubviews、换内容都干这事），之前「每次布局后把宽度盖
+// 回去」那套赢不了——盖回去只改容器数值，**已经按旧宽度排好的行片段在
+// allowsNonContiguousLayout 下不会重排**，谁先触发排版就听谁的（pinToBottom 里的
+// boundingRect 会抢在布局前强制排版）。实机上就是「右边永远切在屏宽处、时好时坏」：
+// 8/9 那张截图逐像素量过，所有长行都硬停在内容坐标 420pt（= bounds 430 − inset），
+// 画布却有 550pt，滑过去全是死黑。frame 本身就是画布宽之后，它怎么重置都是重置成
+// 对的值，这一整类竞态直接没了；横向偏移也归外层 UIScrollView 天然保持——换内容
+// 不清零，之前手动记/恢复偏移那套跟着退休。
 
-/// 不折行 + 能横滑 + 换内容/换档之后把最新输出重新贴到窗口底边。
+/// 只竖滚 + 换内容/换档之后把最新输出重新贴到窗口底边。横滚在外层 TerminalHScrollView。
 private final class BottomPinnedTextView: UITextView {
     private var lastSize: CGSize = .zero
 
-    /// 内容想要多宽（不折行的话最长那行得摆得下）。
-    /// ⚠️ 光在换内容时设一次 `textContainer.size` 没用——**UITextView 每次
-    /// layoutSubviews 都会把容器宽度重设回自己的 bounds**（实测：设成 1111，一次布局
-    /// 之后变回 370），于是照样按屏宽折行。必须每次布局之后再盖回去。
-    private(set) var desiredWidth: CGFloat = 0
-
-    /// 画布宽**只增不减**。
-    /// ⚠️ 别每帧照着当前内容重设：这个值会随画面变（顶上那条 80 列框线随输出往上滚，
-    /// 滚出 pane 之后最长行就从 544 掉到 430）。contentSize 一缩，UIScrollView 就把
-    /// 横向偏移夹回去——表现是「往右滑，过一会儿自己弹回最左」（实机报的）。
-    func growDesiredWidth(to w: CGFloat) {
-        guard w > desiredWidth else { return }
-        desiredWidth = w
-        setNeedsLayout()
-    }
-
-    private func applyWidth() {
-        guard desiredWidth > 0 else { return }
-        let pad = textContainerInset.left + textContainerInset.right
-        let w = max(desiredWidth, bounds.width - pad)
-        if textContainer.size.width != w {
-            textContainer.size = CGSize(width: w, height: .greatestFiniteMagnitude)
-        }
-        // contentSize.width 也不会自己跟着容器走（UITextView 把它钉在 bounds 宽），
-        // 不盖这一下就是「不折行了，但横着滑不动、右边看不到」。
-        let content = max(w + pad, bounds.width)
-        if abs(contentSize.width - content) > 0.5 {
-            contentSize = CGSize(width: content, height: contentSize.height)
-        }
-    }
-
     override func layoutSubviews() {
-        applyWidth()
         super.layoutSubviews()
-        applyWidth()
-        restorePinnedX()
         // 只在窗口尺寸真变了才重贴（换档、键盘进出）。每次布局都贴会跟用户上滑打架。
         if bounds.size != lastSize {
             lastSize = bounds.size
@@ -382,9 +359,7 @@ private final class BottomPinnedTextView: UITextView {
     /// 两条都别走：
     /// - `contentSize.height - bounds.height`：contentSize 是惰性估的，刚换完内容还没定，
     ///   落点忽对忽错（症状：展开全屏有时停在开头还滚不动，下次又好了）。
-    /// - `scrollRangeToVisible(结尾)`：它**连横向一起滚**——最后一行短，"露出最后一个字"
-    ///   就等于把人拽回行首；而且是延后执行的，事后再把横向偏移改回来追不上。
-    ///   症状：往右滑，一到下次刷新（1.2 秒）就弹回最左（实机报的）。
+    /// - `scrollRangeToVisible(结尾)`：延后执行，事后没法跟用户手势对时序。
     ///
     /// `boundingRect(forGlyphRange:)` 只会把要问的那一小段排出来，惰性不丢，落点又准。
     func pinToBottom() {
@@ -397,28 +372,7 @@ private final class BottomPinnedTextView: UITextView {
         let bottom = rect.maxY + textContainerInset.top + textContainerInset.bottom
         let y = max(0, bottom - bounds.height)
         if abs(contentOffset.y - y) > 0.5 {
-            // 只动纵向，横向原样留着
             setContentOffset(CGPoint(x: contentOffset.x, y: y), animated: false)
-        }
-    }
-
-    /// 用户此刻横向停在哪。
-    /// ⚠️ **给 `text` 赋值会把滚动位置清零**，而且是**延后**清的——画面每 1.2 秒换一次，
-    /// 就等于每 1.2 秒把横向偏移抹一次（实机症状：往右滑，过一会儿自己弹回最左）。
-    /// 赋值后立刻读 contentOffset 还是旧值，当场"恢复"根本判不出来要恢复。
-    /// 所以和容器宽度同一个套路：**每次布局之后照着这个值盖回去**；用户自己在滑的时候
-    /// 才更新它。
-    private var pinnedX: CGFloat = 0
-
-    /// 手指驱动的横向滚动 → 记下新位置（由 delegate 调）。
-    func rememberScrollX() { pinnedX = contentOffset.x }
-
-    private func restorePinnedX() {
-        guard !isDragging, !isDecelerating else { return }   // 人在滑，别抢
-        let maxX = max(0, contentSize.width - bounds.width)
-        let want = min(pinnedX, maxX)
-        if abs(contentOffset.x - want) > 0.5 {
-            contentOffset.x = want
         }
     }
 
@@ -433,36 +387,65 @@ private final class BottomPinnedTextView: UITextView {
     }
 }
 
+/// 横滚外层。画布宽**只增不减**：最长行会随画面变（顶上那条 80 列框线滚出 pane 之后
+/// 最长行就变短），contentSize 一缩，UIScrollView 就把横向偏移夹回去——表现是
+/// 「往右滑，过一会儿自己弹回最左」（实机报的）。
+private final class TerminalHScrollView: UIScrollView {
+    let textView = BottomPinnedTextView(usingTextLayoutManager: false)
+    private var canvasWidth: CGFloat = 0
+
+    /// ⚠️ 必须在给 `attributedText` 赋值**之前**调：pinToBottom 会立刻强制排版，
+    /// frame 得先撑到位，不然又是拿旧宽度排行片段——正是这次修掉的竞态。
+    /// 所以这里同步 layoutIfNeeded，不等下一帧。
+    func growCanvasWidth(to w: CGFloat) {
+        guard w > canvasWidth else { return }
+        canvasWidth = w
+        setNeedsLayout()
+        layoutIfNeeded()
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        let w = max(canvasWidth, bounds.width)
+        let f = CGRect(x: 0, y: 0, width: w, height: bounds.height)
+        if textView.frame != f { textView.frame = f }
+        let cs = CGSize(width: w, height: bounds.height)
+        if contentSize != cs { contentSize = cs }
+    }
+}
+
 private struct TerminalScreen: UIViewRepresentable {
     let text: String
     let onScrollingChanged: (Bool) -> Void
     let onTap: () -> Void
 
     private static let font = UIFont.monospacedSystemFont(ofSize: 11, weight: .regular)
+    private static let inset = UIEdgeInsets(top: 8, left: 10, bottom: 8, right: 10)
 
-    func makeUIView(context: Context) -> BottomPinnedTextView {
-        // ⚠️ 必须 TextKit 1（`usingTextLayoutManager: false`）。iOS 16 起 UITextView 默认
-        // 走 TextKit 2，那边 `textContainer.size` 只是个参考值、排版由 NSTextLayoutManager
-        // 自己说了算——设了不折行的容器宽度也照样按视图宽折行（实机截图里 80 列的画面被
-        // 折成两行，对齐全乱），而且 contentSize 是惰性估算的，贴底会算错。
-        // TextKit 1 里「容器宽度写死 + widthTracksTextView=false」是横向滚动的老配方，
-        // 惰性排版靠 allowsNonContiguousLayout 拿回来，性能不亏。
-        let tv = BottomPinnedTextView(usingTextLayoutManager: false)
-        tv.layoutManager.allowsNonContiguousLayout = true   // 只排看得见的那几十行
+    func makeUIView(context: Context) -> TerminalHScrollView {
+        let scroll = TerminalHScrollView()
+        scroll.backgroundColor = UIColor(Color.terminalBG)
+        scroll.showsHorizontalScrollIndicator = false
+        scroll.contentInsetAdjustmentBehavior = .never
+        scroll.delegate = context.coordinator
+
+        // ⚠️ 必须 TextKit 1（textView 建在属性初始化里，`usingTextLayoutManager: false`）。
+        // TextKit 2 的 contentSize 是惰性估算的，贴底会算错（实机：展开后时好时坏地停在
+        // 开头）。TextKit 1 + allowsNonContiguousLayout 只排看得见的那几十行，性能不亏。
+        let tv = scroll.textView
+        tv.layoutManager.allowsNonContiguousLayout = true
         tv.isEditable = false
         // 不开选择：选择支持要给每个字建可命中的区域，画面一直在变的时候这一项就是大头。
         tv.isSelectable = false
         tv.font = Self.font
         tv.textColor = UIColor(Color.terminalText)
         tv.backgroundColor = UIColor(Color.terminalBG)
-        tv.textContainerInset = UIEdgeInsets(top: 8, left: 10, bottom: 8, right: 10)
+        tv.textContainerInset = Self.inset
         tv.textContainer.lineFragmentPadding = 0
-        // 不折行：终端画面按 80 列排的，折一行整块对齐就毁了。宽度不跟着视图走 +
-        // 按裁剪处理换行，内容自己横向铺开，UITextView 自带的横向滚动就能翻。
-        tv.textContainer.widthTracksTextView = false
-        tv.textContainer.heightTracksTextView = false
+        // 画布宽是按列数估的**上界**，个别怪字符真超出去的话宁可裁最后一两个字，
+        // 也别折行——终端画面折一行，整块对齐就毁了。
+        // （容器宽度不用再手动管：frame 就是画布宽，widthTracksTextView 默认跟着走就对。）
         tv.textContainer.lineBreakMode = .byClipping
-        tv.showsHorizontalScrollIndicator = false
         tv.contentInsetAdjustmentBehavior = .never   // 贴底算式里不用再兜安全区
         // 滚动**不**收键盘：常有的用法是翻到前面照着上面的内容打字，一滚就收反而碍事。
         tv.keyboardDismissMode = .none
@@ -472,16 +455,18 @@ private struct TerminalScreen: UIViewRepresentable {
                                          action: #selector(Coordinator.handleTap))
         tap.cancelsTouchesInView = false   // 别把触摸从滚动手势那儿抢走
         tv.addGestureRecognizer(tap)
-        return tv
+        scroll.addSubview(tv)
+        return scroll
     }
 
-    func updateUIView(_ tv: BottomPinnedTextView, context: Context) {
+    func updateUIView(_ scroll: TerminalHScrollView, context: Context) {
         context.coordinator.onScrollingChanged = onScrollingChanged
         context.coordinator.onTap = onTap
+        let tv = scroll.textView
         guard tv.text != text else { return }
-        let (attributed, width) = Self.gridded(text)
-        tv.growDesiredWidth(to: width)      // 见 applyWidth / growDesiredWidth
-        tv.attributedText = attributed      // 横向偏移由 restorePinnedX 兜住
+        let (attributed, width) = Self.rendered(text)
+        scroll.growCanvasWidth(to: width + Self.inset.left + Self.inset.right)
+        tv.attributedText = attributed      // 横向偏移在外层，赋值动不到它
         tv.pinToBottomSoon()
     }
 
@@ -491,18 +476,7 @@ private struct TerminalScreen: UIViewRepresentable {
     private static let paneColumns = 80
     private static let cell = ("0" as NSString).size(withAttributes: [.font: font]).width
 
-    /// 全角字符要补多少间距，才正好占满两格。
-    /// ⚠️ **必须在上下文里量**（连排 10 个再除以 10），不能孤立量一个字：
-    /// 中日韩标点（。，：「」〔〕）孤立量出来只有 5.6，可它排在一行字里实际是 10.9——
-    /// 按孤立值算 kern 会多补 8pt，一行里几个标点就把行撑宽 40 多 pt，
-    /// 超出画布就开始裁字（实机第三轮报的「最右侧被一刀切掉」就是它）。
-    private static let wideKern: CGFloat = {
-        let advance = (String(repeating: "汉", count: 10) as NSString)
-            .size(withAttributes: [.font: font]).width / 10
-        return 2 * cell - advance
-    }()
-
-    /// 这个字符占几列（东亚宽度）。终端是**按列**排版的，这里必须跟它一致。
+    /// 这个字符占几列（东亚宽度）。只用来**估画布宽**，口径跟终端一致：
     /// 中日韩/全角/emoji 占两列，其余一列（框线 ─│╭ 是非 ASCII 但只占一列）。
     private static func isWide(_ ch: Character) -> Bool {
         for u in ch.unicodeScalars {
@@ -519,44 +493,26 @@ private struct TerminalScreen: UIViewRepresentable {
         return false
     }
 
-    /// 把一屏画面排到**终端的格子上**：全角字符补足两格。
-    /// 返回排好的富文本 + 这屏要多宽（= 最长行的列数 × 单格宽）。
+    /// 排好的富文本 + 画布要多宽（= 最长行的列数 × 单格宽，是个**上界**）。
     ///
-    /// 为什么非这么干不可：iOS 的中文回退字体里一个中文只有 **1.6 格**宽，不是 2 格。
-    /// 同样 80 列，一行框线排出来 544pt、一行中文只有 437pt——短了 107pt。
-    /// 画布得按最宽的行（框线 544）来，看中文行时右边就空出这 107pt 的死黑，
-    /// 看着像内容被一刀切了（实机报了三轮的就是它）。真终端里中文严格占两格，
-    /// 补齐之后所有满行都停在同一条右边界上：黑边没了，中文和框线也终于对得齐。
-    ///
-    /// 顺带：宽度直接由列数算出，不用再逐行去量文字。
-    private static func gridded(_ s: String) -> (NSAttributedString, CGFloat) {
-        let out = NSMutableAttributedString(string: s, attributes: [
+    /// 中文按自然宽度排、**不做两格对齐**：iOS 的中文回退字体一个字只有 1.6 格宽，
+    /// 曾用 kern 补足两格（d98b7ea），列是对齐了，但每个字后面都空出 2.6pt，
+    /// 一行汉字松得像拉开的珠子（实机反馈，比黑边还难受）。现在换回自然排：
+    /// 满行中文比框线短一截，右边那点空就像真终端里没写满的行——画布按列数上界算，
+    /// 只会多不会少，绝不裁字。
+    private static func rendered(_ s: String) -> (NSAttributedString, CGFloat) {
+        let out = NSAttributedString(string: s, attributes: [
             .font: font, .foregroundColor: UIColor(Color.terminalText),
         ])
-        var utf16 = 0, runStart = 0, inWide = false
         var cols = 0, maxCols = 0
-        func flushRun(_ end: Int) {
-            guard inWide, end > runStart else { return }
-            out.addAttribute(.kern, value: wideKern,
-                             range: NSRange(location: runStart, length: end - runStart))
-        }
         for ch in s {
-            let newline = ch == "\n"
-            let wide = !newline && isWide(ch)
-            if newline {
+            if ch == "\n" {
                 maxCols = max(maxCols, cols)
                 cols = 0
             } else {
-                cols += wide ? 2 : 1
+                cols += isWide(ch) ? 2 : 1
             }
-            if wide != inWide {
-                flushRun(utf16)
-                runStart = utf16
-                inWide = wide
-            }
-            utf16 += ch.utf16.count
         }
-        flushRun(utf16)
         maxCols = max(maxCols, cols)
         // 下限 80 列：画布从第一帧起就是常量，不会因为这屏碰巧没有满行就缩窄
         // （缩窄会让 UIScrollView 把横向偏移夹回去）。
@@ -564,6 +520,8 @@ private struct TerminalScreen: UIViewRepresentable {
         return (out, CGFloat(max(maxCols, paneColumns) + 1) * cell)
     }
 
+    /// 外层（横滚）和文本视图（竖滚）挂的是同一个 delegate：哪层在动都算「手指在滑」，
+    /// 轮询攒内容那套（heldContent）就都盖得住。
     final class Coordinator: NSObject, UITextViewDelegate {
         var onScrollingChanged: (Bool) -> Void = { _ in }
         var onTap: () -> Void = { }
@@ -571,11 +529,6 @@ private struct TerminalScreen: UIViewRepresentable {
         @objc func handleTap() { onTap() }
 
         func scrollViewWillBeginDragging(_ s: UIScrollView) { onScrollingChanged(true) }
-        /// 手指/惯性驱动的滚动才记横向位置——换内容那种程序性的滚动不算。
-        func scrollViewDidScroll(_ s: UIScrollView) {
-            guard s.isDragging || s.isDecelerating || s.isTracking else { return }
-            (s as? BottomPinnedTextView)?.rememberScrollX()
-        }
         func scrollViewDidEndDragging(_ s: UIScrollView, willDecelerate decelerate: Bool) {
             if !decelerate { onScrollingChanged(false) }
         }
