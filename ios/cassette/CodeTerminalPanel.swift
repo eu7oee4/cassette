@@ -344,14 +344,16 @@ private final class BottomPinnedTextView: UITextView {
 
     private func applyWidth() {
         guard desiredWidth > 0 else { return }
-        let w = max(desiredWidth, bounds.width)
+        let pad = textContainerInset.left + textContainerInset.right
+        let w = max(desiredWidth, bounds.width - pad)
         if textContainer.size.width != w {
             textContainer.size = CGSize(width: w, height: .greatestFiniteMagnitude)
         }
         // contentSize.width 也不会自己跟着容器走（UITextView 把它钉在 bounds 宽），
         // 不盖这一下就是「不折行了，但横着滑不动、右边看不到」。
-        if abs(contentSize.width - w) > 0.5 {
-            contentSize = CGSize(width: w, height: contentSize.height)
+        let content = max(w + pad, bounds.width)
+        if abs(contentSize.width - content) > 0.5 {
+            contentSize = CGSize(width: content, height: contentSize.height)
         }
     }
 
@@ -444,22 +446,34 @@ private struct TerminalScreen: UIViewRepresentable {
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
-    /// 内容要多宽：不折行，就得把最长那行整个摆开。等宽字体按「格子数」估——
-    /// 非 ASCII（中文）占两格。**宁可估宽**（右边多出几格空白，无所谓），
-    /// 估窄了是把字切掉。
+    /// 画布要多宽 = 最长那行**真实排出来**有多宽。
+    ///
+    /// 别按「格子数」估：终端画面里全是框线字符（`─│╭`），它们是非 ASCII 但只占一格，
+    /// 按两格估会把画布撑出一大片死黑——实测那帧估出 1111、实际只有 544，多出来的
+    /// 567pt 比整块屏幕还宽，滑到最右边就是一片黑，看着像内容被一刀切了。
+    ///
+    /// 逐行全量实测又太贵（212 行 54ms，每 1.2 秒来一次就是新的卡顿），所以走上界剪枝：
+    /// 先给每行算一个**宽松的**上界排序，量到「剩下的上界都超不过当前最宽」就停。
+    /// 实测同一帧：结果和全量一字不差，只量 81 行、3.2ms。
+    /// ⚠️ 上界必须宽松（这里非 ASCII 按 2.5 格）——上界估窄了会提前收工漏掉真正最宽的行，
+    /// 那就又开始切字了。宽一点只是多量几行。
     private static func contentWidth(_ s: String) -> CGFloat {
-        var maxCells = 0, cells = 0
-        for u in s.unicodeScalars {
-            if u == "\n" {
-                maxCells = max(maxCells, cells)
-                cells = 0
-            } else {
-                cells += u.isASCII ? 1 : 2
-            }
-        }
-        maxCells = max(maxCells, cells)
         let cell = ("0" as NSString).size(withAttributes: [.font: font]).width
-        return CGFloat(maxCells) * cell + 24
+        let lines = s.split(separator: "\n", omittingEmptySubsequences: false)
+        let upper = lines.map { line -> CGFloat in
+            var units: CGFloat = 0
+            for u in line.unicodeScalars { units += u.isASCII ? 1 : 2.5 }
+            return units * cell
+        }
+        var order = Array(upper.indices)
+        order.sort { upper[$0] > upper[$1] }
+        var widest: CGFloat = 0
+        for i in order {
+            if upper[i] <= widest { break }
+            widest = max(widest, (String(lines[i]) as NSString)
+                .size(withAttributes: [.font: font]).width)
+        }
+        return ceil(widest)
     }
 
     final class Coordinator: NSObject, UITextViewDelegate {
