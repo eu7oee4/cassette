@@ -17,6 +17,7 @@ import json
 
 import config
 import pipeline
+import state_store
 from notify import logerr
 
 
@@ -103,6 +104,7 @@ async def translate_events(events, finalize):
     collector = pipeline.StoredCollector()   # tool_use 只是意图；灰字等 tool_result 定案再发
     raw_segments: list[str] = []   # 工具调用切开的正文段（原始未滤标记；最后一段以 result 为准）
     cur_raw = ""
+    sealed = ""     # 已定稿的正文段拼好的样子；每个 delta 只要接上 cur_raw 就是"到此为止说过的话"
     result_text = None
     is_error = False
 
@@ -119,6 +121,7 @@ async def translate_events(events, finalize):
                     # 新 text 块 = 一段说完去用了工具又回来 → 当前气泡定稿，另起一个。
                     if cur_raw.strip():
                         raw_segments.append(cur_raw)
+                        sealed = "\n\n".join(s.strip() for s in raw_segments if s.strip()) + "\n\n"
                         yield sse({"type": "text_break"})
                     cur_raw = ""
                     mf = MarkerStreamFilter()
@@ -127,6 +130,9 @@ async def translate_events(events, finalize):
                 if d.get("type") == "text_delta":
                     txt = d.get("text", "")
                     cur_raw += txt
+                    # 说到哪儿了同步给自切 code 那条路：它是轮跑到一半触发的，recent_window
+                    # 那时候还没有这轮的回复（见 state_store.set_live_reply 上面那段）。
+                    state_store.set_live_reply(sealed + cur_raw)
                     emit = mf.feed(txt)
                     if emit:
                         yield sse({"type": "text", "content": emit})

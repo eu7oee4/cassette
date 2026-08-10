@@ -57,6 +57,33 @@ WINDOW_LOCK = threading.Lock()
 SCHEDULE_LOCK = threading.Lock()
 
 
+# ---------- 本轮在飞的正文（只在内存里，绝不落盘）----------
+# 自切 code 模式（/codemode/start）是 TA 在 `claude -p` **跑到一半**调工具触发的，而这一轮
+# 的回复要等子进程结束、finalize_chat_reply 才写进 recent_window——所以那一刻注入过去的
+# 对话断在用户那条上，TA 自己刚说过的话看不见。
+# 实机事故（08-10 14:36）：聊天里刚定了邮箱前缀 cassette.woof，切过去的 context.md 里
+# 一个 woof 都没有，code 那边又自己想了个 cassette.hears，两边前缀对不上。
+# 那段话其实一直在服务端手里（sse.translate_events 的正文段），只是活在别的请求的栈上，
+# /codemode/start 够不着 → 在这儿开个进程内的中转。
+# 读写都是整根字符串赋值，GIL 下是原子的，不用锁；跨进程不共享也不需要——写的（SSE 事件
+# 循环）和读的（/codemode/start）本来就在同一个后端进程里。
+_live_reply = {"text": ""}
+
+
+def set_live_reply(text: str) -> None:
+    _live_reply["text"] = text or ""
+
+
+def get_live_reply() -> str:
+    return _live_reply["text"]
+
+
+def clear_live_reply() -> None:
+    """轮开始和收尾各清一次。**只在收尾清不够**：断连/异常那一支不走收尾，
+    残留的上一轮正文会漏进下一次自切。"""
+    _live_reply["text"] = ""
+
+
 # ---------- settings ----------
 def load_settings() -> dict:
     s = dict(DEFAULT_SETTINGS)

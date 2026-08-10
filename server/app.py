@@ -232,6 +232,8 @@ def _snapshot_incoming_window(req: ChatRequest) -> None:
     这轮可能跑很久，中途 wake 醒来不该只看到上一轮的世界。收尾 finalize 用带回复的完整版覆盖。
     被护栏挡下时新消息由 finalize 的追加分支补进。"""
     _overwrite_window_from(req.messages)
+    # 上一轮的残留正文清掉：断连/异常那一支不走 finalize，不在这儿清就会漏进下一次自切。
+    state_store.clear_live_reply()
 
 
 def finalize_chat_reply(reply: str, stored: list[dict], req: ChatRequest,
@@ -273,6 +275,9 @@ def finalize_chat_reply(reply: str, stored: list[dict], req: ChatRequest,
                 state_store.write_recent_window(snap)
     except Exception as e:
         logerr(f"写 recent_window 失败: {e}")
+
+    # 这轮的回复已经落进窗口了，中转缓冲功成身退（留着只会漏给下一轮）。
+    state_store.clear_live_reply()
 
     # 浏览器插件：逐条 navigate 聚合成一条 browse（text=网址列表，\n 分隔，去重保序）。
     # app 收起显示「浏览了 N 个网页」、点开展开网址；sse 那边逐条是不发灰字的，这里是
@@ -866,6 +871,12 @@ def codemode_start(inp: CodemodeStartIn, x_auth: Optional[str] = Header(default=
     window = state_store.read_recent_window()
     conv = [{"ts": w.get("ts"), "role": w.get("role"), "text": w.get("text", "")}
             for w in window][-CODE_HISTORY_CAP:]
+    # ⚠️ 补上"这一轮 TA 自己刚说过、但还没落进窗口"的话——这个工具是 `claude -p` 跑到一半
+    # 调的，recent_window 要等 finalize 才写，不补就断在用户那条上（08-10 前缀对不上那次）。
+    # 只给这条路：app 手动切的 /code/start 历史是整份传上来的，本来就带回复，再补是重影。
+    live = pipeline.strip_markers(state_store.get_live_reply()).strip()
+    if live:
+        conv.append({"ts": int(time.time()), "role": "assistant", "text": live})
     scene = (f"【场景】刚才在聊天里 {config.user_name()} 让你切到 code 模式干活，你自己调"
              "工具切过来了——还是你，只是这个会话里你手上有整台电脑的工具。")
     tail = (f"\n【第一件事（你切过来就是为了它）】\n〔现在是 {pipeline.now_str()}〕\n{task}\n"
