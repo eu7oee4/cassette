@@ -3,7 +3,7 @@ wake 调度器：模型自己"醒来"——主动决定要不要给用户发消�
 
 省 token 的关键设计：**预闸门在叫模型之前判掉**（概率/时段/静默/最小间隔都是纯本地判断），
 只有真要醒才起一次 claude -p。醒来的输出走 THOUGHTS / ACTION / CONTENT / NEXT 四段协议：
-内心永远记日志（用户在 app 里看不到但后端有账），只有 ACTION=message 才真正推送；
+内心永远记日志（进 wake_log，app 的「心流日志」页会展示给用户），只有 ACTION=message 才真正推送；
 推送前还有硬顶闸（每天条数 + 最小间隔），拦推送、不拦思考。
 
 工作集永远有界：醒来是后台反复跑，绝不塞全量历史——只用 recent_window 切片。
@@ -307,7 +307,7 @@ def try_push(text: str, settings: dict, thoughts: str = "", trigger: str = "",
              sticker_ids: Optional[list] = None, bark_text: str = "",
              next_wake_at: Optional[int] = None, next_wake_note: str = "",
              started_ts: Optional[int] = None, stored: Optional[list] = None,
-             force: bool = False) -> bool:
+             browse: Optional[list] = None, force: bool = False) -> bool:
     """硬顶闸（每天条数 + 最小间隔 + 静默）。只拦推送、不拦思考。通过 → 进 outbox + Bark + 追加窗口。
     thoughts＝这次醒来的内心，一并记进日志（连被抑制的也记）。
     sticker_ids＝这条消息附带的表情（app 按 id 取本地图上屏）；
@@ -328,6 +328,8 @@ def try_push(text: str, settings: dict, thoughts: str = "", trigger: str = "",
             "trigger": trigger, "thoughts": thoughts}
     if stored:
         base["stored"] = stored   # 这次醒来存/改了什么记忆（Mind 展示 + "别重复存"清单）
+    if browse:
+        base["browse"] = browse   # 这次醒来逛了哪些网页（Mind 时间线 🌐；chat 侧不进这里）
     if next_wake_at:
         base["next_wake_at"] = next_wake_at
         base["next_wake_note"] = next_wake_note
@@ -428,13 +430,16 @@ def do_wake_sync(settings: dict, trigger: str, force: bool = False) -> dict:
         result["pushed"] = try_push(app_text, settings, thoughts, trigger,
                                     sticker_ids=sticker_ids, bark_text=bark_text,
                                     next_wake_at=next_wake_at, next_wake_note=nw_note,
-                                    started_ts=now_ts, stored=stored, force=force)
+                                    started_ts=now_ts, stored=stored,
+                                    browse=browse_urls, force=force)
     else:
         result["action"] = "none"   # none，或 message 但 content 空 → 兜底成 none
         entry = {"ts": now_ts, "time": pipeline.now_str(), "source": "wake", "action": "none",
                  "trigger": trigger, "thoughts": thoughts}
         if stored:
             entry["stored"] = stored
+        if browse_urls:
+            entry["browse"] = browse_urls   # 醒来逛了哪些网页（Mind 时间线 🌐）
         if next_wake_at:
             entry["next_wake_at"] = next_wake_at
             entry["next_wake_note"] = nw_note

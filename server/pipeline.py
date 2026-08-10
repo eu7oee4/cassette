@@ -90,7 +90,8 @@ def gap_before_last(messages: list[Message]) -> Optional[str]:
 
 # ---------- 上下文时间线 ----------
 def build_context_timeline(conv_items: list[dict], reflect_limit: int = 5) -> str:
-    """把 最近对话 + 模型自己醒来时的内心（用户没看到）合并成一条按时间排序的时间线。
+    """把 最近对话 + 模型自己醒来时的内心（不在聊天里，用户在心流日志页看得到）合并成
+    一条按时间排序的时间线。
     醒来和聊天共用——解决「对话本身没时间戳、和内心对不上先后顺序」的问题。"""
     items: list[tuple[int, str]] = []
 
@@ -101,7 +102,7 @@ def build_context_timeline(conv_items: list[dict], reflect_limit: int = 5) -> st
         who = config.user_name() if c.get("role") == "user" else "你"
         items.append((int(ts), f"{who}：{c.get('text', '')}"))
 
-    # 最近几次醒来的内心（含 none；用户看不到）。只读日志尾部——append-only 文件会一直长。
+    # 最近几次醒来的内心（含 none；不在聊天里，心流日志页可见）。只读日志尾部——append-only 文件会一直长。
     for w in [e for e in state_store.read_wake_log(limit=100) if (e.get("thoughts") or "").strip()][-reflect_limit:]:
         act = {"none": "没做什么", "message": "发了消息"}.get(w.get("action"), "")
         # 被打扰控制拦下的消息：标清楚没送出去，别让他以为发过了接着那条往下聊。
@@ -285,7 +286,7 @@ def build_prompt(messages: list[Message], catalog: Optional[list[dict]] = None) 
         return "\n".join(extras + [""] + time_lines + ["", last.text])
 
     lines = extras + [""]
-    # 合并时间线：历史对话 + 醒来时的内心（用户没看到），按时间排。
+    # 合并时间线：历史对话 + 醒来时的内心（不在聊天里，心流日志页可见），按时间排。
     conv_items = [{"ts": m.ts, "role": m.role, "text": m.text} for m in history]
     timeline = build_context_timeline(conv_items)
     if timeline:

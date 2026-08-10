@@ -1122,10 +1122,11 @@ def mind(limit: int = 100, x_auth: Optional[str] = Header(default=None, alias="X
             "pushed": w.get("pushed"),
             "note": w.get("note", ""),
             "stored": w.get("stored") or [],
+            "browse": w.get("browse") or [],   # 醒来逛的网页（🌐 行；chat 的浏览不进这里）
             "next_wake_note": w.get("next_wake_note", ""),
         }
         # 空壳（无内心/无产出/无消息）不给 app：多半是 error 或纯调度记录
-        if entry["thoughts"] or entry["stored"] or entry["content"]:
+        if entry["thoughts"] or entry["stored"] or entry["content"] or entry["browse"]:
             items.append(entry)
     return {"items": items}
 

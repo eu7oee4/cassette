@@ -13,6 +13,7 @@ struct MindEntry: Decodable {
     let pushed: Bool?
     let note: String?             // capped_daily / capped_interval / stale_user_msg
     let stored: [MindStored]?
+    let browse: [String]?         // 这次醒来逛的网页（🌐 行；聊天里的浏览有自己的灰字，不进这里）
     let next_wake_note: String?
 }
 
@@ -99,6 +100,7 @@ struct MindPage: View {
 /// 内心和记忆正文是 TA 自己的话，保持原样。
 private struct MindRow: View {
     let entry: MindEntry
+    @Environment(\.openURL) private var openURL
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -149,6 +151,27 @@ private struct MindRow: View {
                                 .font(.caption2)
                                 .foregroundStyle(.tertiary)
                                 .padding(.leading, 26)
+                        }
+                    }
+                }
+            }
+
+            // 醒来时逛的网页：网址可点跳 Safari（和聊天灰字展开同款交互）。
+            if let browse = entry.browse, !browse.isEmpty {
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Text("🌐")
+                    VStack(alignment: .leading, spacing: 3) {
+                        ForEach(Array(browse.enumerated()), id: \.offset) { _, u in
+                            Button {
+                                if let url = URL(string: u) { openURL(url) }
+                            } label: {
+                                Text(u)
+                                    .font(.caption)
+                                    .foregroundStyle(Color.theme)
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+                            }
+                            .buttonStyle(.plain)
                         }
                     }
                 }
