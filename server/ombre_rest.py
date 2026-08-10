@@ -53,17 +53,19 @@ def _cookie() -> str:
         return _sess["cookie"]
 
 
-def call(path: str, body: Optional[dict] = None, retry: bool = True):
-    """GET（body=None）或 POST 一个 Ombre REST 路径，返回解析后的 JSON。
-    401 自动重登一次（cookie 过期 / Ombre 重启过）。"""
+def call(path: str, body: Optional[dict] = None, retry: bool = True,
+         method: Optional[str] = None):
+    """调一个 Ombre REST 路径，返回解析后的 JSON。401 自动重登一次（cookie 过期 / Ombre 重启过）。
+    method 不传时按 body 推断：有 body → POST，无 body → GET；显式传（如 DELETE）时用它，
+    DELETE 也可以不带 body（归档删除走 ?confirm=true 的 query）。"""
     ck = _cookie()
     data = json.dumps(body).encode() if body is not None else None
+    m = method or ("POST" if data is not None else "GET")
     headers = {"Cookie": ck}
     if data is not None:
         headers["Content-Type"] = "application/json"
     req = urllib.request.Request(config.OMBRE_REST_URL + path, data=data,
-                                 headers=headers,
-                                 method="POST" if data is not None else "GET")
+                                 headers=headers, method=m)
     try:
         with _opener.open(req, timeout=20) as r:
             return json.loads(r.read().decode())
@@ -71,7 +73,7 @@ def call(path: str, body: Optional[dict] = None, retry: bool = True):
         if e.code == 401 and retry:
             with _LOCK:
                 _sess["cookie"] = ""
-            return call(path, body, retry=False)
+            return call(path, body, retry=False, method=method)
         raise HTTPException(status_code=502,
                             detail=f"Ombre {e.code}: {e.read().decode()[:200]}")
     except HTTPException:

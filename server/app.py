@@ -1003,10 +1003,14 @@ def memory_forget(mem_id: str, x_auth: Optional[str] = Header(default=None, alia
 
 @app.post("/memories/{mem_id}/archive")
 def memory_archive(mem_id: str, x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
-    """归档：移进档案区、盖 deleted_at——普通查询/搜索/回忆都不再返回，从记忆列表里消失
-    （比遗忘彻底）。Ombre 设计上仍可 restore，不做物理删除。"""
+    """归档：走 Ombre 的 delete-to-archive（DELETE ?confirm=true）——移进档案区并盖 deleted_at，
+    从记忆列表 / 搜索 / 回忆里都不再返回，是「从记忆页真正移走」。
+
+    ⚠️ 别用 /api/bucket/{id}/archive：那个只把 type 设成 archived、**不盖 deleted_at**，而
+    列表只过滤 deleted_at → 归档后照样留在页面（踩过：app 里看着消失是乐观动画，刷新就回来）。
+    delete-to-archive 才真移走，且 Ombre 设计上仍可 restore、绝不物理删除。"""
     verify_auth(x_auth)
-    return ombre_rest.call(f"/api/bucket/{urllib.parse.quote(mem_id)}/archive", {})
+    return ombre_rest.call(f"/api/bucket/{urllib.parse.quote(mem_id)}?confirm=true", method="DELETE")
 
 
 # ---------- 插件商店 ----------
