@@ -65,8 +65,12 @@ NO_WAKE_PLUGINS = {"codemode"}
 # 三层口径：不在任何名单 = 醒来照挂；NO_WAKE_PLUGINS = 宿主硬禁，没有开关（作者和用户
 # 都说了不算）；这里 = 宿主认为「给不给凌晨三点的进程」是机主自己的取舍，默认关、
 # 用户显式打开才挂。browser：带登录态的真浏览器，打开=允许一次没人看着的醒来以你的
-# 身份上网——这个决定只能机主自己做。
-WAKE_TOGGLEABLE = {"browser"}
+# 身份上网——这个决定只能机主自己做。beacon：写信是发出去就收不回的对外动作（信直接
+# 投到另一个 AI 的邮箱），凌晨三点没人看着的一次自发醒来该不该有这个能力，同理。
+#
+# ⚠️ 新插件默认落在「醒来照挂」那一档：不写进这里、也不写进 NO_WAKE_PLUGINS，
+# 等于醒来无条件有它，而且没有开关可关。要收就得显式写名字。
+WAKE_TOGGLEABLE = {"browser", "beacon"}
 WAKE_ENABLED_PATH = state_store.STATE_DIR / "plugins_wake_enabled.json"
 
 
