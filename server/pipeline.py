@@ -749,3 +749,24 @@ _MARKER_RE = re.compile(r"\[\[.*?\]\]", re.S)
 
 def strip_markers(text: str) -> str:
     return _MARKER_RE.sub("", text)
+
+
+# ---------- 浏览器去留标记（幽灵会话，见 browser_keeper.py）----------
+# 默认轮末 Chrome 随最后一个 MCP 客户端断开而关；TA 用标记选择：
+# [[browser:keep]]=留着（粘性：之后不提就一直留），[[browser:close]]=把之前留的关掉。
+# token 英文为准，容错中文/全角冒号/大小写；多个标记最后一个算数。
+_BROWSER_CHOICE_RE = re.compile(r"\[\[\s*browser\s*[:：]\s*(keep|close|保留|关闭)\s*\]\]", re.I)
+
+
+def parse_browser_markers(text: str) -> tuple[str, Optional[str]]:
+    """剥掉 [[browser:…]] 标记，返回 (干净文本, "keep"/"close"/None)。"""
+    if not text or "[[" not in text:
+        return text, None
+    choice = None
+
+    def _on(m):
+        nonlocal choice
+        choice = "keep" if m.group(1).lower() in ("keep", "保留") else "close"
+        return ""
+
+    return _BROWSER_CHOICE_RE.sub(_on, text), choice

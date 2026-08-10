@@ -22,6 +22,7 @@ import uuid
 from datetime import datetime
 from typing import Optional
 
+import browser_keeper
 import code_bridge
 import config
 import pipeline
@@ -388,6 +389,12 @@ def do_wake_sync(settings: dict, trigger: str, force: bool = False) -> dict:
                                            "source": "wake", "urls": browse_urls})
         except Exception as e:
             logerr(f"记 browse_log 失败: {e}")
+    # 浏览器去留标记：统一在这里剥+结算——剥在 parse_wake_output 之前，
+    # 窗口/outbox/Bark/日志里就都不会漏标记。
+    choice = None
+    if raw:
+        raw, choice = pipeline.parse_browser_markers(raw)
+    browser_keeper.apply_choice(choice, browsed=bool(browse_urls))
     # 非记忆类操作不进日志（用 chat 侧同一份常量，别再写字面量——漏一个就会有控制信号
     # 混进心流日志和"别重复存"清单里，当成记忆产物）
     stored = [s for s in (stored or []) if s.get("tool") not in pipeline.NON_MEMORY_TOOLS]

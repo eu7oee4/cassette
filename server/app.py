@@ -28,6 +28,7 @@ from pydantic import BaseModel
 
 import urllib.parse
 
+import browser_keeper
 import code_bridge
 import config
 import ombre_rest
@@ -39,6 +40,20 @@ import wake
 from notify import bark_push, logerr
 from pipeline import Message
 
+
+def _browser_keeper_watchdog() -> None:
+    """浏览器幽灵看门狗：Chrome（cassette profile 那只）一在跑就搭伙占会话，轮末按
+    [[browser:keep/close]] 标记结算去留（browser_keeper.py）。wake/非流式是 subprocess
+    跑完才解析、轮中没有钩子，这个线程是唯一全覆盖的口子。Chrome 没跑时一拍就是一次
+    pgrep，便宜，不用按插件开关做门。"""
+    while True:
+        try:
+            browser_keeper.watchdog_tick()
+        except Exception:
+            pass
+        time.sleep(2)
+
+
 @asynccontextmanager
 async def _lifespan(_app: FastAPI):
     """启动 wake 调度器（on_event 已被 FastAPI 弃用，用 lifespan）。"""
@@ -47,6 +62,8 @@ async def _lifespan(_app: FastAPI):
         tasks.append(asyncio.create_task(wake.scheduler_loop()))
     if config.CODE_MODE_ENABLED:
         tasks.append(asyncio.create_task(_code_dialog_watchdog()))
+    threading.Thread(target=_browser_keeper_watchdog, daemon=True,
+                     name="browser-keeper-watchdog").start()
     yield
     for t in tasks:
         t.cancel()
@@ -255,6 +272,9 @@ def finalize_chat_reply(reply: str, stored: list[dict], req: ChatRequest,
         next_wake_hint = pipeline.next_wake_note(next_raw, at)
         logerr(f"聊天里定了下次醒来：{next_raw} → {pipeline.fmt_ts(at)}")
 
+    # 浏览器去留标记：在下面的通用剥标记之前截下来；结算放在算出 browsed 之后（见下）。
+    reply, browser_choice = pipeline.parse_browser_markers(reply)
+
     reply = pipeline.strip_markers(reply).strip()
 
     # 写最近窗口快照：醒来时 app 不在场，模型靠这个拿上下文。
@@ -297,6 +317,10 @@ def finalize_chat_reply(reply: str, stored: list[dict], req: ChatRequest,
                                                "source": "chat", "urls": browse_urls})
             except Exception as e:
                 logerr(f"记 browse_log 失败: {e}")
+
+    # 轮末结算浏览器去留：默认这轮浏览过就关窗口；keep=粘住（窗口留着）；close=明确关。
+    # 没浏览也没标记的轮不碰 keeper（apply_choice 内部口径）——别误关并行 wake 轮的窗口。
+    browser_keeper.apply_choice(browser_choice, browsed=bool(browse_urls))
 
     # 这轮他自己调工具切进了 code 模式：剥出来置标志（控制信号，不是记忆产物，不进 Mind），
     # app 收到 code_started 就翻 codeMode，后续消息改道 tmux 会话。
