@@ -432,8 +432,13 @@ async def chat_stream(req: ChatRequest, x_auth: Optional[str] = Header(default=N
                     text = (final.get("reply") or "").strip()
                     stickers = final.get("sticker_sends") or []
                     if text or stickers:
+                        # stored 也带上：browse 灰字/网页卡片只随 done 走，断连轮 app 从来
+                        # 没见过 done——不带的话这轮的浏览记录在 app 里人间蒸发（实锤：
+                        # 08-10 二轮测试）。app 侧只从这里补渲染 done 独有的（browse/webpage），
+                        # 记忆灰字不补（流式中途已就地发过，补了重复）。
                         state_store.outbox_append({"id": uuid.uuid4().hex[:12], "ts": int(time.time()),
                                                    "text": text, "sticker_ids": stickers,
+                                                   "stored": final.get("stored") or [],
                                                    "delivered": False, "origin": "chat_rescue",
                                                    "req_id": rid})
                         bark_push(text if text else "（发来了表情）")

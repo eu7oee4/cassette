@@ -848,27 +848,48 @@ struct ContentView: View {
         }
         // 他这轮做/改的网页 → 网页卡片消息（stored 只有标题，从后端反查 id）。
         // 只认真做成了的（ok=false 的那次页面根本没生成，反查 id 只会挂错一张卡片）。
-        let pages = (resp.stored ?? []).filter { $0.tool == "webpage" && $0.ok != false }
+        appendDoneOnlyStored(resp.stored)
+    }
+
+    /// done 独有的 stored 产物上屏：网页卡片 + 浏览灰字（后端已聚合成一条，text=网址列表）。
+    /// 流式收尾和断连补投两条路共用——这俩只随 done 走，断连轮 app 没见过 done，得从补投
+    /// 条目里补（实锤：08-10 二轮测试浏览灰字蒸发）。记忆灰字不在此列：流式中途就地发过。
+    /// 同秒+同内容去重：ack 失败重拉 pending 时别插重复（finalize 路 timestamp=now，不会撞）。
+    @MainActor
+    private func appendDoneOnlyStored(_ stored: [StoredMemory]?, timestamp: Date = Date()) {
+        let ts = Int(timestamp.timeIntervalSince1970)
+        let pages = (stored ?? []).filter { $0.tool == "webpage" && $0.ok != false }
         if !pages.isEmpty {
             Task { @MainActor in
                 guard let list = try? await chatService.getWebpages() else { return }
                 for p in pages {
                     if let item = list.first(where: { $0.title == p.text }) ?? list.first {
-                        chatStore.append(ChatMessage(sender: .other,
-                                                     kind: .webpage(item.id, item.title),
-                                                     timestamp: Date()))
+                        let dup = chatStore.messages.contains { m in
+                            guard Int(m.timestamp.timeIntervalSince1970) == ts,
+                                  case .webpage(let pid, _) = m.kind else { return false }
+                            return pid == item.id
+                        }
+                        if !dup {
+                            chatStore.append(ChatMessage(sender: .other,
+                                                         kind: .webpage(item.id, item.title),
+                                                         timestamp: timestamp))
+                        }
                     }
                 }
             }
         }
-        // 他这轮浏览过的网页（后端已聚合成一条：text=网址列表，\n 分隔）→ 可展开灰字。
-        // 流式中途不发（sse 跳过 browse），done 这里是唯一入口；失败的 navigate 后端已滤掉。
-        for b in (resp.stored ?? []) where b.tool == "browse" && b.ok != false {
+        for b in (stored ?? []) where b.tool == "browse" && b.ok != false {
             let urls = b.text.split(separator: "\n").map(String.init)
                 .filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
-            if !urls.isEmpty {
+            guard !urls.isEmpty else { continue }
+            let dup = chatStore.messages.contains { m in
+                guard Int(m.timestamp.timeIntervalSince1970) == ts,
+                      case .browseNote(let u) = m.kind else { return false }
+                return u == urls
+            }
+            if !dup {
                 chatStore.append(ChatMessage(sender: .other, kind: .browseNote(urls),
-                                             timestamp: Date()))
+                                             timestamp: timestamp))
             }
         }
     }
@@ -935,6 +956,8 @@ struct ContentView: View {
                                                          description: st.description, timestamp: ts)
                     }
                 }
+                // 断连补投轮的 done 独有产物（browse 灰字/网页卡片）：从条目里补渲染。
+                appendDoneOnlyStored(p.stored, timestamp: ts)
             }
             try await chatService.ackPending(ids: pending.map { $0.id })
         } catch {

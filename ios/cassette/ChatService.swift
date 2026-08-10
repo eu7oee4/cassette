@@ -35,6 +35,7 @@ struct PendingMessage: Decodable, Identifiable {
     let sticker_ids: [String]?   // 这条消息配的表情（按 id，app 取本地图上屏）；醒来发表情用
     let req_id: String?          // 断连补投的关联 id：撤半截气泡换完整回复用
     let error: Bool?             // true＝那轮没产出（claude 挂了）：清等待+提示重发，不撤半截
+    let stored: [StoredMemory]?  // 那轮的工具产物：补渲染 done 独有的（browse 灰字/网页卡片）
 }
 
 /// 发给后端的一条历史消息。
