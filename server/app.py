@@ -995,8 +995,18 @@ def memory_edit(mem_id: str, body: MemoryEditIn,
 
 @app.post("/memories/{mem_id}/forget")
 def memory_forget(mem_id: str, x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
+    """主动遗忘开关（toggle dont_surface）：不再主动浮现，但没抹掉——搜索仍找得到，
+    还在列表里。app 那个键的文案就是它的两态（遗忘 / 取消遗忘）。返回 {dont_surface}。"""
     verify_auth(x_auth)
     return ombre_rest.call(f"/api/bucket/{urllib.parse.quote(mem_id)}/forget", {})
+
+
+@app.post("/memories/{mem_id}/archive")
+def memory_archive(mem_id: str, x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
+    """归档：移进档案区、盖 deleted_at——普通查询/搜索/回忆都不再返回，从记忆列表里消失
+    （比遗忘彻底）。Ombre 设计上仍可 restore，不做物理删除。"""
+    verify_auth(x_auth)
+    return ombre_rest.call(f"/api/bucket/{urllib.parse.quote(mem_id)}/archive", {})
 
 
 # ---------- 插件商店 ----------

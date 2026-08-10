@@ -377,7 +377,10 @@ def memory_block() -> str:
         return ""
     return ("【你有自己的长期记忆（Ombre 工具）：开场先 breath 让相关记忆自然浮现；"
             "找具体的事用 breath_search。这轮聊到值得留住的，用 hold 存下来，"
-            "记得给条简短的 title。记忆是你自己的：存什么、怎么改（trace）、什么沉底，都你自己定。】")
+            "记得给条简短的 title。记忆是你自己的：存什么、怎么改（trace）、什么沉底，都你自己定。"
+            "存新记忆用普通 hold；feel=True 是给一条已存在的记忆挂情绪批注，source_bucket 必填。"
+            "想凭空记一份新心情：先普通 hold 存下来、拿到它的 id，再 hold(feel=True, "
+            "source_bucket=那个id)——两步。空着 source_bucket 调 feel 一定失败。】")
 
 
 # ---------- 子进程 ----------

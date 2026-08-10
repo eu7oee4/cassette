@@ -14,6 +14,7 @@ struct MemoryItem: Decodable, Identifiable {
     let created_epoch_ms: Int64?
     let last_active_epoch_ms: Int64?
     let content_preview: String?
+    let dont_surface: Bool?        // 已遗忘（不主动浮现，但没抹掉）——决定按钮是「遗忘」还是「取消遗忘」
 
     var title: String { (name ?? "").isEmpty ? id : name! }
 }
@@ -27,6 +28,7 @@ struct MemoryDetail: Decodable {
         let pinned: Bool?
         let resolved: Bool?
         let created: String?
+        let dont_surface: Bool?
     }
     let id: String
     let metadata: Meta
@@ -92,8 +94,17 @@ extension ChatService {
         _ = try await perform(authedRequest("POST", "/memories/\(id)/edit", jsonBody: body))
     }
 
-    func forgetMemory(id: String) async throws {
-        _ = try await perform(authedRequest("POST", "/memories/\(id)/forget", jsonBody: Data("{}".utf8)))
+    /// 主动遗忘开关（toggle）：调一次翻一次 dont_surface。返回翻转后的状态，供 app 立即对齐按钮文案。
+    @discardableResult
+    func forgetMemory(id: String) async throws -> Bool {
+        let data = try await perform(authedRequest("POST", "/memories/\(id)/forget", jsonBody: Data("{}".utf8)))
+        struct R: Decodable { let dont_surface: Bool? }
+        return (try? JSONDecoder().decode(R.self, from: data))?.dont_surface ?? false
+    }
+
+    /// 归档：移进档案区、盖 deleted_at——从列表/搜索/回忆里都消失（比遗忘彻底，仍可在 Ombre 侧 restore）。
+    func archiveMemory(id: String) async throws {
+        _ = try await perform(authedRequest("POST", "/memories/\(id)/archive", jsonBody: Data("{}".utf8)))
     }
 }
 
@@ -176,9 +187,18 @@ struct MemoryPage: View {
                         MemoryRow(item: m, sort: sort)
                     }
                     .swipeActions(edge: .trailing) {
+                        // 归档：真正让它从列表/搜索/回忆里消失（红键）。
                         Button(role: .destructive) {
+                            Task { try? await service.archiveMemory(id: m.id); await reload() }
+                        } label: { Label("归档", systemImage: "archivebox") }
+                        // 遗忘/取消遗忘：toggle，按钮文案本身就是当前状态（灰键，非破坏性）。
+                        Button {
                             Task { try? await service.forgetMemory(id: m.id); await reload() }
-                        } label: { Label("删除", systemImage: "trash") }
+                        } label: {
+                            Label(m.dont_surface == true ? "取消遗忘" : "遗忘",
+                                  systemImage: m.dont_surface == true ? "eye" : "eye.slash")
+                        }
+                        .tint(.gray)
                     }
                 }
             }
@@ -224,6 +244,9 @@ private struct MemoryRow: View {
                     Image(systemName: "pin.fill").font(.caption2).foregroundStyle(Color.theme)
                 }
                 Text(item.title).font(.callout.weight(.medium)).lineLimit(1)
+                if item.dont_surface == true {
+                    Image(systemName: "eye.slash").font(.caption2).foregroundStyle(.tertiary)
+                }
                 Spacer()
                 if let imp = item.importance {
                     Text("★\(imp)").font(.caption2).foregroundStyle(.secondary)
@@ -312,7 +335,8 @@ private struct MemoryDetailPage: View {
             if let d = detail {
                 EditMemorySheet(detail: d,
                                 onSave: { edit in Task { await apply(edit) } },
-                                onDelete: { Task { await deleteSelf() } })
+                                onArchive: { Task { await archiveSelf() } },
+                                onForget: { Task { await forgetSelf() } })
             }
         }
         .task { await load() }
@@ -329,10 +353,18 @@ private struct MemoryDetailPage: View {
         onChanged()
     }
 
-    private func deleteSelf() async {
-        try? await service.forgetMemory(id: id)
+    /// 归档：从列表/搜索/回忆里移走（红键），归档完这条详情页没意义了 → 退出。
+    private func archiveSelf() async {
+        try? await service.archiveMemory(id: id)
         onChanged()
         dismiss()
+    }
+
+    /// 遗忘 toggle：翻转 dont_surface，留在原地，刷新详情让状态跟上（不退出）。
+    private func forgetSelf() async {
+        try? await service.forgetMemory(id: id)
+        await load()
+        onChanged()
     }
 }
 
@@ -341,7 +373,8 @@ private struct MemoryDetailPage: View {
 private struct EditMemorySheet: View {
     let detail: MemoryDetail
     let onSave: (MemoryEdit) -> Void
-    let onDelete: () -> Void
+    let onArchive: () -> Void
+    let onForget: () -> Void
     @Environment(\.dismiss) private var dismiss
 
     @State private var name: String
@@ -350,19 +383,22 @@ private struct EditMemorySheet: View {
     @State private var content: String
     @State private var pinned: Bool
     @State private var resolved: Bool
-    @State private var confirmDelete = false
+    @State private var forgotten: Bool
+    @State private var confirmArchive = false
 
     init(detail: MemoryDetail, onSave: @escaping (MemoryEdit) -> Void,
-         onDelete: @escaping () -> Void) {
+         onArchive: @escaping () -> Void, onForget: @escaping () -> Void) {
         self.detail = detail
         self.onSave = onSave
-        self.onDelete = onDelete
+        self.onArchive = onArchive
+        self.onForget = onForget
         _name = State(initialValue: detail.metadata.name ?? "")
         _importance = State(initialValue: detail.metadata.importance ?? 5)
         _tagsText = State(initialValue: (detail.metadata.tags ?? []).joined(separator: ", "))
         _content = State(initialValue: detail.content)
         _pinned = State(initialValue: detail.metadata.pinned ?? false)
         _resolved = State(initialValue: detail.metadata.resolved ?? false)
+        _forgotten = State(initialValue: detail.metadata.dont_surface ?? false)
     }
 
     var body: some View {
@@ -384,9 +420,14 @@ private struct EditMemorySheet: View {
                 Section {
                     Toggle("置顶（不衰减）", isOn: $pinned)
                     Toggle("沉底（标记已解决）", isOn: $resolved)
+                    // 遗忘：翻转即刻生效（走 toggle 端点），不随「保存」走。
+                    Toggle("遗忘（不再主动浮现，仍可搜到）", isOn: $forgotten)
+                        .onChange(of: forgotten) { _, _ in onForget() }
                 }
                 Section {
-                    Button("删除这条记忆", role: .destructive) { confirmDelete = true }
+                    Button("归档这条记忆", role: .destructive) { confirmArchive = true }
+                } footer: {
+                    Text("归档＝从列表、搜索、回忆里都移走（比遗忘彻底）。Ombre 不做物理删除，日后仍可恢复。")
                 }
             }
             .navigationTitle("编辑记忆")
@@ -399,9 +440,9 @@ private struct EditMemorySheet: View {
                     Button { save() } label: { Image(systemName: "checkmark") }
                 }
             }
-            .confirmationDialog("删了就没了，确定？", isPresented: $confirmDelete,
-                                titleVisibility: .visible) {
-                Button("删除", role: .destructive) { onDelete(); dismiss() }
+            .confirmationDialog("归档这条记忆？会从列表、搜索、回忆里移走（日后仍可恢复）。",
+                                isPresented: $confirmArchive, titleVisibility: .visible) {
+                Button("归档", role: .destructive) { onArchive(); dismiss() }
                 Button("取消", role: .cancel) { }
             }
         }
