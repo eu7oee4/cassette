@@ -274,8 +274,16 @@ _KEYHINT_RE = re.compile(r"\s*\((?:esc|enter|tab|shift\+tab|ctrl\+\w+)\)\s*$", r
 
 _FOOTER_SEG_MAX = 40    # 按键提示都很短。超过这个长度的是正文，不是页脚
 _FOOTER_LOOKBACK = 3    # 页脚在最后几行有字的里面找
-_OPTION_SCAN_MAX = 24   # 选项块再长也就几行，往上扫过头只会捞到正文
-_CONT_MAX = 3           # 一个选项最多折这么多行
+# 下面两个上限**只是防跑飞的兜底，不是判据**——收不全的下场不是少个按钮，而是编号凑不齐
+# 1..N（闸 ③/⑥）→ 整个弹窗当没看见 → 面板一颗按钮都不出。宁可放宽：真正挡正文的是闸
+# ①②④⑤ 和 1..N，扫描到非选项非续行的行本来就会立刻停。
+# 实机事故（08-10 14:39）：`Yes, and don't ask again for:` 后面跟的是一条带 3 个 header
+# 和整坨 JSON 的 curl，2 号选项在 pane 里折了 4 行 —— 老的 _CONT_MAX=3 在这儿断掉，只收到
+# 3 号，编号对不上 → dialog_options 返空。手机上弹窗认得出（页脚在，send 被挡）但按钮不出，
+# 人被卡在「发不了消息、也点不了确认」的死角里。
+_OPTION_SCAN_MAX = 80   # 选项块整块最多往上扫这么多行
+_CONT_MAX = 12          # 一个选项最多折这么多行
+_LABEL_MAX = 100        # 按钮上的文案上限：app 那排按钮是定高的，太长会把面板撑变形
 
 
 def _screen(text: Optional[str] = None) -> list:
@@ -344,6 +352,8 @@ def _parse_options(lines: list, footer: int, require_cursor: bool = False) -> li
             label = _KEYHINT_RE.sub("", label).strip()
             if not label:
                 break
+            if len(label) > _LABEL_MAX:
+                label = label[:_LABEL_MAX - 1].rstrip() + "…"
             opts.append({"key": m.group(2), "label": label})
             if m.group(2) == "1":
                 break           # 数到 1 就是块顶，再往上是问题行和正文
