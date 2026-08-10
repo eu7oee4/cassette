@@ -100,6 +100,16 @@ REGISTRY: dict[str, dict] = {
         "display_name": "网页工坊",
         "description": "做 / 改 / 传送 HTML 网页（第一个插件）",
     },
+    # 装这个 = 让 TA 能自己上网：转发壳直通 Mac 上常驻的 playwright-mcp（有头 Chrome +
+    # 持久 profile，登录态住 state/browser-profile/）。**装完还要在 Mac 上跑一次插件仓的
+    # setup.sh 起服务**（端口 3002），服务没起时工具会有声报错、不静默缺席。醒来那条路
+    # 默认不挂——WAKE_TOGGLEABLE 把「醒来能用」开关交给机主，商店里该行下面拨。
+    "browser": {
+        "repo": "https://github.com/eu7oee4/cassette-plugin-browser",
+        "commit": "a936bc42ffe8c6a973eccb9ca6a5a81d7e9d0574",
+        "display_name": "浏览器",
+        "description": "让 TA 自己上网——开一只真浏览器浏览网页，带持久登录态（需先在 Mac 上起浏览器服务）",
+    },
     # 装这个 = 把 Code 模式的开关也交到 TA 手上（不装就只有你能按顶栏那个按钮）。
     # 它只是个转发壳，真活在 /codemode/start；护栏全在宿主侧，插件不参与：已有会话不杀旧
     # 起新、cwd 必须落在 CODE_CWD_ALLOW 里、权限弹窗一律保留、**醒来那条路不挂它**
