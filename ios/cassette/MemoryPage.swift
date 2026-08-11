@@ -15,8 +15,12 @@ struct MemoryItem: Decodable, Identifiable {
     let last_active_epoch_ms: Int64?
     let content_preview: String?
     let dont_surface: Bool?        // 已遗忘（不主动浮现，但没抹掉）——决定按钮是「遗忘」还是「取消遗忘」
+    let type: String?             // dynamic/permanent/feel/plan/... 或 archived（衰减引擎自动归档的老记忆）
 
     var title: String { (name ?? "").isEmpty ? id : name! }
+    /// 衰减自动归档的老记忆（type=archived，但没被手动删除）。手动归档＝真删除会盖 deleted_at、
+    /// 从列表里彻底消失，根本不会到这儿；能出现在列表里的 archived 只可能是衰减自动归档。
+    var isAutoArchived: Bool { type == "archived" }
 }
 
 /// 详情：{id, metadata:{...}, content, display_content}。
@@ -49,13 +53,30 @@ struct MemoryEdit: Encodable {
     var resolved: Bool? = nil
 }
 
-/// 排序两档，单击切换（服务端排：created_desc / score）。
-enum MemorySort: String {
-    case created  = "created"    // 最新创建（默认）
-    case activity = "activity"   // 活跃度分
-    var label: String { self == .created ? "最新创建" : "活跃度分" }
-    var icon: String { self == .created ? "calendar" : "waveform.path.ecg" }
-    mutating func toggle() { self = self == .created ? .activity : .created }
+/// 三档视图（菜单里选）：最新创建 / 活跃度分——都只看活跃记忆；自动归档——衰减引擎自己
+/// 搬进档案的老记忆。**和手动归档（＝真删除、盖 deleted_at、从列表彻底消失）区分开**：
+/// 这一栏只是把淡出的老记忆单列出来给你回看，不是垃圾桶。
+enum MemorySort: String, CaseIterable, Identifiable {
+    case created      = "created"      // 最新创建（默认）
+    case activity     = "activity"     // 活跃度分
+    case autoArchived = "autoarchive"  // 自动归档（客户端按 type=archived 过滤，非服务端排序）
+    var id: String { rawValue }
+    var label: String {
+        switch self {
+        case .created:      return "最新创建"
+        case .activity:     return "活跃度分"
+        case .autoArchived: return "自动归档"
+        }
+    }
+    var icon: String {
+        switch self {
+        case .created:      return "calendar"
+        case .activity:     return "waveform.path.ecg"
+        case .autoArchived: return "archivebox"
+        }
+    }
+    /// 传服务端的排序参数。自动归档没有对应的服务端排序——用 created 拉全量，再客户端筛 archived。
+    var serverSort: String { self == .activity ? "activity" : "created" }
 }
 
 /// epoch 毫秒 → 北京时间显示串。
@@ -71,7 +92,7 @@ private func beijingStamp(_ ms: Int64?) -> String? {
 
 extension ChatService {
     func getMemories(sort: MemorySort) async throws -> [MemoryItem] {
-        let data = try await perform(authedRequest("GET", "/memories?sort=\(sort.rawValue)"))
+        let data = try await perform(authedRequest("GET", "/memories?sort=\(sort.serverSort)"))
         do { return try JSONDecoder().decode([MemoryItem].self, from: data) }
         catch { throw ChatServiceError.badResponse }
     }
@@ -132,12 +153,18 @@ struct MemoryPage: View {
         .refreshable { await reload() }
     }
 
-    /// 搜索行：左边排序切换按钮（单击翻转两档），右边搜索框（回车搜、清空回列表）。
+    /// 搜索行：左边视图菜单（最新创建/活跃度分/自动归档，三选一），右边搜索框（回车搜、清空回列表）。
     private var searchRow: some View {
         HStack(spacing: 10) {
-            Button {
-                sort.toggle()
-                if query.isEmpty { Task { await reload() } }
+            Menu {
+                ForEach(MemorySort.allCases) { s in
+                    Button {
+                        sort = s
+                        if query.isEmpty { Task { await reload() } }
+                    } label: {
+                        Label(s.label, systemImage: s.icon)
+                    }
+                }
             } label: {
                 Label(sort.label, systemImage: sort.icon)
                     .font(.footnote.weight(.medium))
@@ -170,13 +197,12 @@ struct MemoryPage: View {
         } else if let errorText {
             ContentUnavailableView("读不到记忆", systemImage: "exclamationmark.triangle",
                                    description: Text(errorText))
-        } else if memories.isEmpty {
-            ContentUnavailableView(query.isEmpty ? "还没有长期记忆" : "没搜到",
-                                   systemImage: "brain",
-                                   description: Text(query.isEmpty ? "TA 还没往记忆里存东西。" : "换个词试试。"))
+        } else if shownMemories.isEmpty {
+            ContentUnavailableView(emptyTitle, systemImage: sort == .autoArchived ? "archivebox" : "brain",
+                                   description: Text(emptyHint))
         } else {
             List {
-                ForEach(memories) { m in
+                ForEach(shownMemories) { m in
                     // 直连 NavigationLink：value-based 的 navigationDestination 声明在
                     // 已被 push 的页面里不触发（真机实测点了没反应），直给 destination 稳
                     NavigationLink {
@@ -187,23 +213,48 @@ struct MemoryPage: View {
                         MemoryRow(item: m, sort: sort)
                     }
                     .swipeActions(edge: .trailing) {
-                        // 归档：真正让它从列表/搜索/回忆里消失（红键）。
-                        Button(role: .destructive) {
-                            Task { try? await service.archiveMemory(id: m.id); await reload() }
-                        } label: { Label("归档", systemImage: "archivebox") }
-                        // 遗忘/取消遗忘：toggle，按钮文案本身就是当前状态（灰键，非破坏性）。
-                        Button {
-                            Task { try? await service.forgetMemory(id: m.id); await reload() }
-                        } label: {
-                            Label(m.dont_surface == true ? "取消遗忘" : "遗忘",
-                                  systemImage: m.dont_surface == true ? "eye" : "eye.slash")
+                        if sort == .autoArchived {
+                            // 自动归档栏只给「删除」＝真移走（盖 deleted_at，仍可 Ombre 侧 restore）。
+                            // 不给「遗忘」——归档桶上改 dont_surface 服务端会失败（500）。
+                            Button(role: .destructive) {
+                                Task { try? await service.archiveMemory(id: m.id); await reload() }
+                            } label: { Label("删除", systemImage: "trash") }
+                        } else {
+                            // 归档：真正让它从列表/搜索/回忆里消失（红键）。
+                            Button(role: .destructive) {
+                                Task { try? await service.archiveMemory(id: m.id); await reload() }
+                            } label: { Label("归档", systemImage: "archivebox") }
+                            // 遗忘/取消遗忘：toggle，按钮文案本身就是当前状态（灰键，非破坏性）。
+                            Button {
+                                Task { try? await service.forgetMemory(id: m.id); await reload() }
+                            } label: {
+                                Label(m.dont_surface == true ? "取消遗忘" : "遗忘",
+                                      systemImage: m.dont_surface == true ? "eye" : "eye.slash")
+                            }
+                            .tint(.gray)
                         }
-                        .tint(.gray)
                     }
                 }
             }
             .listStyle(.plain)
         }
+    }
+
+    /// 实际展示的列表：搜索时原样（搜的是活跃记忆，Ombre 不返回归档）；否则按视图分栏——
+    /// 自动归档栏只留 type=archived，另两栏把它们排除掉（主列表只看活跃记忆）。
+    private var shownMemories: [MemoryItem] {
+        guard query.isEmpty else { return memories }
+        return sort == .autoArchived ? memories.filter { $0.isAutoArchived }
+                                     : memories.filter { !$0.isAutoArchived }
+    }
+
+    private var emptyTitle: String {
+        if !query.isEmpty { return "没搜到" }
+        return sort == .autoArchived ? "没有自动归档的记忆" : "还没有长期记忆"
+    }
+    private var emptyHint: String {
+        if !query.isEmpty { return "换个词试试。" }
+        return sort == .autoArchived ? "淡出的老记忆会出现在这里。" : "TA 还没往记忆里存东西。"
     }
 
     private func reload() async {
