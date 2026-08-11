@@ -15,6 +15,7 @@ import json
 import re
 import secrets
 import subprocess
+import sys
 import threading
 import time
 import uuid
@@ -87,6 +88,8 @@ async def _lifespan(_app: FastAPI):
         tasks.append(asyncio.create_task(wake.scheduler_loop()))
     if config.CODE_MODE_ENABLED:
         tasks.append(asyncio.create_task(_code_dialog_watchdog()))
+    if config.GAME_MODE_ENABLED:
+        tasks.append(asyncio.create_task(_game_watchdog()))
     threading.Thread(target=_browser_keeper_watchdog, daemon=True,
                      name="browser-keeper-watchdog").start()
     threading.Thread(target=_mail_watcher, daemon=True, name="mail-watcher").start()
@@ -109,6 +112,14 @@ async def _limit_body(request, call_next):
         from fastapi.responses import JSONResponse
         return JSONResponse({"detail": "请求体太大（上限 64MB）"}, status_code=413)
     return await call_next(request)
+
+
+@app.exception_handler(code_bridge.CodeModeOff)
+async def _code_mode_off(_request, exc):
+    # 会话路由对 code/game 两个档案通用，具体开关在 code_bridge.require_enabled 里判——
+    # 它抛的异常统一转 503，语义和以前的 _require_code 一致。
+    from fastapi.responses import JSONResponse
+    return JSONResponse({"detail": str(exc)}, status_code=503)
 
 
 def verify_auth(x_auth: Optional[str]) -> None:
@@ -709,8 +720,10 @@ _code_bark_state: dict = {"last": 0.0}
 
 
 def _require_code() -> None:
-    """code 模式没在 .env 打开 → 503（app 据此不显示入口）。"""
-    if not config.CODE_MODE_ENABLED:
+    """会话类路由的门槛。game 剧情会话复用 /code/* 整排路由（终端页/发话/弹窗按钮），
+    所以两个模式开任一个都放行——具体这次会话是哪个档案、该受哪个开关管，由
+    code_bridge.require_enabled(active_profile) 在真正动会话时把关。"""
+    if not (config.CODE_MODE_ENABLED or config.GAME_MODE_ENABLED):
         raise HTTPException(status_code=503,
                             detail="Code 模式没开：在 server/.env 里设 CODE_MODE_ENABLED=1 再重启后端")
 
@@ -751,11 +764,15 @@ def code_status(busy: int = 0, x_auth: Optional[str] = Header(default=None, alia
     busy=1 时额外探一下"TA 在不在干活"（退出模式前问一句用）。这个探测要花 0.6 秒
     比对两帧画面，所以默认不做——回前台对齐是高频调用，不该为它等。"""
     verify_auth(x_auth)
-    if not config.CODE_MODE_ENABLED:
-        return {"enabled": False, "alive": False, "tmux": False, "cwd": "", "busy": False}
-    return {"enabled": True, "alive": code_bridge.session_alive(),
+    if not (config.CODE_MODE_ENABLED or config.GAME_MODE_ENABLED):
+        return {"enabled": False, "alive": False, "tmux": False, "cwd": "", "busy": False,
+                "profile": "code"}
+    # enabled 维持「code 模式开没开」的老语义（app 靠它显示 Code 入口）；
+    # game 会话复用同一排路由，靠 profile 字段区分（app 的 game 页用）。
+    return {"enabled": config.CODE_MODE_ENABLED, "alive": code_bridge.session_alive(),
             "tmux": code_bridge.tmux_available(), "cwd": config.CODE_CWD,
-            "busy": bool(busy) and code_bridge.is_busy()}
+            "busy": bool(busy) and code_bridge.is_busy(),
+            "profile": code_bridge.active_profile()}
 
 
 @app.post("/code/start")
@@ -835,7 +852,11 @@ def code_send(inp: CodeSendIn, x_auth: Optional[str] = Header(default=None, alia
 def code_stop(x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
     verify_auth(x_auth)
     _require_code()
-    return code_bridge.stop()
+    r = code_bridge.stop()
+    # 剧情会话收摊要把模拟器使用权还回去，不然任务引擎永远派不了单。
+    # code 档案下这是个空操作（锁本来就不是 story 的）。
+    game_bridge.release_lock("story")
+    return r
 
 
 @app.get("/code/capture")
@@ -1189,6 +1210,141 @@ def game_tasks_stop(x_auth: Optional[str] = Header(default=None, alias="X-Auth")
     verify_auth(x_auth)
     _require_game()
     return game_bridge.stop_tasks()
+
+
+# ---------- 剧情会话（game-story 插件）----------
+# 借 code_bridge 的 game 档案起常驻会话：TA 本人在里面盲操读剧情（截图→坐标→点按）。
+# 终端页/发话/弹窗按钮全复用 /code/* 那排路由（它们打的是「当前活着的会话」）。
+
+GAME_SESSION_TOOLS = [f"mcp__game__{t}" for t in (
+    "game_look", "game_tap", "game_swipe", "game_back",
+    "game_launch", "game_close", "game_quit",
+    "game_notes_read", "game_notes_write")]
+
+_GAME_CTX_CAVEAT = (
+    "\n【关于上面这些对话】里面凡是关于游戏进度/剧情/界面的具体说法，都是你在聊天里"
+    "**看不到画面、翻不了笔记本**的情况下说的，当没核实过的印象就行。以你现在翻到的"
+    "剧情本和屏幕上真实的画面为准，对不上就以眼前的为准。\n"
+)
+
+
+class GameStoryStartIn(BaseModel):
+    task: str = ""
+
+
+def _game_session_mcp_config():
+    """把 game-story 插件的会话侧 MCP（game_session_mcp.py）渲染成 mcp-config 文件。
+    插件没装返回 None（路由报有声错误，别静默起一个没有游戏工具的会话）。"""
+    entry = plugins.PLUGINS_DIR / "game-story" / "game_session_mcp.py"
+    if not entry.is_file():
+        return None
+    path = state_store.STATE_DIR / "game_session.mcp.json"
+    state_store._write_json(path, {"mcpServers": {
+        "game": {"type": "stdio", "command": sys.executable, "args": [str(entry)]}}})
+    return path
+
+
+@app.post("/game/story/start")
+def game_story_start(inp: GameStoryStartIn,
+                     x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
+    """聊天里 TA 自己调 game_start 切去玩游戏（装了 game-story 插件才有这个能力）。
+    上下文口径照 codemode_start：recent_window + 在飞正文；task 原样回显进聊天。"""
+    verify_auth(x_auth)
+    _require_game()
+    if code_bridge.session_alive():
+        return {"ok": False, "error": "已经有一个会话开着（code 或游戏），先收摊再切"}
+    cfg = _game_session_mcp_config()
+    if cfg is None:
+        return {"ok": False, "error": "game-story 插件没装好（找不到会话侧工具文件）"}
+    holder = game_bridge.acquire_lock("story")
+    if holder:
+        return {"ok": False, "error": "任务引擎正在用模拟器跑日常，等它跑完再玩（task_status 可看进度）"}
+    task = (inp.task or "").strip()
+    window = state_store.read_recent_window()
+    conv = [{"ts": w.get("ts"), "role": w.get("role"), "text": w.get("text", "")}
+            for w in window][-CODE_HISTORY_CAP:]
+    live = pipeline.strip_markers(state_store.get_live_reply()).strip()
+    if live:
+        conv.append({"ts": int(time.time()), "role": "assistant", "text": live})
+    u = config.user_name()
+    scene = (f"【场景】刚才在聊天里说好了你去玩游戏，你自己调 game_start 切过来了——还是你，"
+             "现在这个会话里你手上有模拟器里的游戏（game_* 工具 + 你的记忆；没有电脑，"
+             f"读不了文件也跑不了命令）。这个会话是常驻的：{u}随时会插话，"
+             "你说的每段话都实时回到 TA 的聊天气泡里。")
+    timeline = pipeline.build_context_timeline(conv, reflect_limit=5) if conv else "（还没聊过什么）"
+    tail = (f"\n【这次去干什么】\n〔现在是 {pipeline.now_str()}〕\n{task}\n"
+            f"〔这段是你在聊天里自己说的打算，已经原样回显给{u}了，说歪了 TA 会来纠正。〕"
+            if task else
+            f"\n〔现在是 {pipeline.now_str()}〕先 game_notes_read 翻翻剧情本看看上次到哪了，"
+            "想看什么自己挑。")
+    context = scene + "\n\n【下面是你们刚才的对话】\n" + timeline + _GAME_CTX_CAVEAT + tail
+    mcp = ([str(pipeline._ombre_mcp_config())] if pipeline.ombre_alive() else []) + [str(cfg)]
+    tools = (pipeline.OMBRE_TOOLS if pipeline.ombre_alive() else []) + GAME_SESSION_TOOLS
+    r = code_bridge.start(context, config.AUTH_KEY, mcp_configs=mcp,
+                          profile="game", tools=tools)
+    if not r.get("ok"):
+        game_bridge.release_lock("story")
+        return r
+    logerr(f"切游戏剧情会话：{task[:80] if task else '(自己安排)'}")
+    if task:
+        try:
+            state_store.outbox_append({"id": uuid.uuid4().hex[:12], "ts": int(time.time()),
+                                       "text": f"〔去玩游戏了，说好的是〕\n\n{task}",
+                                       "sticker_ids": [], "delivered": False, "origin": "game"})
+        except Exception as e:
+            logerr(f"game task 回显失败: {e}")
+    return r
+
+
+# 剧情会话看守（只对 game 档案）：画面 20 分钟没变自动收摊；TA 停着等人 5 分钟 Bark
+# 提醒一次；每玩 90 分钟往会话里递一句提醒。哈希包含机主发进去的消息——「没变」= 两边
+# 都没动。code 档案绝不适用这套：写代码停下来常常是在等回话，按「没动静」杀会毁活。
+GAME_IDLE_STOP_SEC = 20 * 60
+GAME_WAIT_NUDGE_SEC = 5 * 60
+GAME_SOFT_REMIND_SEC = 90 * 60
+
+
+async def _game_watchdog() -> None:
+    st = {"hash": None, "changed": 0.0, "nudged": False, "reminded": 0.0}
+    while True:
+        try:
+            await asyncio.sleep(60)
+            if code_bridge.active_profile() != "game" or not code_bridge.session_alive():
+                if game_bridge.lock_owner() == "story":
+                    game_bridge.release_lock("story")   # 会话没了别让锁悬着
+                st.update(hash=None, nudged=False, reminded=0.0)
+                continue
+            frame = code_bridge.capture().get("content", "")
+            h = hash(frame)
+            now = time.time()
+            if h != st["hash"]:
+                st.update(hash=h, changed=now, nudged=False)
+            else:
+                idle = now - st["changed"]
+                if idle > GAME_IDLE_STOP_SEC:
+                    code_bridge.stop()
+                    game_bridge.release_lock("story")
+                    bark_push("游戏会话 20 分钟没动静，替 TA 收摊了")
+                    st.update(hash=None, nudged=False, reminded=0.0)
+                    continue
+                if idle > GAME_WAIT_NUDGE_SEC and not st["nudged"]:
+                    try:
+                        busy = code_bridge.is_busy()
+                    except Exception:
+                        busy = True   # 探不出来就当在忙，别瞎推
+                    if not busy:
+                        st["nudged"] = True
+                        bark_push(f"{config.agent_name()} 在游戏会话里停着等你回话")
+            started = code_bridge.session_started_at()
+            base = max(started, st["reminded"] or started)
+            if started and now - base > GAME_SOFT_REMIND_SEC:
+                st["reminded"] = now
+                code_bridge.send(f"〔系统提醒，不是{config.user_name()}说的〕"
+                                 "玩挺久了——看看要不要收一收，剧情本记了没。")
+        except asyncio.CancelledError:
+            return
+        except Exception as e:
+            logerr(f"game 看守失败（下一拍继续）: {e}")
 
 
 @app.get("/game/notes/{book}")

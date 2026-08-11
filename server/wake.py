@@ -82,18 +82,23 @@ def code_session_block(forced: bool) -> str:
     if not code_session_open():
         return ""
     u = config.user_name()
+    # game 档案借的是同一套会话基建：措辞跟着档案走，别对着游戏会话说「电脑上的 code 会话」。
+    is_game = code_bridge.active_profile() == "game"
+    kind = "游戏" if is_game else "code"
     # 这儿值得花 is_busy() 那 0.8 秒：硬触发的醒来很稀罕，而"正跑着活"和"停着等人"
     # 该说的话完全不一样。探不出来就含糊带过，别瞎猜一个状态给他。
     try:
-        state = "你正在那边跑一个活" if code_bridge.is_busy() else "你停在那边、等着 TA 说话"
+        busy = code_bridge.is_busy()
+        state = ("你正玩着呢" if is_game else "你正在那边跑一个活") if busy \
+            else "你停在那边、等着 TA 说话"
     except Exception:
         state = "你人在那边"
     why = ("这次不是随机醒来——是有件到点必须说的事把你叫起来的。" if forced
            else "（按理说这会儿你不该被随机醒来打断，出现这句说明有别的东西叫醒了你。）")
-    return (f"\n【注意：你此刻在{u}的电脑上开着一个 code 会话，{state}。{why}\n"
-            f"你在这里说的话、和你在 code 会话里说的话，进的是**同一个聊天框**——"
+    return (f"\n【注意：你此刻开着一个{kind}会话，{state}。{why}\n"
+            f"你在这里说的话、和你在{kind}会话里说的话，进的是**同一个聊天框**——"
             f"那边刚说过的别再说一遍，也别跟那边的话打架。\n"
-            f"另外这次醒来你手上没有电脑工具（那是 code 会话那边的事），只能说话。】\n")
+            f"另外这次醒来你手上没有那边的工具，只能说话。】\n")
 
 
 # ---------- 时段 ----------

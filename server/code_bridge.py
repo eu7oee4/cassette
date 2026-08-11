@@ -19,6 +19,7 @@ Code 模式桥：管一个 tmux 会话里常驻的交互式 claude——起停�
   --add-dir 都是 variadic（吃多个值），谁排最后就会把后面那个位置参数（context 展开
   的几万字）当成又一个值吞掉 → ENAMETOOLONG，会话根本起不来。
 """
+import json
 import os
 import re
 import shutil
@@ -65,13 +66,63 @@ def _find_tmux() -> str:
 TMUX = _find_tmux()
 SESSION = config.CODE_SESSION
 
+# ---------- 档案（profile）----------
+# 一张桌子两种坐法：code=写代码（内置工具全开、cwd 在代码仓）；game=剧情会话（工具白名单
+# 收窄到纯 game/记忆 MCP，cwd 是一块**故意留空的干净地板**——放在代码仓底下会继承那儿的
+# CLAUDE.md，TA 一睁眼就串台）。同一时刻只有一个会话活着（start 先杀光所有档案）：
+# 只有一个 TA，「一边写代码一边打游戏」在这儿是物理保证不是自觉。
+#
+# ⚠️ game 的 cwd 第一次用之前，机主要手动在那个目录里跑一次 claude 把「信任此文件夹」
+# 按掉——那个确认框会吃掉启动命令行尾部的东西，会话起来了但 TA 不知道自己为什么在这儿。
+GAME_CWD = os.path.expanduser(os.environ.get("GAME_STORY_CWD", "~/cassette-game"))
+
+PROFILES = {
+    "code": {"session": config.CODE_SESSION},
+    "game": {"session": os.environ.get("GAME_SESSION", "").strip() or "cassette-game",
+             "cwd": GAME_CWD},
+}
+
+# 当前活着的是哪个档案：**刻意落盘不放内存**——后端重启不该让「TA 在哪儿、玩了多久」归零
+# （看守和 wake 避让都靠它）。
+SESSION_STATE_PATH = CODE_DIR / "session.json"
+
+
+def _read_session_state() -> dict:
+    try:
+        return json.loads(SESSION_STATE_PATH.read_text("utf-8"))
+    except Exception:
+        return {}
+
+
+def _write_session_state(d: dict) -> None:
+    _write_atomic(SESSION_STATE_PATH, json.dumps(d, ensure_ascii=False, indent=2))
+
+
+def active_profile() -> str:
+    p = _read_session_state().get("profile")
+    return p if p in PROFILES else "code"
+
+
+def _session() -> str:
+    """当前档案的 tmux 会话名。所有会话操作（send/capture/keys/杀）都打到它头上——
+    /code/* 那排路由因此对两个档案通用，终端页和弹窗按钮不用写第二份。"""
+    return PROFILES[active_profile()]["session"]
+
+
+def session_started_at() -> int:
+    return int(_read_session_state().get("started_at") or 0)
+
 
 class CodeModeOff(Exception):
-    """code 模式没在 .env 里打开。路由层转成 503。"""
+    """对应模式没在 .env 里打开。路由层转成 503。"""
 
 
-def require_enabled() -> None:
-    if not config.CODE_MODE_ENABLED:
+def require_enabled(profile: Optional[str] = None) -> None:
+    p = profile or active_profile()
+    if p == "game":
+        if not config.GAME_MODE_ENABLED:
+            raise CodeModeOff("game 模式没开：在 server/.env 里设 GAME_MODE_ENABLED=1 再重启后端")
+    elif not config.CODE_MODE_ENABLED:
         raise CodeModeOff("Code 模式没开：在 server/.env 里设 CODE_MODE_ENABLED=1 再重启后端")
 
 
@@ -110,9 +161,9 @@ def session_alive() -> bool:
     「会话占用中」永久挡住，send 还会把消息糊到 shell 提示符上。判据用"pane 的 shell 还
     有没有子进程"——比 pane_current_command 稳（claude 跑 Bash 工具时前台命令名会变，
     子进程一直在）。"""
-    if _tmux("has-session", "-t", SESSION).returncode != 0:
+    if _tmux("has-session", "-t", _session()).returncode != 0:
         return False
-    r = _tmux("list-panes", "-t", SESSION, "-F", "#{pane_pid}")
+    r = _tmux("list-panes", "-t", _session(), "-F", "#{pane_pid}")
     pid = (r.stdout or "").strip().splitlines()
     if r.returncode != 0 or not pid:
         return False
@@ -130,12 +181,21 @@ def _write_atomic(path: Path, text: str) -> None:
     tmp.replace(path)
 
 
-def _build_system() -> str:
-    """人设 + code 守则，拼成本次会话的 --append-system-prompt。
+def _build_system(profile: str = "code") -> str:
+    """人设 + 守则，拼成本次会话的 --append-system-prompt。
     顺序有意：守则在后——它要压得住人设里"说话简短"之类的调子（简短是说话风格，
-    不是干活深度）。人设里的 {{AGENT_NAME}}/{{USER_NAME}} 占位符照聊天那边一起渲染。"""
+    不是干活深度）。人设里的 {{AGENT_NAME}}/{{USER_NAME}} 占位符照聊天那边一起渲染。
+
+    game 档案再往后接插件带的出厂纪律（story_discipline.md）：主仓 addendum 管通用守则，
+    游戏专属的机制事实/坐标小抄跟着插件发版走，改纪律不用动主仓。"""
+    files = [config.PERSONA_PATH]
+    if profile == "game":
+        files.append(config.game_addendum_path())
+        files.append(BASE / "plugins" / "game-story" / "prompts" / "story_discipline.md")
+    else:
+        files.append(config.code_addendum_path())
     parts = []
-    for p in (config.PERSONA_PATH, config.code_addendum_path()):
+    for p in files:
         try:
             parts.append(p.read_text("utf-8"))
         except Exception:
@@ -165,33 +225,69 @@ def _shq(s: str) -> str:
     return "'" + str(s).replace("'", "'\\''") + "'"
 
 
+def _wait_mcp_ready(hint: str = "game_session_mcp", timeout: int = 30) -> bool:
+    """等 MCP stdio 子进程在进程表里出现（= claude 起完、工具注册上了）。
+
+    game 档案的第一条上下文必须等这个再 paste：MCP 是异步连的，走命令行位置参数会让
+    第一轮请求里**一个工具都没有**——TA 只能把想调的工具按 JSON 写成文本吐出来然后
+    end_turn，整个会话坐死（实机踩过一整晚）。code 档案有内置工具兜着，不用等。"""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            r = subprocess.run(["pgrep", "-f", hint], capture_output=True,
+                               text=True, timeout=5)
+            if r.returncode == 0 and r.stdout.strip():
+                time.sleep(1.0)   # 进程在了再给注册留一拍
+                return True
+        except Exception:
+            pass
+        time.sleep(0.8)
+    return False
+
+
 def start(context_text: str, auth_key: str, cwd: Optional[str] = None,
-          mcp_configs: Optional[list] = None) -> dict:
+          mcp_configs: Optional[list] = None, profile: str = "code",
+          tools: Optional[list] = None) -> dict:
     """杀旧起新 + 注入上下文（每次切入都是干净会话，无漂移、确定性）。
 
     退出模式时会话会被杀掉（app 那边调 /code/stop）——这样「会话活着 = 模式开着」是条
     干净的不变量，app 回前台就靠它对齐、也靠它发现 TA 自己切了进来。代价是正在跑的活会
-    被停掉，所以 app 在退出前会探一下 is_busy()、正干着活就先问一句。"""
-    require_enabled()
+    被停掉，所以 app 在退出前会探一下 is_busy()、正干着活就先问一句。
+
+    profile 见 PROFILES。tools 给了就 --strict-mcp-config + 双写白名单（game 档案用：
+    会话手上只有列出来的 MCP 工具，Bash/Write/Edit 物理上碰不到）。
+    上下文注入分两条路：code 走命令行位置参数（一起送，简单）；game 起裸会话等
+    _wait_mcp_ready 再 paste（原因见那儿）。"""
+    require_enabled(profile)
     if not tmux_available():
         return {"ok": False, "error": "找不到 tmux（brew install tmux）"}
-    try:
-        workdir = resolve_cwd(cwd)
-    except PermissionError as e:
-        return {"ok": False, "error": str(e)}
-    if not os.path.isdir(workdir):
-        return {"ok": False, "error": f"工作目录不存在：{workdir}"}
+    prof = PROFILES[profile]
+    if profile == "game":
+        workdir = prof["cwd"]
+        if not os.path.isdir(workdir):
+            return {"ok": False, "error":
+                    f"游戏会话的工作目录不存在：{workdir}——mkdir 之后先手动在里面跑一次 "
+                    "claude 把「信任此文件夹」按掉（那个确认框会吃掉启动参数）"}
+    else:
+        try:
+            workdir = resolve_cwd(cwd)
+        except PermissionError as e:
+            return {"ok": False, "error": str(e)}
+        if not os.path.isdir(workdir):
+            return {"ok": False, "error": f"工作目录不存在：{workdir}"}
 
-    _tmux("kill-session", "-t", SESSION)
+    for p in PROFILES.values():
+        _tmux("kill-session", "-t", p["session"])
+    session = prof["session"]
     # context / system 写文件再由 shell 展开：几万字的历史用 send-keys 直塞必然撕裂。
     _write_atomic(CONTEXT_PATH, context_text)
-    _write_atomic(SYSTEM_PATH, _build_system())
+    _write_atomic(SYSTEM_PATH, _build_system(profile))
     UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
     # 上报地址/密钥用 new-session -e 传（hook 由 claude 起，env 一路继承下来）。
     # ⚠️ 别改回 send-keys 敲 `export ...`：那等于把密钥打进一个交互式 shell，zsh 会把它
     # 原样写进 ~/.zsh_history。-e 是直接给会话环境，不经过 shell。
-    r = _tmux("new-session", "-d", "-s", SESSION, "-c", workdir,
+    r = _tmux("new-session", "-d", "-s", session, "-c", workdir,
               "-x", str(PANE_WIDTH), "-y", str(PANE_HEIGHT),
               "-e", f"CASSETTE_BACKEND_URL={config.BACKEND_URL}",
               "-e", f"CASSETTE_AUTH_KEY={auth_key}")
@@ -205,13 +301,28 @@ def start(context_text: str, auth_key: str, cwd: Optional[str] = None,
     settings = _hook_settings()
     if settings:
         cmd += f" --settings {_shq(settings)}"
-    # 图片落在 state/code_uploads/，工作目录多半不包含它 → 显式给访问权，不然他 Read 不到。
-    cmd += f" --add-dir {_shq(UPLOAD_DIR)}"
+    if profile == "code":
+        # 图片落在 state/code_uploads/，工作目录多半不包含它 → 显式给访问权。
+        cmd += f" --add-dir {_shq(UPLOAD_DIR)}"
+    if tools:
+        tl = ",".join(tools)
+        cmd += f" --strict-mcp-config --tools {_shq(tl)} --allowedTools {_shq(tl)}"
     # ⚠️ 结尾必须是只吃一个值的 --append-system-prompt，位置参数（context）才落得对位。
-    cmd += (f' --append-system-prompt "$(cat {_shq(SYSTEM_PATH)})"'
-            f' "$(cat {_shq(CONTEXT_PATH)})"')
-    _tmux("send-keys", "-t", SESSION, cmd, "Enter")
-    return {"ok": True, "session": SESSION, "cwd": workdir}
+    cmd += f' --append-system-prompt "$(cat {_shq(SYSTEM_PATH)})"'
+    if profile == "code":
+        cmd += f' "$(cat {_shq(CONTEXT_PATH)})"'
+    _tmux("send-keys", "-t", session, cmd, "Enter")
+    _write_session_state({"profile": profile, "session": session,
+                          "started_at": int(time.time())})
+    if profile == "game":
+        ready = _wait_mcp_ready()
+        r2 = send(context_text)
+        if not r2.get("ok"):
+            return {"ok": False, "error": f"上下文注入失败：{r2.get('error', '')}"}
+        if not ready:
+            return {"ok": True, "session": session, "cwd": workdir,
+                    "warn": "MCP 迟迟没就绪，上下文已注入但第一轮可能缺工具"}
+    return {"ok": True, "session": session, "cwd": workdir}
 
 
 # ---------- 确认弹窗 ----------
@@ -291,7 +402,7 @@ def _screen(text: Optional[str] = None) -> list:
 
     掐末尾是必须的：弹窗在场时状态栏不画，pane 底下会空出几行，不掐就找不到页脚。"""
     if text is None:
-        r = _tmux("capture-pane", "-t", SESSION, "-p")
+        r = _tmux("capture-pane", "-t", _session(), "-p")
         text = r.stdout if r.returncode == 0 else ""
     return (text or "").rstrip().splitlines()
 
@@ -402,7 +513,7 @@ def dialog_options(screen_text: Optional[str] = None) -> list:
 # ---------- 发消息 / 按键 / 抓画面 ----------
 def _input_box() -> Optional[list]:
     """输入框那一格的内容（TUI 里最后两条横线之间那块）。认不出来就返回 None。"""
-    r = _tmux("capture-pane", "-t", SESSION, "-p")
+    r = _tmux("capture-pane", "-t", _session(), "-p")
     if r.returncode != 0:
         return None
     lines = [ln.rstrip() for ln in r.stdout.splitlines()]
@@ -441,7 +552,7 @@ def _clear_input(max_rounds: int = 12) -> None:
             # 抓屏看着和真内容一模一样，但它不是真内容，C-u 删不动，也不会被带进消息里。
             return
         prev = cur
-        _tmux("send-keys", "-t", SESSION, *(["C-u"] * 40))
+        _tmux("send-keys", "-t", _session(), *(["C-u"] * 40))
         time.sleep(0.05)
 
 
@@ -456,7 +567,7 @@ def send(text: str) -> dict:
     _clear_input()
     _tmux("set-buffer", "-b", "cassette-code", text)
     # -p = bracketed paste。没有它，缓冲区里的换行就是回车，整条消息会被切成好几条提交。
-    r = _tmux("paste-buffer", "-b", "cassette-code", "-p", "-d", "-t", SESSION)
+    r = _tmux("paste-buffer", "-b", "cassette-code", "-p", "-d", "-t", _session())
     if r.returncode != 0:
         return {"ok": False, "error": f"paste 失败：{r.stderr[:200]}"}
     time.sleep(0.2)
@@ -467,7 +578,7 @@ def send(text: str) -> dict:
     if dialog_pending():
         return {"ok": False, "dialog": True,
                 "error": "刚要提交时弹窗冒了出来，这条没发出去——先按掉弹窗再发一次"}
-    _tmux("send-keys", "-t", SESSION, "Enter")   # 这才是唯一的提交动作
+    _tmux("send-keys", "-t", _session(), "Enter")   # 这才是唯一的提交动作
     return {"ok": True}
 
 
@@ -482,9 +593,9 @@ def send_keys(keys: str) -> dict:
     if not session_alive():
         return {"ok": False, "error": "会话不在"}
     if keys in _NAMED_KEYS:
-        r = _tmux("send-keys", "-t", SESSION, keys)
+        r = _tmux("send-keys", "-t", _session(), keys)
     else:
-        r = _tmux("send-keys", "-t", SESSION, "-l", keys)
+        r = _tmux("send-keys", "-t", _session(), "-l", keys)
     return {"ok": r.returncode == 0}
 
 
@@ -497,7 +608,7 @@ def capture(lines: int = PANE_HEIGHT) -> dict:
     **只抓一次**：画面和弹窗选项都从这一份里解析。以前分两次抓（还各带一次探活），
     面板 1.2 秒轮一回就是五个子进程，而且两次抓的还是两个不同时刻的画面。"""
     require_enabled()
-    r = _tmux("capture-pane", "-t", SESSION, "-p")
+    r = _tmux("capture-pane", "-t", _session(), "-p")
     if r.returncode != 0 or not session_alive():
         return {"ok": False, "alive": False, "content": "", "dialog": []}
     lines = max(20, min(int(lines or PANE_HEIGHT), PANE_HEIGHT))
@@ -539,7 +650,7 @@ def is_busy() -> bool:
         return False
 
     def frame() -> str:
-        return _tmux("capture-pane", "-t", SESSION, "-p").stdout or ""
+        return _tmux("capture-pane", "-t", _session(), "-p").stdout or ""
 
     first = frame()
     time.sleep(0.8)
@@ -547,7 +658,10 @@ def is_busy() -> bool:
 
 
 def stop() -> dict:
-    _tmux("kill-session", "-t", SESSION)
+    # 杀光所有档案的会话，不只当前的：session.json 万一和现实脱节（手动开过、状态文件
+    # 写坏），照名单全杀才能保住「stop 之后必然没有会话」的不变量。
+    for p in PROFILES.values():
+        _tmux("kill-session", "-t", p["session"])
     return {"ok": True, "alive": session_alive()}
 
 

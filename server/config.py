@@ -79,6 +79,15 @@ def code_addendum_path() -> Path:
     p = BASE_DIR / _CODE_ADDENDUM_FILE
     return p if p.exists() else BASE_DIR / "code_addendum.example.md"
 
+
+# game 剧情会话的守则文件（通用守则；游戏专属纪律在 game-story 插件的 prompts/ 里）。
+_GAME_ADDENDUM_FILE = os.environ.get("GAME_ADDENDUM_FILE", "game_addendum.md")
+
+
+def game_addendum_path() -> Path:
+    p = BASE_DIR / _GAME_ADDENDUM_FILE
+    return p if p.exists() else BASE_DIR / "game_addendum.example.md"
+
 # 后端自己的地址：给 MCP 插件（如 codemode 自切）回调用。插件是独立进程，够不着这里的
 # uvicorn 命令行参数，只能靠这个约定。改端口跑记得同步改这里。
 BACKEND_URL = os.environ.get("CASSETTE_BACKEND_URL", "http://127.0.0.1:8000").rstrip("/")
