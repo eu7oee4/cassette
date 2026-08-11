@@ -510,6 +510,12 @@ def _stored_from_tool_use(name: str, inp: dict) -> Optional[dict]:
         # 一条控制信号——app.py 的 finalize 会把它剥出去置 code_started，让 app 翻模式。
         # 不剥干净的话，app 那边对不认识的 tool 会兜底成「记住了一件事」的灰字（踩过）。
         return {"tool": "codemode", "text": (inp.get("task") or "").strip()}
+    if name.endswith("__task_run"):
+        # game-task 插件：派任务引擎去跑日常。灰字给个可核对的任务清单就够，
+        # 结果要等引擎跑完（Bark + task_log），不在这一轮里。
+        names = inp.get("names") or []
+        text = "、".join(str(n) for n in names) if isinstance(names, list) else str(names)
+        return {"tool": "gametask", "text": text} if text else None
     if name.endswith("__mail_send"):
         # 邮箱插件：寄信是对外动作，值得一条灰字 + 进心流日志。这里只看得到意图；
         # 「真发出了」还是「落草稿箱等机主确认」要看返回文案，on_user 里改判（mail_draft）。
@@ -530,7 +536,7 @@ def _stored_from_tool_use(name: str, inp: dict) -> Optional[dict]:
 
 # 会走 memory 灰字 / 进心流日志的 stored 类型。codemode 是控制信号不是产物；browse 有
 # 自己的聚合灰字和 browse_log，逐条进心流日志只会刷屏——都不进。
-NON_MEMORY_TOOLS = {"webpage", "codemode", "browse"}
+NON_MEMORY_TOOLS = {"webpage", "codemode", "browse", "gametask"}
 
 
 # ---------- 工具「调用结果」定案 ----------

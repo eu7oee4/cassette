@@ -1,0 +1,9 @@
+# game 模式的任务引擎依赖（默认不装；开通见 README 的 Game mode 一节）。
+# ⚠️ maafw 必须钉 5.0.5：5.1+ 换了 pipeline v5 语法，拒绝解析 MaaYuan 的任务资源。
+maafw==5.0.5
+opencv-python
+# 以下是 MaaYuan agent/（自定义识别/动作）的依赖——预装齐，它启动时的自检就装不动新东西
+loguru
+pandas
+openpyxl
+zhconv

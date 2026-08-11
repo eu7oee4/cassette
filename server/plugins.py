@@ -59,7 +59,9 @@ MCP_CONFIG_PATHS = {
 # codemode：一调就起一个手握整台电脑（Bash/Write/Edit）的常驻会话，权限弹窗只能靠人在
 # 手机上按。聊天里切过去是人当场要的；一次随机醒来自己切进去完全是另一回事。
 # mianmian 同口径（main_v2.py base_claude_args：「自切 code：只主 chat，wake 不挂」）。
-NO_WAKE_PLUGINS = {"codemode"}
+# game-story：同 codemode 的理由——game_start 起的是常驻剧情会话（另一个活着的进程），
+# 醒来自己切进去打游戏不是「主动性」该有的形状。
+NO_WAKE_PLUGINS = {"codemode", "game-story"}
 
 # 醒来那条路**默认不挂、但把开关交给用户**的插件（插件商店里该插件条目下的「醒来能用」）。
 # 三层口径：不在任何名单 = 醒来照挂；NO_WAKE_PLUGINS = 宿主硬禁，没有开关（作者和用户
@@ -70,7 +72,9 @@ NO_WAKE_PLUGINS = {"codemode"}
 #
 # ⚠️ 新插件默认落在「醒来照挂」那一档：不写进这里、也不写进 NO_WAKE_PLUGINS，
 # 等于醒来无条件有它，而且没有开关可关。要收就得显式写名字。
-WAKE_TOGGLEABLE = {"browser", "beacon", "mail"}
+# game-task：任务引擎是确定性脚本、不碰消耗，但「醒来发现体力满了自己去清日常」
+# 动的是机主的游戏账号——给不给这份自主，开关交机主。
+WAKE_TOGGLEABLE = {"browser", "beacon", "mail", "game-task"}
 WAKE_ENABLED_PATH = state_store.STATE_DIR / "plugins_wake_enabled.json"
 
 # 醒来那条路**插件照挂、但默认摘掉个别工具**——比上面两档更细的第四档（工具级）。

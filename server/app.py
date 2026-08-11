@@ -31,6 +31,7 @@ import urllib.parse
 import browser_keeper
 import code_bridge
 import config
+import game_bridge
 import mail_bridge
 import ombre_rest
 import plugins
@@ -1117,6 +1118,93 @@ def mail_draft_delete(draft_id: str, x_auth: Optional[str] = Header(default=None
         return mail_bridge.draft_delete(draft_id)
     except mail_bridge.MailError as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+
+# ---------- Game 模式（game_bridge：任务引擎 + 剧情会话的共用底座）----------
+# 急停/状态/笔记本不设 GAME_MODE 门槛（app 页面没开引擎也能看能编）；
+# 任务引擎三件（list/start/stop）没开一律 503，插件壳把 503 转成有声报错。
+
+
+class GamePauseIn(BaseModel):
+    paused: bool
+
+
+class GameTasksStartIn(BaseModel):
+    names: list[str]
+    options: dict[str, dict[str, str]] = {}   # {"任务名": {"选项名": "case 名"}}
+
+
+class GameNotesIn(BaseModel):
+    content: str
+
+
+def _require_game() -> None:
+    try:
+        game_bridge.require_enabled()
+    except game_bridge.GameModeOff as e:
+        raise HTTPException(status_code=503, detail=str(e))
+
+
+def _game_book(book: str) -> str:
+    if book not in game_bridge.NOTES_PATHS:
+        raise HTTPException(status_code=400, detail="笔记本只有 task / story 两本")
+    return book
+
+
+@app.get("/game")
+def game_status(x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
+    verify_auth(x_auth)
+    return game_bridge.status()
+
+
+@app.post("/game")
+def game_pause(inp: GamePauseIn, x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
+    """急停开关（app 顶栏 ⏸）。开着的时候：任务引擎跑完当前任务收手、不接新串；
+    剧情会话的操作类工具直接被拒。"""
+    verify_auth(x_auth)
+    game_bridge.set_paused(inp.paused)
+    return {"ok": True, "paused": game_bridge.paused()}
+
+
+@app.get("/game/tasks")
+def game_tasks_list(x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
+    verify_auth(x_auth)
+    _require_game()
+    if not game_bridge.resource_ready():
+        raise HTTPException(status_code=503,
+                            detail="任务资源没就绪：跑一遍 server/tools/fetch_maayuan.py")
+    return {"tasks": game_bridge.tasks_catalog()}
+
+
+@app.post("/game/tasks/start")
+def game_tasks_start(inp: GameTasksStartIn,
+                     x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
+    verify_auth(x_auth)
+    _require_game()
+    return game_bridge.start_tasks(inp.names, inp.options)
+
+
+@app.post("/game/tasks/stop")
+def game_tasks_stop(x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
+    verify_auth(x_auth)
+    _require_game()
+    return game_bridge.stop_tasks()
+
+
+@app.get("/game/notes/{book}")
+def game_notes_get(book: str, x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
+    verify_auth(x_auth)
+    return {"book": book, "content": game_bridge.read_notes(_game_book(book))}
+
+
+@app.post("/game/notes/{book}")
+def game_notes_post(book: str, inp: GameNotesIn,
+                    x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
+    verify_auth(x_auth)
+    err = game_bridge.write_notes(_game_book(book), inp.content)
+    if err:
+        raise HTTPException(status_code=400, detail=err)
+    return {"ok": True}
 
 
 # ---------- 网页（webpage 插件的产物）----------

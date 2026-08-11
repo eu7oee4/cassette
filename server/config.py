@@ -83,6 +83,11 @@ def code_addendum_path() -> Path:
 # uvicorn 命令行参数，只能靠这个约定。改端口跑记得同步改这里。
 BACKEND_URL = os.environ.get("CASSETTE_BACKEND_URL", "http://127.0.0.1:8000").rstrip("/")
 
+# ---------- Game 模式（MuMu 模拟器 + MaaFramework 任务引擎，game_bridge.py）----------
+# 默认关：要 mac 上装着 MuMu、模拟器切到 720x1280@320、跑过 tools/fetch_maayuan.py。
+# 开通步骤见 README 的 Game mode 一节。没开时 /game/* 一律 503，插件工具有声报错。
+GAME_MODE_ENABLED = os.environ.get("GAME_MODE_ENABLED", "0") == "1"
+
 # 可选：Bark 推送（断连补投/主动消息时通知手机；不配则静默跳过）
 BARK_URL = os.environ.get("BARK_URL", "").strip()
 BARK_ICON = os.environ.get("BARK_ICON", "").strip()   # 通知图标（公网可访问的图片 URL），空=Bark 默认
