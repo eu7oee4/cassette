@@ -1352,6 +1352,54 @@ async def _game_watchdog() -> None:
             logerr(f"game 看守失败（下一拍继续）: {e}")
 
 
+# ---------- 任务集（机主在游戏页存的「一串任务+定制选项」，AI 用 task_run_preset 照单派）----------
+
+
+class GamePresetIn(BaseModel):
+    name: str
+    names: list[str]
+    options: dict[str, dict[str, str]] = {}
+
+
+@app.get("/game/presets")
+def game_presets_list(x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
+    verify_auth(x_auth)
+    return {"presets": game_bridge.read_presets()}
+
+
+@app.post("/game/presets")
+def game_presets_save(inp: GamePresetIn,
+                      x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
+    """新建或覆盖（同名整个替换、挪到最前）。覆盖确认在 app 侧做——这里不拦，
+    AI 那条路没有这个入口（工具面只给查和跑，不给改：任务集是机主的遥控器配置）。"""
+    verify_auth(x_auth)
+    name = inp.name.strip()
+    if not name or len(name) > 40:
+        raise HTTPException(status_code=400, detail="名字要有，且别超过 40 字")
+    if not inp.names:
+        raise HTTPException(status_code=400, detail="任务列表是空的")
+    game_bridge.save_preset(name, inp.names, inp.options)
+    return {"ok": True}
+
+
+@app.post("/game/presets/{name}/delete")
+def game_presets_delete(name: str, x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
+    verify_auth(x_auth)
+    if not game_bridge.delete_preset(name):
+        raise HTTPException(status_code=404, detail="没有这个任务集")
+    return {"ok": True}
+
+
+@app.post("/game/presets/{name}/run")
+def game_presets_run(name: str, x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
+    verify_auth(x_auth)
+    _require_game()
+    p = game_bridge.get_preset(name)
+    if p is None:
+        raise HTTPException(status_code=404, detail=f"没有「{name}」这个任务集（查 /game/presets）")
+    return game_bridge.start_tasks(p.get("names", []), p.get("options", {}))
+
+
 @app.get("/game/notes/{book}")
 def game_notes_get(book: str, x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
     verify_auth(x_auth)

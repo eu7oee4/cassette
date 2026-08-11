@@ -53,9 +53,13 @@ ADB = MUMU_APP + "/Contents/MacOS/MuMuEmulator.app/Contents/MacOS/tools/adb"
 VM_INDEX = os.environ.get("GAME_VM_INDEX", "0")
 BOOT_WAIT_SEC = 90        # 冷启动模拟器的等待上限
 
-# 笔记本：任务本记阵容偏好/选项默认/收成口径/异常，剧情本记剧情脉络/机主的话。
-# 出厂全空白——固定知识在插件的出厂纪律文件里，笔记本只装 AI 自己攒的增量。
-NOTES_PATHS = {"task": GAME_DIR / "notes_task.md", "story": GAME_DIR / "notes_story.md"}
+# 游戏笔记本（一本）：剧情脉络/机主的话/AI 自己攒的坐标修正，全在这儿。
+# 最初设计拆过任务本/剧情本两本，08-12 收敛回一本：任务侧的「选项偏好」被任务集
+# （presets）接走之后，任务本就没剩什么可记的了。
+# 出厂空白——固定知识在插件的出厂纪律文件里，笔记本只装 AI 自己攒的增量。
+# 键上保留 task/story 两个旧别名指向同一本：插件工具和 app 的老路径不用一起换血。
+NOTES_PATH = GAME_DIR / "notes.md"
+NOTES_PATHS = {"game": NOTES_PATH, "task": NOTES_PATH, "story": NOTES_PATH}
 NOTES_MAX_CHARS = 50_000
 
 
@@ -131,14 +135,42 @@ def write_notes(book: str, content: str) -> Optional[str]:
 
 
 def notes_status() -> dict:
-    out = {}
-    for book, path in NOTES_PATHS.items():
-        if path.exists():
-            out[book] = {"chars": len(path.read_text("utf-8")),
-                         "updated_at": int(path.stat().st_mtime)}
-        else:
-            out[book] = {"chars": 0, "updated_at": None}
-    return out
+    if NOTES_PATH.exists():
+        return {"chars": len(NOTES_PATH.read_text("utf-8")),
+                "updated_at": int(NOTES_PATH.stat().st_mtime)}
+    return {"chars": 0, "updated_at": None}
+
+
+# ---------- 任务集（presets：机主在游戏页存的「一串任务+定制选项」）----------
+# 存宿主不存手机：AI 也要查得到——机主在聊天里说「做日常任务集」，AI 用 task_run_preset
+# 照单派活。列表新的在前，「默认选最上面」= 默认选最新设定的。
+PRESETS_PATH = GAME_DIR / "presets.json"
+
+
+def read_presets() -> list[dict]:
+    return state_store._read_json(PRESETS_PATH, [])
+
+
+def get_preset(name: str) -> Optional[dict]:
+    return next((p for p in read_presets() if p.get("name") == name), None)
+
+
+def save_preset(name: str, names: list[str], options: dict) -> None:
+    """新建或覆盖（同名整个替换），并挪到最前。覆盖前的确认在 app 侧做。"""
+    GAME_DIR.mkdir(parents=True, exist_ok=True)
+    presets = [p for p in read_presets() if p.get("name") != name]
+    presets.insert(0, {"name": name, "names": names, "options": options,
+                       "ts": int(time.time())})
+    state_store._write_json(PRESETS_PATH, presets)
+
+
+def delete_preset(name: str) -> bool:
+    presets = read_presets()
+    kept = [p for p in presets if p.get("name") != name]
+    if len(kept) == len(presets):
+        return False
+    state_store._write_json(PRESETS_PATH, kept)
+    return True
 
 
 # ---------- 设备自愈（MuMu 开机 + adb 连上；只返回 error 字符串，绝不抛异常）----------

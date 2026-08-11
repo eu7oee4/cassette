@@ -47,7 +47,51 @@ struct GameTaskItem: Decodable, Identifiable {
     var separatorTitle: String { name.trimmingCharacters(in: CharacterSet(charactersIn: "= ")) }
 }
 
+/// 一个任务集：机主存在宿主上的「一串任务+定制选项」（TA 用 task_run_preset 也能照单跑）。
+struct GamePreset: Decodable, Identifiable {
+    let name: String
+    let names: [String]
+    let options: [String: [String: String]]?
+    let ts: Int?
+    var id: String { name }
+}
+
 extension ChatService {
+    func getGamePresets() async throws -> [GamePreset] {
+        let data = try await perform(authedRequest("GET", "/game/presets"))
+        struct Wrap: Decodable { let presets: [GamePreset] }
+        do { return try JSONDecoder().decode(Wrap.self, from: data).presets }
+        catch { throw ChatServiceError.badResponse }
+    }
+
+    func saveGamePreset(name: String, names: [String],
+                        options: [String: [String: String]]) async throws {
+        struct Body: Encodable {
+            let name: String; let names: [String]; let options: [String: [String: String]]
+        }
+        let body = try JSONEncoder().encode(Body(name: name, names: names, options: options))
+        _ = try await perform(authedRequest("POST", "/game/presets", jsonBody: body))
+    }
+
+    private func presetPath(_ name: String, _ action: String) throws -> String {
+        guard let enc = name.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) else {
+            throw ChatServiceError.badURL
+        }
+        return "/game/presets/\(enc)/\(action)"
+    }
+
+    func deleteGamePreset(name: String) async throws {
+        _ = try await perform(authedRequest("POST", presetPath(name, "delete")))
+    }
+
+    func runGamePreset(name: String) async throws -> String? {
+        struct Resp: Decodable { let ok: Bool?; let error: String? }
+        // 起跑含设备自愈（冷启动模拟器最多 90s），超时放宽
+        let data = try await perform(authedRequest("POST", presetPath(name, "run"), timeout: 120))
+        let r = try? JSONDecoder().decode(Resp.self, from: data)
+        return r?.error
+    }
+
     func getGameStatus() async throws -> GameStatus {
         let data = try await perform(authedRequest("GET", "/game"))
         do { return try JSONDecoder().decode(GameStatus.self, from: data) }
@@ -65,17 +109,6 @@ extension ChatService {
         struct Wrap: Decodable { let tasks: [GameTaskItem] }
         do { return try JSONDecoder().decode(Wrap.self, from: data).tasks }
         catch { throw ChatServiceError.badResponse }
-    }
-
-    func startGameTasks(names: [String], options: [String: [String: String]]) async throws -> String? {
-        struct Body: Encodable { let names: [String]; let options: [String: [String: String]] }
-        struct Resp: Decodable { let ok: Bool?; let error: String? }
-        let body = try JSONEncoder().encode(Body(names: names, options: options))
-        // 起跑含设备自愈（冷启动模拟器最多 90s），超时放宽
-        let data = try await perform(authedRequest("POST", "/game/tasks/start",
-                                                   jsonBody: body, timeout: 120))
-        let r = try? JSONDecoder().decode(Resp.self, from: data)
-        return r?.error   // nil = 开跑了；有值 = 引擎给的有声拒绝（占用/急停中…）
     }
 
     func stopGameTasks() async throws {
@@ -114,11 +147,19 @@ struct GamePage: View {
     @State private var selected: Set<String> = []
     @State private var expanded: Set<String> = []   // 展开选项面板的任务
     @State private var choices: [String: [String: String]] = [:]
+    @State private var presets: [GamePreset] = []
+    @State private var selectedPreset: String? = nil   // nil = 默认选最上面（最新设定的）
+    @State private var namingActive = false            // 「设定任务」的取名弹窗
+    @State private var presetName = ""
+    @State private var overwriteActive = false         // 重名 → 二次确认覆盖
     @State private var loading = true
     @State private var working = false
     @State private var errorText: String? = nil
     @State private var noteText: String? = nil
     @State private var noteSeq = 0
+
+    /// 「开启引擎」实际会跑哪个任务集。
+    private var effectivePreset: String? { selectedPreset ?? presets.first?.name }
 
     var body: some View {
         Group {
@@ -164,10 +205,23 @@ struct GamePage: View {
         List {
             engineSection
             taskSection
+            presetsSection
             notesSection      // 笔记本在「最近」上面：日志会越攒越长，别让本子沉底
             if let recent = status?.recent, !recent.isEmpty {
                 recentSection(recent)
             }
+        }
+        // 「设定任务」：先取名，重名再二次确认覆盖
+        .alert("给任务集取个名", isPresented: $namingActive) {
+            TextField("比如：日常", text: $presetName)
+            Button("确认") { confirmPresetName() }
+            Button("取消", role: .cancel) { }
+        } message: {
+            Text("会记住当前勾选的任务和它们的选项配置。")
+        }
+        .alert("将覆盖原「\(presetName)」任务集", isPresented: $overwriteActive) {
+            Button("覆盖", role: .destructive) { savePreset() }
+            Button("取消", role: .cancel) { }
         }
     }
 
@@ -221,20 +275,81 @@ struct GamePage: View {
             .frame(height: taskAreaHeight)
             .listRowInsets(EdgeInsets(top: 0, leading: 8, bottom: 0, trailing: 8))
             Button {
-                startRun()
+                presetName = ""
+                namingActive = true
             } label: {
                 HStack {
                     Spacer()
-                    if working { ProgressView() }
-                    else { Text("跑选中的（\(selected.count)）").bold() }
+                    Text("设定任务（已选 \(selected.count)）").bold()
                     Spacer()
                 }
             }
-            .disabled(working || selected.isEmpty || status?.running == true)
+            .disabled(selected.isEmpty)
         } header: {
-            Text("任务（按菜单顺序执行，列表可上下滑）")
+            Text("任务（列表可上下滑）")
         } footer: {
-            Text("点行选中，点 ⚙ 调该任务的选项（选择会记住）。游戏没开着时记得把「🚀 启动游戏」勾在最前面。")
+            Text("点行勾选，点 ⚙ 调该任务的选项，「设定任务」把这套勾选存成任务集。游戏没开着时记得把「🚀 启动游戏」勾进去。")
+        }
+    }
+
+    // MARK: 任务集（存在宿主上，TA 在聊天里也能照单派）
+
+    private var presetsSection: some View {
+        Section {
+            if presets.isEmpty {
+                Text("还没有任务集——上面勾好任务点「设定任务」")
+                    .font(.caption).foregroundStyle(.secondary)
+            } else {
+                ScrollView {
+                    LazyVStack(spacing: 0) {
+                        ForEach(presets) { p in
+                            presetRow(p)
+                            Divider().padding(.leading, 34)
+                        }
+                    }
+                }
+                .frame(height: min(CGFloat(presets.count) * 44 + 8, 176))
+                .listRowInsets(EdgeInsets(top: 0, leading: 8, bottom: 0, trailing: 8))
+                Button {
+                    runPreset()
+                } label: {
+                    HStack {
+                        Spacer()
+                        if working { ProgressView() }
+                        else { Text("开启引擎（\(effectivePreset ?? "—")）").bold() }
+                        Spacer()
+                    }
+                }
+                .disabled(working || effectivePreset == nil || status?.running == true)
+            }
+        } header: {
+            Text("任务集（单选，默认最新的）")
+        } footer: {
+            Text("跟 TA 说「帮我做XX任务集」也能跑同一份配置。长按可删除。")
+        }
+    }
+
+    private func presetRow(_ p: GamePreset) -> some View {
+        Button {
+            selectedPreset = p.name
+        } label: {
+            HStack(spacing: 10) {
+                Image(systemName: effectivePreset == p.name
+                      ? "largecircle.fill.circle" : "circle")
+                    .foregroundStyle(effectivePreset == p.name ? Color.theme : .secondary)
+                Text(p.name).foregroundStyle(.primary)
+                Spacer()
+                Text("\(p.names.count) 个任务")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            .padding(.vertical, 11)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .contextMenu {
+            Button(role: .destructive) { deletePreset(p.name) } label: {
+                Label("删除「\(p.name)」", systemImage: "trash")
+            }
         }
     }
 
@@ -357,14 +472,11 @@ struct GamePage: View {
     // MARK: 笔记本
 
     private var notesSection: some View {
-        Section("笔记本") {
+        Section {
             // 已 push 的页面里 value-based navigationDestination 不触发（DraftsPage 同款坑），
             // 直给目的地。
-            NavigationLink { GameNotesEditor(book: "task", title: "任务本") } label: {
-                Label("任务本", systemImage: "checklist")
-            }
-            NavigationLink { GameNotesEditor(book: "story", title: "剧情本") } label: {
-                Label("剧情本", systemImage: "book")
+            NavigationLink { GameNotesEditor(book: "game", title: "游戏笔记本") } label: {
+                Label("游戏笔记本", systemImage: "book")
             }
         }
     }
@@ -404,6 +516,11 @@ struct GamePage: View {
             status = try await service.getGameStatus()
             if status?.enabled == true, status?.resource_ready == true {
                 tasks = try await service.getGameTasks()
+                presets = try await service.getGamePresets()
+                // 选中的任务集被删了/改名了 → 回落到默认（最新的那个）
+                if let sel = selectedPreset, !presets.contains(where: { $0.name == sel }) {
+                    selectedPreset = nil
+                }
             }
         } catch {
             errorText = (error as? ChatServiceError)?.errorDescription ?? "连不上后端"
@@ -411,21 +528,62 @@ struct GamePage: View {
         loading = false
     }
 
-    private func startRun() {
+    // MARK: 任务集：设定 / 开跑 / 删除
+
+    private func confirmPresetName() {
+        let name = presetName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty else { return }
+        presetName = name
+        if presets.contains(where: { $0.name == name }) {
+            overwriteActive = true    // 重名 → 二次确认再覆盖
+        } else {
+            savePreset()
+        }
+    }
+
+    private func savePreset() {
         working = true
         Task { @MainActor in
             defer { working = false }
             do {
-                // 按菜单顺序跑，不按点选顺序——菜单顺序就是作者设计的日常顺序
+                // 按菜单顺序存，不按点选顺序——菜单顺序就是作者设计的日常顺序
                 let names = tasks.filter { !$0.isSeparator }.map(\.name)
                     .filter { selected.contains($0) }
                 let opts = choices.filter { names.contains($0.key) && !$0.value.isEmpty }
-                if let err = try await service.startGameTasks(names: names, options: opts) {
+                try await service.saveGamePreset(name: presetName, names: names, options: opts)
+                showNote("存好了：\(presetName)")
+                selected.removeAll()
+                selectedPreset = presetName
+                await load()
+            } catch {
+                errorText = (error as? ChatServiceError)?.errorDescription ?? "连不上后端"
+            }
+        }
+    }
+
+    private func runPreset() {
+        guard let name = effectivePreset else { return }
+        working = true
+        Task { @MainActor in
+            defer { working = false }
+            do {
+                if let err = try await service.runGamePreset(name: name) {
                     errorText = err
                 } else {
                     showNote("开跑了，结果会推送通知")
-                    selected.removeAll()
                 }
+                await load()
+            } catch {
+                errorText = (error as? ChatServiceError)?.errorDescription ?? "连不上后端"
+            }
+        }
+    }
+
+    private func deletePreset(_ name: String) {
+        Task { @MainActor in
+            do {
+                try await service.deleteGamePreset(name: name)
+                if selectedPreset == name { selectedPreset = nil }
                 await load()
             } catch {
                 errorText = (error as? ChatServiceError)?.errorDescription ?? "连不上后端"
