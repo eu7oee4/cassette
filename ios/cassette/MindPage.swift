@@ -72,6 +72,7 @@ struct MindPage: View {
                                             await load()
                                         }
                                     } label: { Label("删除", systemImage: "trash") }
+                                    .tint(.red)   // 全 app 的 .tint(Color.theme) 会盖掉破坏性默认红，显式压回红
                                 }
                             }
                     }
