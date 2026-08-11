@@ -220,10 +220,11 @@ struct MemoryPage: View {
                                 Task { try? await service.archiveMemory(id: m.id); await reload() }
                             } label: { Label("删除", systemImage: "trash") }
                         } else {
-                            // 归档：真正让它从列表/搜索/回忆里消失（红键）。
+                            // 删除：真正让它从列表/搜索/回忆里消失（红键）。名字叫「删除」跟
+                            // 「自动归档」栏区分开——底层仍是 delete-to-archive，Ombre 侧可 restore。
                             Button(role: .destructive) {
                                 Task { try? await service.archiveMemory(id: m.id); await reload() }
-                            } label: { Label("归档", systemImage: "archivebox") }
+                            } label: { Label("删除", systemImage: "trash") }
                             // 遗忘/取消遗忘：toggle，按钮文案本身就是当前状态（灰键，非破坏性）。
                             Button {
                                 Task { try? await service.forgetMemory(id: m.id); await reload() }
@@ -476,9 +477,9 @@ private struct EditMemorySheet: View {
                         .onChange(of: forgotten) { _, _ in onForget() }
                 }
                 Section {
-                    Button("归档这条记忆", role: .destructive) { confirmArchive = true }
+                    Button("删除这条记忆", role: .destructive) { confirmArchive = true }
                 } footer: {
-                    Text("归档＝从列表、搜索、回忆里都移走（比遗忘彻底）。Ombre 不做物理删除，日后仍可恢复。")
+                    Text("删除＝从列表、搜索、回忆里都移走（比遗忘彻底）。Ombre 不做物理删除，日后仍可恢复。")
                 }
             }
             .navigationTitle("编辑记忆")
@@ -491,9 +492,9 @@ private struct EditMemorySheet: View {
                     Button { save() } label: { Image(systemName: "checkmark") }
                 }
             }
-            .confirmationDialog("归档这条记忆？会从列表、搜索、回忆里移走（日后仍可恢复）。",
+            .confirmationDialog("删除这条记忆？会从列表、搜索、回忆里移走（日后仍可恢复）。",
                                 isPresented: $confirmArchive, titleVisibility: .visible) {
-                Button("归档", role: .destructive) { onArchive(); dismiss() }
+                Button("删除", role: .destructive) { onArchive(); dismiss() }
                 Button("取消", role: .cancel) { }
             }
         }
