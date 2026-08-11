@@ -19,6 +19,7 @@ SELECT（网易反垃圾，见 _imap()）。换别家邮箱只需改 .env 里的
 env（见 .env.example）：ADDRESS / AUTH_CODE 必填，其余有默认。授权码是密钥待遇：
 只活在 .env，不进对话不入库；改了要重启后端（子进程继承的是启动时那份环境）。
 """
+import codecs
 import email
 import email.policy
 import imaplib
@@ -94,11 +95,55 @@ def _imap(cfg: dict) -> imaplib.IMAP4_SSL:
     return conn
 
 
+# 转发链路（outlook → 163）给繁体信贴的是 gb2312 标签，但字节其实是 GB18030。
+# 按标签严解：信头抛 UnicodeDecodeError（兜底把 =?gb2312?B?..?= 原串吐回去）、
+# 正文 errors="replace" 出一片方块。GB18030 是 gb2312/gbk 的超集，一律升格解——
+# 只多认字不少认字，对真·gb2312 的信没有副作用。
+_CHARSET_UPGRADE = {
+    "gb2312": "gb18030", "gb_2312": "gb18030", "gb_2312-80": "gb18030",
+    "csgb2312": "gb18030", "euc-cn": "gb18030", "euccn": "gb18030",
+    "gbk": "gb18030", "x-gbk": "gb18030", "cp936": "gb18030", "ms936": "gb18030",
+}
+
+
+def _norm_charset(cs) -> str | None:
+    """标签 → 真能用的编码名。认不出来的（unknown-8bit 之类）返回 None，让调用方退默认。"""
+    cs = (cs or "").strip().strip("\"'").lower()
+    if not cs:
+        return None
+    cs = _CHARSET_UPGRADE.get(cs, cs)
+    try:
+        codecs.lookup(cs)
+    except LookupError:
+        return None
+    return cs
+
+
+def _decode_bytes(data: bytes, charset) -> str:
+    """按声明的编码解；解不动就依次试 utf-8 / gb18030，全不行才退 replace。
+    宁可多试一轮也别出方块——方块是不可逆的，字丢了就找不回来。"""
+    cs = _norm_charset(charset) or "utf-8"
+    for enc in (cs, "utf-8", "gb18030"):
+        try:
+            return data.decode(enc)
+        except (UnicodeDecodeError, LookupError):
+            continue
+    return data.decode(cs, errors="replace")
+
+
 def _decode_header(raw) -> str:
     if raw is None:
         return ""
     try:
-        return str(email.header.make_header(email.header.decode_header(raw)))
+        # 自己把每段字节解成 str 再交给 make_header——它负责的是编码段/非编码段
+        # 之间那个空格的还原（"顧墨 <a@b.com>"），解码这步不能交给它。
+        chunks = []
+        for part, cs in email.header.decode_header(raw):
+            if isinstance(part, bytes):
+                chunks.append((_decode_bytes(part, cs), _norm_charset(cs)))
+            else:
+                chunks.append((part, None))
+        return str(email.header.make_header(chunks))
     except Exception:
         return str(raw)
 
@@ -213,8 +258,7 @@ def _extract_body(msg) -> str:
         if ctype not in ("text/plain", "text/html") or part.get("Content-Disposition", "").startswith("attachment"):
             continue
         try:
-            text = part.get_payload(decode=True).decode(
-                part.get_content_charset() or "utf-8", errors="replace")
+            text = _decode_bytes(part.get_payload(decode=True), part.get_content_charset())
         except Exception:
             continue
         if ctype == "text/plain" and not plain:
