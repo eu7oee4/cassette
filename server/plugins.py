@@ -72,9 +72,9 @@ NO_WAKE_PLUGINS = {"codemode", "game-story"}
 #
 # ⚠️ 新插件默认落在「醒来照挂」那一档：不写进这里、也不写进 NO_WAKE_PLUGINS，
 # 等于醒来无条件有它，而且没有开关可关。要收就得显式写名字。
-# game-task：任务引擎是确定性脚本、不碰消耗，但「醒来发现体力满了自己去清日常」
+# game-maayuan：任务引擎是确定性脚本、不碰消耗，但「醒来发现体力满了自己去清日常」
 # 动的是机主的游戏账号——给不给这份自主，开关交机主。
-WAKE_TOGGLEABLE = {"browser", "beacon", "mail", "game-task"}
+WAKE_TOGGLEABLE = {"browser", "beacon", "mail", "game-maayuan"}
 WAKE_ENABLED_PATH = state_store.STATE_DIR / "plugins_wake_enabled.json"
 
 # 醒来那条路**插件照挂、但默认摘掉个别工具**——比上面两档更细的第四档（工具级）。
