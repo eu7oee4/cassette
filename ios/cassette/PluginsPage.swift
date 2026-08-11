@@ -14,6 +14,10 @@ struct PluginItem: Decodable, Identifiable {
     let installed_commit: String?    // 实际装着的短 sha；空 = 手放的开发副本，来源不可考
     let wake_toggleable: Bool?       // 有「醒来能用」开关（宿主 WAKE_TOGGLEABLE 里的才有）
     let wake_enabled: Bool?          // 开关当前状态（默认关）
+    // 开关文案由后端下发：开关管的是整插件还是只某几个工具（如 mail 只管发信），
+    // 语义在宿主那边定，app 不猜。旧后端没这俩字段 → 回退通用文案。
+    let wake_toggle_title: String?
+    let wake_toggle_desc: String?
     var id: String { name }
 
     /// version 是作者手写的、靠自觉（两个不同 commit 可以都自称 0.1.0），sha 才是真身份。
@@ -177,8 +181,8 @@ struct PluginsPage: View {
             if p.state == "enabled", p.wake_toggleable == true {
                 HStack(spacing: 12) {
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("醒来能用").font(.footnote)
-                        Text("打开后 TA 自发醒来时也能用它（默认关）")
+                        Text(p.wake_toggle_title ?? "醒来能用").font(.footnote)
+                        Text(p.wake_toggle_desc ?? "打开后 TA 自发醒来时也能用它（默认关）")
                             .font(.caption2).foregroundStyle(.secondary)
                     }
                     Spacer()

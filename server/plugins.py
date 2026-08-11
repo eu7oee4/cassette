@@ -88,6 +88,15 @@ WAKE_ENABLED_PATH = state_store.STATE_DIR / "plugins_wake_enabled.json"
 # mcp server 本身照起，不用插件配合。
 WAKE_TOOL_EXCLUDE: dict[str, set[str]] = {"mail": {"mail_send"}}
 
+# 「醒来能用」开关在商店里的文案（标题, 说明）。工具级摘除的插件开关语义变细了，
+# 通用文案会骗人——mail 的开关只管发信，读信醒来一直能用（机主 2026-08-11 指出：
+# 文案说「醒来能不能用它」，实际读邮件根本不受这个开关影响）。文案跟机制住同一个
+# 文件：改 WAKE_TOOL_EXCLUDE 的人抬头就看见这里也要跟着改。
+WAKE_TOGGLE_TEXT: dict[str, tuple[str, str]] = {
+    "mail": ("醒来能发信", "只决定自发醒来时能不能发邮件；读信不受影响，醒来一直能看收件箱"),
+}
+_WAKE_TOGGLE_DEFAULT = ("醒来能用", "打开后 TA 自发醒来时也能用它（默认关）")
+
 
 def _read_wake_enabled() -> dict:
     try:
@@ -247,6 +256,9 @@ def list_status() -> list[dict]:
             # 「醒来能用」开关（见 WAKE_TOGGLEABLE）：toggleable 才画开关，默认关。
             "wake_toggleable": name in WAKE_TOGGLEABLE,
             "wake_enabled": name in WAKE_TOGGLEABLE and bool(wake_on.get(name)),
+            # 开关文案后端下发：语义（整插件 or 只某几个工具）是这边定的，app 不该猜。
+            "wake_toggle_title": WAKE_TOGGLE_TEXT.get(name, _WAKE_TOGGLE_DEFAULT)[0],
+            "wake_toggle_desc": WAKE_TOGGLE_TEXT.get(name, _WAKE_TOGGLE_DEFAULT)[1],
         }
         out.append(item)
     return out
