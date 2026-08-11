@@ -9,6 +9,7 @@ struct ChatResponse: Decodable {
     let desc_updates: [DescUpdate]? // 这轮他改的表情描述
     let next_wake_hint: String?     // 这轮他若定了下次醒来 → 现成灰字提示文案；没定则 nil
     let code_started: Bool?         // 这轮他自己切进了 Code 模式 → app 翻 codeMode，消息改道
+    let game_started: Bool?         // 这轮他自己切去玩游戏了 → 终端面板亮起 + 系统灰字
 }
 
 /// 模型改了某张表情的描述。
@@ -343,6 +344,7 @@ struct ChatService {
         let tmux: Bool         // 机器上有没有装 tmux
         let cwd: String        // 会话默认工作目录，显示用
         let busy: Bool?        // TA 正在跑活吗（只有 probeBusy 时才是真值）
+        let profile: String?   // 活着的是哪个档案：code / game（游戏剧情会话共用这套路由）
     }
 
     /// 会话画面的一帧 + 当前确认弹窗的选项。

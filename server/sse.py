@@ -87,10 +87,11 @@ async def read_stream_events(proc):
 
 def _memory_events(item: dict):
     """一条定了案的 stored → 要发给 app 的 memory 事件（0 或 1 条）。
-    codemode 是借 stored 走的控制信号（TA 自切 code 模式），不是记忆产物——
-    发成 memory 事件的话 app 会渲染出一条莫名其妙的灰字。
-    browse 不逐条发（连点几个页面会刷屏）：finalize 聚合成一条随 done 走。"""
-    if item["tool"] in ("codemode", "browse"):
+    codemode/gamemode 是借 stored 走的控制信号（TA 自切 code 模式/游戏会话），不是
+    记忆产物——发成 memory 事件的话 app 会渲染出一条莫名其妙的灰字。
+    browse 不逐条发（连点几个页面会刷屏）：finalize 聚合成一条随 done 走。
+    gametask **要发**：派引擎跑日常值得一条可核对的灰字（app 按 tool 渲染文案）。"""
+    if item["tool"] in ("codemode", "gamemode", "browse"):
         return
     yield sse({"type": "memory", "tool": item["tool"], "text": item["text"],
                "ok": item.get("ok", True), "error": item.get("error", "")})

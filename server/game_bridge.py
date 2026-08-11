@@ -68,16 +68,21 @@ def require_enabled() -> None:
         raise GameModeOff("game 模式没开：在 server/.env 里设 GAME_MODE_ENABLED=1 再重启后端")
 
 
-# ---------- 急停锁（settings.game_paused，app 顶栏 ⏸ 按钮）----------
+# ---------- 急停锁（app 顶栏 ⏸ 按钮）----------
+# ⚠️ 单独一个文件，**别挪进 settings.json**：POST /settings 是 app 按字段白名单整体
+# 覆盖重写的（不 merge），机主在设置页随便动一个选项就会把塞进去的 game_paused 静默
+# 抹掉——急停自己解除是安全事故，不是小毛病。
+PAUSED_PATH = GAME_DIR / "paused.json"
+
+
 def paused() -> bool:
     # 每次从盘读：机主按急停的是 app 那条请求，这边的 runner 线程要即时看见。
-    return bool(state_store.load_settings().get("game_paused"))
+    return bool(state_store._read_json(PAUSED_PATH, {}).get("paused"))
 
 
 def set_paused(value: bool) -> None:
-    s = state_store.load_settings()
-    s["game_paused"] = bool(value)
-    state_store.save_settings(s)
+    GAME_DIR.mkdir(parents=True, exist_ok=True)
+    state_store._write_json(PAUSED_PATH, {"paused": bool(value), "ts": int(time.time())})
 
 
 # ---------- 互斥锁（模拟器只有一台：任务引擎和剧情会话不能同时上手）----------

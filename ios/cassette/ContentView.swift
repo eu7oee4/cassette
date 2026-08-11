@@ -70,6 +70,15 @@ struct ContentView: View {
     @State private var codeSwitching = false          // 正在切换中：按钮转圈、挡住连点
     @State private var terminalExpanded = false       // 内联终端面板展开着吗
     @State private var confirmStopBusy = false        // 退出时那边正干着活 → 先问一句
+    // 游戏（game_bridge）：剧情会话复用 code 那套终端面板和消息改道；急停/引擎状态给顶栏 ⏸。
+    @State private var gameSessionActive = false      // 剧情会话活着（/code/status 的 profile=game）
+    @State private var gamePaused = false             // 急停锁状态（真相在后端 /game）
+    @State private var gameEngineRunning = false      // 任务引擎正在跑
+    @State private var gamePauseSwitching = false     // ⏸ 切换中：转圈 + 挡连点
+    /// 顶栏要不要露 ⏸：引擎在跑 / 剧情会话开着 / 已经急停着（得能解除）任一为真。
+    private var gamePauseVisible: Bool { gameEngineRunning || gameSessionActive || gamePaused }
+    /// 消息该改道 tmux 会话吗（code 和游戏剧情共用同一条管道）。
+    private var sessionMode: Bool { codeMode || gameSessionActive }
     /// 气泡区此刻有多高。终端面板是**盖在**气泡区上的 overlay，高度以它为唯一上限——
     /// 所以面板绝不可能越过顶栏，键盘/附件条/输入框长高也都不用单独算：那些一动，
     /// 气泡区就变矮，这个值自己跟上。
@@ -132,12 +141,14 @@ struct ContentView: View {
             await syncPending()
             await reconcileRescues()
             await refreshDraftCount()
+            await refreshGameStatus()
             while !Task.isCancelled {
-                // Code 模式下他说的每句话都靠这条通道回来 → 提到 3s；平时 15s 省电。
-                try? await Task.sleep(for: .seconds(codeMode ? 3 : 15))
+                // 会话模式（code/游戏）下他说的每句话都靠这条通道回来 → 提到 3s；平时 15s 省电。
+                try? await Task.sleep(for: .seconds(sessionMode ? 3 : 15))
                 await syncPending()
                 await reconcileRescues()
                 await refreshDraftCount()
+                await refreshGameStatus()
             }
         }
     }
@@ -160,6 +171,8 @@ struct ContentView: View {
             }
         case .drafts:
             DraftsPage()
+        case .game:
+            GamePage()
         case .plugins:
             PluginsPage()
         case .settings:
@@ -209,8 +222,8 @@ struct ContentView: View {
                  onDeleteStack: { msgs in deleteCandidates = msgs },
                  editRefreshTick: editRefreshTick,
                  backToNowTick: backToNowTick,
-                 // Code 模式：终端盖在气泡区上，气泡得留出这么高才不会被压在底下
-                 bottomOverlayHeight: codeMode ? terminalHeight : 0,
+                 // 会话模式（code/游戏）：终端盖在气泡区上，气泡得留出这么高才不会被压在底下
+                 bottomOverlayHeight: sessionMode ? terminalHeight : 0,
                  scrollTarget: chatScrollTarget,
                  onScrollTargetHandled: { chatScrollTarget = nil })
             .background(Color(.systemGroupedBackground))
@@ -221,7 +234,8 @@ struct ContentView: View {
             // ⚠️ 顺序要紧：overlay 挂在 safeAreaInset **之前**，它才对齐到「输入栏顶」
             // 而不是屏幕底。
             .overlay(alignment: .bottom) {
-                if codeMode {
+                // 游戏剧情会话共用这块终端（后端 /code/* 打的是「当前活着的会话」）
+                if sessionMode {
                     CodeTerminalPanel(service: chatService, expanded: $terminalExpanded,
                                       available: chatAreaHeight)
                 }
@@ -442,13 +456,20 @@ struct ContentView: View {
                     .foregroundStyle(Color.theme)
                     .frame(width: 40, height: 40)
             }
+            // 左侧配平位：右边多出 ⏸ 时补一个等宽空位，标题才不偏
+            if gamePauseVisible {
+                Color.clear.frame(width: 40, height: 40)
+            }
             Spacer()
             Text(topTitle)
                 .font(.headline)
                 .lineLimit(1)
                 .truncationMode(.tail)
             Spacer()
-            // 右侧：Code 模式开关（后端没开这个功能时是个等宽空位，标题照样居中）
+            // 右侧：游戏急停（引擎在跑/剧情会话开着/急停中才露）+ Code 模式开关
+            if gamePauseVisible {
+                gamePauseToggle
+            }
             if codeAvailable {
                 codeToggle
             } else {
@@ -459,6 +480,48 @@ struct ContentView: View {
         .padding(.vertical, 4)
         .background(.bar)
         .overlay(alignment: .bottom) { Divider() }
+    }
+
+    /// 游戏急停 ⏸：开着 = 实心底 + 白图标（和 codeToggle 同一套视觉语言）。
+    /// 按下去是「叫停」不是「杀进程」：任务引擎跑完当前任务收手，剧情会话的操作工具被拒。
+    private var gamePauseToggle: some View {
+        Button(action: toggleGamePause) {
+            Group {
+                if gamePauseSwitching {
+                    ProgressView().tint(gamePaused ? .white : Color.theme)
+                } else {
+                    Image(systemName: gamePaused ? "pause.circle.fill" : "pause.circle")
+                        .font(.system(size: 17, weight: .semibold))
+                        .foregroundStyle(gamePaused ? Color.white : Color.theme)
+                }
+            }
+            .frame(width: 40, height: 30)
+            .background(Capsule().fill(gamePaused ? Color.theme : Color.clear))
+        }
+        .disabled(gamePauseSwitching)
+        .accessibilityLabel(gamePaused ? "游戏急停：开（点这里解除）" : "游戏急停")
+    }
+
+    private func toggleGamePause() {
+        gamePauseSwitching = true
+        Task { @MainActor in
+            defer { gamePauseSwitching = false }
+            do {
+                try await chatService.setGamePaused(!gamePaused)
+                await refreshGameStatus()
+                chatStore.appendSystemMessage(gamePaused ? "游戏急停：已叫停" : "游戏急停：已解除")
+            } catch {
+                errorText = "急停没设上：\((error as? ChatServiceError)?.errorDescription ?? error.localizedDescription)"
+            }
+        }
+    }
+
+    /// 和后端对齐游戏状态（急停/引擎跑动）。失败静默——顶栏 ⏸ 靠下一拍补上。
+    @MainActor
+    private func refreshGameStatus() async {
+        guard let st = try? await chatService.getGameStatus() else { return }
+        gamePaused = st.paused
+        gameEngineRunning = st.running
     }
 
     /// Code 模式开关：切入=起会话并注入最近历史；切出=停会话回普通聊天。
@@ -498,6 +561,12 @@ struct ContentView: View {
     /// 会话里发消息。
     private func toggleCodeMode() {
         dismissKeyboard()
+        // TA 正在游戏会话里：起 code 会话会把它杀掉（start 先杀光所有档案）。
+        // 先让 TA 收摊或在顶栏急停，别一键把人从游戏里踹出来。
+        if gameSessionActive, !codeMode {
+            errorText = "TA 正在游戏会话里，先等 TA 收摊（或按 ⏸ 急停）再切 Code 模式。"
+            return
+        }
         codeSwitching = true
         Task { @MainActor in
             defer { codeSwitching = false }
@@ -542,14 +611,24 @@ struct ContentView: View {
     private func syncCodeMode() async {
         guard let st = try? await chatService.codeStatus() else { return }
         codeAvailable = st.enabled && st.tmux
+        // 活着的会话可能是游戏档案（TA 自己 game_start 切的）——那不是 Code 模式，
+        // 别翻 codeMode、也别报「已切进 Code 模式」。终端面板走 gameSessionActive 亮起。
+        let isGame = (st.profile ?? "code") == "game"
+        let gameAlive = st.alive && isGame
+        if gameAlive != gameSessionActive {
+            gameSessionActive = gameAlive
+            if gameAlive { chatStore.appendSystemMessage("去玩游戏了") }
+            else { terminalExpanded = false }
+        }
+        let codeAlive = st.alive && !isGame
         guard st.enabled else {
             if codeMode { codeMode = false; terminalExpanded = false }
             return
         }
-        guard st.alive != codeMode else { return }
-        codeMode = st.alive
-        if !st.alive { terminalExpanded = false }
-        if st.alive { chatStore.appendSystemMessage("已切进 Code 模式") }
+        guard codeAlive != codeMode else { return }
+        codeMode = codeAlive
+        if !codeAlive { terminalExpanded = false }
+        if codeAlive { chatStore.appendSystemMessage("已切进 Code 模式") }
     }
 
     /// Code 模式的发送：文字 + 图片进会话，回复走待送达盒子回来。
@@ -605,11 +684,11 @@ struct ContentView: View {
               !trimmed.isEmpty || pendingSticker != nil
                 || !pendingImages.isEmpty || !pendingFiles.isEmpty else { return }
 
-        // Code 模式：走 tmux 会话那条管道。表情没接——在一个正在写代码的会话里没什么意义，
-        // 挡住说清楚就行。
-        if codeMode {
+        // 会话模式（code/游戏）：走 tmux 会话那条管道。表情没接——在那种会话里没什么
+        // 意义，挡住说清楚就行。
+        if sessionMode {
             if pendingSticker != nil {
-                errorText = "Code 模式发不了表情，退出 Code 模式再发。"
+                errorText = "会话模式发不了表情，等 TA 回聊天再发。"
                 return
             }
             sendToCode(trimmed)
@@ -746,10 +825,13 @@ struct ContentView: View {
                     // 对方去用工具了，下一段还没来 → 重新亮"正在输入"，
                     // 分清"说完了"和"还在忙"（下一段 .text 一到会自动收起）
                     isWaiting = true
-                case .memory(let tool, _, let ok, let reason):
+                case .memory(let tool, let text, let ok, let reason):
                     // 中途工具操作 → 就地内联灰字（成功的网页除外：finalize 会补一张可点的卡片）
                     if !ok {
                         chatStore.appendMemoryNote(memoryFailNoteText(tool: tool, reason: reason))
+                    } else if tool == "gametask" {
+                        // 派引擎跑日常：灰字带上任务清单（text），机主一眼能核对派了什么
+                        chatStore.appendMemoryNote("派引擎去跑日常：\(text)")
                     } else if tool != "webpage" {
                         chatStore.appendMemoryNote(memoryNoteText(tool: tool))
                     }
@@ -851,6 +933,11 @@ struct ContentView: View {
             codeAvailable = true
             chatStore.appendSystemMessage("已切进 Code 模式")
         }
+        // 他这轮自己切去玩游戏了（调了 game_start）→ 终端面板亮起，后续消息改道会话。
+        if resp.game_started == true, !gameSessionActive {
+            gameSessionActive = true
+            chatStore.appendSystemMessage("去玩游戏了")
+        }
         // 他这轮做/改的网页 → 网页卡片消息（stored 只有标题，从后端反查 id）。
         // 只认真做成了的（ok=false 的那次页面根本没生成，反查 id 只会挂错一张卡片）。
         appendDoneOnlyStored(resp.stored)
@@ -908,6 +995,7 @@ struct ContentView: View {
         case "webpage": return "做了一个网页"
         case "mail":    return "寄出了一封邮件"
         case "mail_draft": return "写了封信放进草稿信箱，等你过目"
+        case "gametask": return "派引擎去跑游戏日常了"
         default:        return "记住了一件事"
         }
     }
@@ -922,6 +1010,8 @@ struct ContentView: View {
         case "i":       what = "想记下一个关于自己的念头"
         case "webpage": what = "想做一个网页"
         case "codemode": what = "想切去 Code 模式"
+        case "gamemode": what = "想切去玩游戏"
+        case "gametask": what = "想派引擎跑游戏日常"
         case "mail", "mail_draft": what = "想寄一封邮件"
         default:        what = "想记住一件事"
         }
@@ -1027,8 +1117,8 @@ struct ContentView: View {
     /// Code 模式下整个禁掉：那边的操作有真实副作用（改了文件、跑过命令），
     /// 重放一遍历史等于再干一次。
     private func startEdit(_ message: ChatMessage) {
-        guard !codeMode else {
-            errorText = "Code 模式下不能编辑/重新生成（那边的操作有真实副作用），退出 Code 模式再用。"
+        guard !sessionMode else {
+            errorText = "会话模式（Code/游戏）下不能编辑/重新生成（那边的操作有真实副作用），等会话结束再用。"
             return
         }
         editingText = message.plainText

@@ -238,6 +238,7 @@ class ChatResponse(BaseModel):
     desc_updates: list[DescUpdate] = []  # 这轮他改的表情描述
     next_wake_hint: Optional[str] = None  # 这轮他若定了下次醒来 → 现成的灰字提示文案；没定则 None
     code_started: bool = False           # 这轮他自己切进了 code 模式 → app 收到翻 codeMode
+    game_started: bool = False           # 这轮他自己切去玩游戏了 → app 亮终端面板 + 系统灰字
 
 
 def _prepare_chat(req: ChatRequest) -> tuple[str, dict]:
@@ -364,6 +365,9 @@ def finalize_chat_reply(reply: str, stored: list[dict], req: ChatRequest,
     # 要 ok=True——切失败了（如"会话占用中"）还翻开关的话，后续消息会往一个不存在的
     # 会话里发。万一判据把成功误读成失败，回前台的 /code/status 对齐会把它补回来。
     code_started = any(s.get("tool") == "codemode" and s.get("ok", True) for s in stored)
+    # 同款：TA 自己调 game_start 切去玩游戏。app 收到就标游戏会话活着（终端面板照 code
+    # 模式那套亮起）；失败不置位，回前台 /code/status 的 profile 字段兜底对齐。
+    game_started = any(s.get("tool") == "gamemode" and s.get("ok", True) for s in stored)
 
     # 聊天里存/改的记忆也记进 wake_log（source=chat，无 thoughts 不进时间线）：
     # 醒来的"别重复存"清单靠它才看得到聊天里已存过的。
@@ -387,6 +391,7 @@ def finalize_chat_reply(reply: str, stored: list[dict], req: ChatRequest,
         desc_updates=[DescUpdate(**u) for u in desc_updates],
         next_wake_hint=next_wake_hint,
         code_started=code_started,
+        game_started=game_started,
     )
 
 
