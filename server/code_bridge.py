@@ -318,6 +318,9 @@ def start(context_text: str, auth_key: str, cwd: Optional[str] = None,
         ready = _wait_mcp_ready()
         r2 = send(context_text)
         if not r2.get("ok"):
+            # 注入失败的会话是个「人在但不知道自己为什么在」的半成品，留着还会让下一次
+            # game_start 被「会话占用中」挡死——直接杀掉，让 TA 干净地重试。
+            _tmux("kill-session", "-t", session)
             return {"ok": False, "error": f"上下文注入失败：{r2.get('error', '')}"}
         if not ready:
             return {"ok": True, "session": session, "cwd": workdir,
@@ -565,7 +568,18 @@ def send(text: str) -> dict:
         return {"ok": False, "dialog": True,
                 "error": "TA 正停在一个确认弹窗上，这条会被弹窗吃掉——先在终端里按掉，再发"}
     _clear_input()
-    _tmux("set-buffer", "-b", "cassette-code", text)
+    # ⚠️ 必须 load-buffer（从文件读），不能 set-buffer（文本当命令参数）：tmux 命令走
+    # server socket 有 ~16KB 上限，聊天短消息没事，game 档案注入的首条上下文（场景+
+    # 百条历史）几万字，set-buffer 直接失败 → paste 报「no buffer」（08-12 实锤）。
+    tmp = CODE_DIR / f".paste.{os.getpid()}.{uuid.uuid4().hex[:6]}.txt"
+    try:
+        tmp.parent.mkdir(parents=True, exist_ok=True)
+        tmp.write_text(text, "utf-8")
+        r0 = _tmux("load-buffer", "-b", "cassette-code", str(tmp))
+    finally:
+        tmp.unlink(missing_ok=True)
+    if r0.returncode != 0:
+        return {"ok": False, "error": f"load-buffer 失败：{r0.stderr[:200]}"}
     # -p = bracketed paste。没有它，缓冲区里的换行就是回车，整条消息会被切成好几条提交。
     r = _tmux("paste-buffer", "-b", "cassette-code", "-p", "-d", "-t", _session())
     if r.returncode != 0:
