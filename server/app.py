@@ -55,6 +55,29 @@ def _browser_keeper_watchdog() -> None:
         time.sleep(2)
 
 
+def _mail_watcher() -> None:
+    """邮箱 watcher：每拍看一眼有没有新信（mail_bridge.watch_tick）。网络活动只在这个
+    线程；wake 的预闸门只读它写的本地 flag（保持纯本地）。按插件开关做门——mail 没启用
+    或没配置就纯睡觉，商店里拨开关不用重启。失败只在状态翻转时报一次，别每 5 分钟刷屏。"""
+    err_logged = False
+    while True:
+        on = False
+        try:
+            on = bool(json.loads((state_store.STATE_DIR / "plugins_enabled.json")
+                                 .read_text("utf-8")).get("mail"))
+        except Exception:
+            pass
+        if on and mail_bridge.configured():
+            try:
+                mail_bridge.watch_tick()
+                err_logged = False
+            except Exception as e:
+                if not err_logged:
+                    logerr(f"mail watcher 失败（恢复前不再报）: {e}")
+                    err_logged = True
+        time.sleep(mail_bridge.poll_sec())
+
+
 @asynccontextmanager
 async def _lifespan(_app: FastAPI):
     """启动 wake 调度器（on_event 已被 FastAPI 弃用，用 lifespan）。"""
@@ -65,6 +88,7 @@ async def _lifespan(_app: FastAPI):
         tasks.append(asyncio.create_task(_code_dialog_watchdog()))
     threading.Thread(target=_browser_keeper_watchdog, daemon=True,
                      name="browser-keeper-watchdog").start()
+    threading.Thread(target=_mail_watcher, daemon=True, name="mail-watcher").start()
     yield
     for t in tasks:
         t.cancel()

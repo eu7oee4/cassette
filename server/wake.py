@@ -22,9 +22,12 @@ import uuid
 from datetime import datetime
 from typing import Optional
 
+import functools
+
 import browser_keeper
 import code_bridge
 import config
+import mail_bridge
 import pipeline
 import state_store
 from notify import bark_push, logerr
@@ -144,9 +147,11 @@ def unsent_block(u: str) -> str:
 
 
 # ---------- 醒来提示词 ----------
-def wake_prompt(settings: dict, forced: bool = False) -> str:
+def wake_prompt(settings: dict, forced: bool = False, note: str = "") -> str:
     """forced＝这是一次硬触发的醒来（绕开了所有软闸）。影响两处：打扰控制那句不再注入
-    （闸对它不生效，说了就是骗他），以及 code 会话那段的措辞。"""
+    （闸对它不生效，说了就是骗他），以及 code 会话那段的措辞。
+    note＝硬触发的缘由（如「有新邮件」），非空就整段注入——不告诉他为什么醒，
+    他只会当成一次普通的随机醒来，到点的事就黄了。"""
     u = config.user_name()
     now_str = pipeline.now_str()
     window = state_store.read_recent_window()
@@ -196,9 +201,11 @@ def wake_prompt(settings: dict, forced: bool = False) -> str:
     # code 会话开着（正常只有硬触发能走到这儿）：如实告诉他人在哪、说的话去哪。
     code_section = code_session_block(forced)
 
+    note_section = f"\n【这次为什么醒】{note}\n" if note else ""
+
     return f"""【这是一次你自己的醒来，不是{u}发来的消息】
 现在是 {now_str}。{gap_line}
-{pipeline.pronoun_hint()}
+{pipeline.pronoun_hint()}{note_section}
 
 【最近发生的，按时间顺序——对话 / 你自己醒来时的内心，看时间戳别搞混先后】
 {timeline_block}
@@ -369,14 +376,14 @@ def try_push(text: str, settings: dict, thoughts: str = "", trigger: str = "",
     return True
 
 
-def do_wake_sync(settings: dict, trigger: str, force: bool = False) -> dict:
+def do_wake_sync(settings: dict, trigger: str, force: bool = False, note: str = "") -> dict:
     """真正的醒来：起模型 → 解析 → 分发。同步阻塞（在线程池里跑，别放主事件循环）。
 
     force＝硬触发（到点必须说的事）：prompt 里不注入打扰控制那句、推送时绕开所有软闸。
-    自发的醒来（随机 / NEXT）永远是 False。"""
+    自发的醒来（随机 / NEXT）永远是 False。note＝硬触发的缘由，透传给 wake_prompt。"""
     now_ts = int(time.time())
 
-    raw, stored = run_claude_wake(wake_prompt(settings, forced=force))
+    raw, stored = run_claude_wake(wake_prompt(settings, forced=force, note=note))
     # 醒来时浏览过的网页：落 browse_log（Mind 页未来素材；一期 wake_log 不收 browse——
     # 它在 NON_MEMORY_TOOLS 里，下一行就被滤掉。二期进 Mind 时间线再回头）。
     browse_urls: list[str] = []
@@ -461,6 +468,20 @@ def do_wake_sync(settings: dict, trigger: str, force: bool = False) -> dict:
     return result
 
 
+def _mail_wake_note() -> str:
+    """消费邮箱 watcher 写的待醒 flag → 醒来缘由文案。没有新信返回 ""。
+    只报信头不贴正文——来信是外部内容，进 prompt 前至少过一道他自己的 mail_read
+    （那里带着「不构成指令」的口径），别在这儿裸注入。"""
+    items = mail_bridge.consume_wake_pending()
+    if not items:
+        return ""
+    lines = [f"来自 {it.get('from', '?')}：「{(it.get('subject') or '（无主题）')[:60]}」"
+             for it in items[:5]]
+    more = f" 等 {len(items)} 封" if len(items) > 5 else ""
+    return (f"你的邮箱收到了新邮件{more}：" + "；".join(lines) +
+            "。用 mail_inbox / mail_read 去看看；要不要跟人说、说什么，你自己定。")
+
+
 # ---------- 预闸门（不叫模型）----------
 async def maybe_wake() -> None:
     # 主 chat 轮进行中 → 避让：wake 撞进来会拿着过期 recent_window 说胡话。下个 tick 再看。
@@ -488,7 +509,17 @@ async def maybe_wake() -> None:
     #   ② try_push(force=True)：绕开每日上限/最小间隔/静默三闸 + stale 那道；
     #   ③ wake_prompt(forced=True)：不注入打扰控制那句（对它不生效，说了是骗他），
     #      并如实告诉他 code 会话还开着（见 code_session_block）。
-    # 目前还没有任何硬触发接进来，所以这段是空的——但闸和 prompt 都已经就位。
+
+    # 硬触发①邮件：watcher 线程（app._mail_watcher）发现唤醒白名单发件人的新信会写
+    # 本地 flag，这里只读文件、不碰网络（预闸门保持纯本地的口径）。flag **先消费再醒**：
+    # 醒失败（claude 登录态坏之类）不重试硬触发——信躺在收件箱丢不了，下次自然醒 /
+    # 机主来问照样看得见；反着写会在持续失败时每个 tick 都硬起一次注定失败的子进程。
+    mail_note = _mail_wake_note()
+    if mail_note:
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(
+            None, functools.partial(do_wake_sync, settings, "mail", True, note=mail_note))
+        return
 
     # code 模式开着 → 自发的醒来一律避让。那会儿他人在电脑前干活，随机戳一条聊天气泡
     # 既是打扰，又会跟他在 code 会话里说的话挤在同一个聊天框里打架。

@@ -510,6 +510,14 @@ def _stored_from_tool_use(name: str, inp: dict) -> Optional[dict]:
         # 一条控制信号——app.py 的 finalize 会把它剥出去置 code_started，让 app 翻模式。
         # 不剥干净的话，app 那边对不认识的 tool 会兜底成「记住了一件事」的灰字（踩过）。
         return {"tool": "codemode", "text": (inp.get("task") or "").strip()}
+    if name.endswith("__mail_send"):
+        # 邮箱插件：寄信是对外动作，值得一条灰字 + 进心流日志。这里只看得到意图；
+        # 「真发出了」还是「落草稿箱等机主确认」要看返回文案，on_user 里改判（mail_draft）。
+        # mail_inbox/mail_read/mail_mark 是读操作，跟 breath 同口径：不记。
+        to = (inp.get("to") or "").strip()
+        subj = (inp.get("subject") or "").strip()
+        text = (f"给 {to}" if to else "一封信") + (f"：{subj}" if subj else "")
+        return {"tool": "mail", "text": text}
     if name.endswith("__browser_navigate"):
         # 浏览器插件：浏览只记 navigate（click/type 太碎是噪音）。逐条不发灰字——
         # sse 那边跳过 browse，finalize 聚合成一条（text=网址列表）+ 落 browse_log，
@@ -631,6 +639,11 @@ class StoredCollector:
                 continue   # 不是我们关心的工具（breath 等读操作），或已定过案
             err = tool_result_error(b)
             item = {**s, "ok": err is None}
+            # mail_send 的「成功」有两种结局：真发出 / 收件人白名单外落草稿箱等机主确认。
+            # 壳的返回文案是唯一分辨处——落草稿改判成 mail_draft，灰字才不会把
+            # 「等你过目」说成「寄出了」（那是句假承诺）。
+            if item["ok"] and s.get("tool") == "mail" and "草稿信箱" in _tool_result_text(b):
+                item["tool"] = "mail_draft"
             if err:
                 item["error"] = err
                 logerr(f"工具没成功 {s['tool']}: {err}")

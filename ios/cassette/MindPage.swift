@@ -201,6 +201,8 @@ private struct MindRow: View {
         case "feel":  return "🫧"
         case "trace": return "✏️"
         case "i":     return "🌱"
+        case "mail":  return "✉️"
+        case "mail_draft": return "📮"   // 落草稿箱等机主过目的那封
         default:      return "📥"
         }
     }
@@ -212,6 +214,7 @@ private struct MindRow: View {
         case "feel":  what = "这份心情没存下"
         case "trace": what = "这次修改没生效"
         case "i":     what = "这个念头没存下"
+        case "mail", "mail_draft": what = "这封信没寄成"
         default:      what = "这条没存下"
         }
         let why = (s.error ?? "").trimmingCharacters(in: .whitespacesAndNewlines)

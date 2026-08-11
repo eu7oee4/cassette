@@ -246,6 +246,102 @@ def _quiet_logout(conn) -> None:
         pass
 
 
+# ---------- watcher（新邮件 → 醒来的硬触发）----------
+# app.py 起一个常驻线程，每 poll_sec() 拍一次 watch_tick()：**网络活动全部关在那个
+# 线程里**，wake 的预闸门只读本地 flag 文件，保持纯本地（见 wake.maybe_wake 的口径）。
+# 唤醒白名单发件人（WAKE_FROM，默认 = 发信白名单 ∪ beacon@theolorne.com）来信才写
+# flag；其他信只推进游标，躺收件箱等自然醒 / 机主让看——机主 2026-08-11 拍板的规则。
+WATCH_PATH = MAIL_DIR / "watch.json"                # {"last_uid": N} 已看到哪的游标
+WAKE_PENDING_PATH = MAIL_DIR / "wake_pending.json"  # 待醒 flag：[{uid,from,subject}, ...]
+
+
+def poll_sec() -> int:
+    return max(60, int(_env("POLL_SEC", "300") or "300"))
+
+
+def _wake_from(cfg: dict) -> set[str]:
+    raw = _env("WAKE_FROM")
+    if raw:
+        return {a.lower() for a in re.split(r"[,，;；\s]+", raw) if a}
+    return cfg["allow_to"] | {"beacon@theolorne.com"}
+
+
+def _write_watch(last_uid: int) -> None:
+    MAIL_DIR.mkdir(parents=True, exist_ok=True)
+    tmp = MAIL_DIR / f".watch.{os.getpid()}.tmp"
+    tmp.write_text(json.dumps({"last_uid": last_uid}), "utf-8")
+    tmp.replace(WATCH_PATH)
+
+
+def watch_tick() -> None:
+    """看一眼有没有新信。游标之后的新 uid：唤醒白名单发件人 → 记进 flag；其余只推进
+    游标。**第一拍只立游标不回溯**——别把陈年旧信当成刚到的，一装插件就炸一次醒来。"""
+    cfg = _cfg()
+    conn = _imap(cfg)
+    try:
+        typ, data = conn.uid("search", None, "ALL")
+        if typ != "OK":
+            return
+        uids = sorted(int(u) for u in (data[0] or b"").split())
+        if not uids:
+            return
+        try:
+            last = int(json.loads(WATCH_PATH.read_text("utf-8"))["last_uid"])
+        except Exception:
+            last = None
+        if last is None:
+            _write_watch(uids[-1])
+            return
+        fresh = [u for u in uids if u > last]
+        if not fresh:
+            return
+        wake_from = _wake_from(cfg)
+        hits = []
+        for u in fresh:
+            typ, parts = conn.uid("fetch", str(u).encode(),
+                                  "(BODY.PEEK[HEADER.FIELDS (FROM SUBJECT)])")
+            if typ != "OK" or not parts or parts[0] is None:
+                continue
+            msg = email.message_from_bytes(
+                b"".join(p[1] for p in parts if isinstance(p, tuple)),
+                policy=email.policy.compat32)
+            addrs = {a.lower() for _, a in getaddresses([msg.get("From") or ""]) if a}
+            if addrs & wake_from:
+                hits.append({"uid": str(u), "from": _decode_header(msg.get("From")),
+                             "subject": _decode_header(msg.get("Subject")) or "（无主题）"})
+        # 游标推进和 flag 写入都在成功扫完之后：中途抛异常就整拍作废，下拍重来，
+        # 顶多重复看一遍信头，绝不会静默跳过一段 uid。
+        _write_watch(uids[-1])
+        if hits:
+            _merge_wake_pending(hits)
+    finally:
+        _quiet_logout(conn)
+
+
+def _merge_wake_pending(hits: list[dict]) -> None:
+    with _LOCK:
+        try:
+            old = json.loads(WAKE_PENDING_PATH.read_text("utf-8"))
+        except Exception:
+            old = []
+        seen = {h["uid"] for h in old}
+        merged = old + [h for h in hits if h["uid"] not in seen]
+        tmp = MAIL_DIR / f".pending.{os.getpid()}.tmp"
+        tmp.write_text(json.dumps(merged, ensure_ascii=False), "utf-8")
+        tmp.replace(WAKE_PENDING_PATH)
+
+
+def consume_wake_pending() -> list[dict]:
+    """读并清掉待醒 flag（wake 预闸门用，纯本地、不碰网络）。没有则空列表。"""
+    with _LOCK:
+        try:
+            items = json.loads(WAKE_PENDING_PATH.read_text("utf-8"))
+        except Exception:
+            return []
+        WAKE_PENDING_PATH.unlink(missing_ok=True)
+    return items if isinstance(items, list) else []
+
+
 _TAG_RE = re.compile(r"<(?:script|style)[^>]*>.*?</(?:script|style)>", re.S | re.I)
 _HTML_RE = re.compile(r"<[^>]+>")
 

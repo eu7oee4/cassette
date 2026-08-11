@@ -13,7 +13,8 @@ struct ContentView: View {
 
     @State private var draft: String = ""
     @State private var drawerOpen = false            // 抽屉（猫爪/左缘右滑开，阴影点击/左滑关）
-    @State private var navPath: [DrawerPage] = []    // 抽屉 push 的页面栈
+    @State private var navPath: [DrawerPage] = []
+    @State private var draftCount = 0    // 草稿信箱待寄数（抽屉角标；挂在前台轮询里刷新）    // 抽屉 push 的页面栈
     @State private var chatScrollTarget: UUID? = nil // 聊天记录页点行 → 聊天跳到那条气泡
     @AppStorage("hasOnboarded") private var hasOnboarded = false   // 首启起名引导
 
@@ -130,11 +131,13 @@ struct ContentView: View {
             await syncCodeMode()   // 他可能在断流/后台期间自己切进了 Code 模式 → 回前台对齐
             await syncPending()
             await reconcileRescues()
+            await refreshDraftCount()
             while !Task.isCancelled {
                 // Code 模式下他说的每句话都靠这条通道回来 → 提到 3s；平时 15s 省电。
                 try? await Task.sleep(for: .seconds(codeMode ? 3 : 15))
                 await syncPending()
                 await reconcileRescues()
+                await refreshDraftCount()
             }
         }
     }
@@ -155,6 +158,8 @@ struct ContentView: View {
                     chatScrollTarget = id
                 }
             }
+        case .drafts:
+            DraftsPage()
         case .plugins:
             PluginsPage()
         case .settings:
@@ -174,7 +179,7 @@ struct ContentView: View {
                     .gesture(DragGesture(minimumDistance: 20)
                         .onEnded { v in if v.translation.width < -30 { drawerOpen = false } })
                     .transition(.opacity)
-                DrawerPanel(agentName: topTitle) { page in
+                DrawerPanel(agentName: topTitle, draftCount: draftCount) { page in
                     drawerOpen = false
                     navPath.append(page)
                 }
@@ -901,6 +906,8 @@ struct ContentView: View {
         case "trace":   return "调整了一条记忆"
         case "i":       return "记下了一个关于自己的念头"
         case "webpage": return "做了一个网页"
+        case "mail":    return "寄出了一封邮件"
+        case "mail_draft": return "写了封信放进草稿信箱，等你过目"
         default:        return "记住了一件事"
         }
     }
@@ -915,10 +922,19 @@ struct ContentView: View {
         case "i":       what = "想记下一个关于自己的念头"
         case "webpage": what = "想做一个网页"
         case "codemode": what = "想切去 Code 模式"
+        case "mail", "mail_draft": what = "想寄一封邮件"
         default:        what = "想记住一件事"
         }
         let why = reason.trimmingCharacters(in: .whitespacesAndNewlines)
         return why.isEmpty ? "\(what)，但没成" : "\(what)，但没成：\(why)"
+    }
+
+    /// 草稿信箱待寄数（抽屉角标）。失败静默清零——角标是提示不是真相，
+    /// 后端不在时不该拿旧数字亮着。
+    @MainActor
+    private func refreshDraftCount() async {
+        let wrap = try? await chatService.getMailDrafts()
+        draftCount = (wrap?.plugin_installed ?? false) ? (wrap?.items.count ?? 0) : 0
     }
 
     // MARK: - 待送达同步（断连补投）
