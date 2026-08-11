@@ -70,13 +70,16 @@ NO_WAKE_PLUGINS = {"codemode"}
 #
 # ⚠️ 新插件默认落在「醒来照挂」那一档：不写进这里、也不写进 NO_WAKE_PLUGINS，
 # 等于醒来无条件有它，而且没有开关可关。要收就得显式写名字。
-WAKE_TOGGLEABLE = {"browser", "beacon"}
+WAKE_TOGGLEABLE = {"browser", "beacon", "mail"}
 WAKE_ENABLED_PATH = state_store.STATE_DIR / "plugins_wake_enabled.json"
 
-# 醒来那条路**插件照挂、但摘掉个别工具**——比上面两档更细的第四档（工具级）。
+# 醒来那条路**插件照挂、但默认摘掉个别工具**——比上面两档更细的第四档（工具级）。
+# 同时也在 WAKE_TOGGLEABLE 里的插件，「醒来能用」开关的语义随之变细：**开关关的时候
+# 不是整个不挂，而是只摘这里列的工具**；开关打开才整套放开。
 # mail 就是为它生的：读信醒来必须能用（「其他信躺收件箱等自然醒自己翻」是机主定的
-# 既定用法），但发信是对外动作——白名单+草稿箱已经拦住陌生收件人，这里摘掉 send
-# 挡的是剩下那半截：凌晨三点没人看着，也不该往白名单地址（机主自己）发信。
+# 既定用法），所以整插件不能一刀切；发信是对外动作——白名单+草稿箱已经拦住陌生
+# 收件人，默认摘掉 send 挡的是剩下那半截：凌晨三点没人看着，要不要能往白名单地址
+# （机主自己）发信，开关交机主（2026-08-11 拍板做成开关）。
 # 机制：只从 --tools/--allowedTools 白名单里摘（strict 模式白名单外调不了），
 # mcp server 本身照起，不用插件配合。
 WAKE_TOOL_EXCLUDE: dict[str, set[str]] = {"mail": {"mail_send"}}
@@ -135,8 +138,8 @@ REGISTRY: dict[str, dict] = {
     # 装这个 = 给 TA 一个自己的信箱（读信 + 发信）。真身在宿主 mail_bridge.py（app 的
     # 「草稿信箱」确认发送共用同一份代码）；宿主侧需先在 .env 配好 CASSETTE_MAIL_*。
     # 护栏全在 bridge：收件人白名单内直发，白名单外落草稿等机主 app 里确认；每小时封顶。
-    # 醒来那条路整插件照挂（自然醒翻收件箱是既定用法），但 mail_send 被
-    # WAKE_TOOL_EXCLUDE 摘掉——见下面那条注释。
+    # 醒来那条路整插件照挂（自然醒翻收件箱是既定用法），但 mail_send 默认被
+    # WAKE_TOOL_EXCLUDE 摘掉，商店里的「醒来能用」开关放开它——见上面那两段注释。
     "mail": {
         "repo": "https://github.com/eu7oee4/cassette-plugin-mail",
         "commit": "703f18e2f3ece0308337ab97b468ec3620669ed3",   # 0.1.0
@@ -341,10 +344,13 @@ def mounted(context: str = "chat") -> tuple[Optional[str], list[str]]:
     context＝这次是给谁挂：'chat'（聊天，全挂）或 'wake'（醒来，摘掉 NO_WAKE_PLUGINS）。
     认不出的 context 一律按 chat 处理——多挂比少挂容易被发现，静默少挂会让人以为工具坏了。"""
     cfg_path = MCP_CONFIG_PATHS.get(context, MCP_CONFIG_PATHS["chat"])
+    wake_on: dict = {}
     if context == "wake":
-        # 硬禁的 + 有开关但用户没打开的，醒来都不挂。
+        # 硬禁的 + 有开关但用户没打开的，醒来都不挂——除非它在 WAKE_TOOL_EXCLUDE 里
+        # 有工具级名单：那种开关关掉只摘名单里的工具，插件本身照挂。
         wake_on = _read_wake_enabled()
-        blocked = NO_WAKE_PLUGINS | {n for n in WAKE_TOGGLEABLE if not wake_on.get(n)}
+        blocked = NO_WAKE_PLUGINS | {n for n in WAKE_TOGGLEABLE
+                                     if not wake_on.get(n) and n not in WAKE_TOOL_EXCLUDE}
     else:
         blocked = set()
     enabled = _read_enabled()
@@ -359,7 +365,8 @@ def mounted(context: str = "chat") -> tuple[Optional[str], list[str]]:
         servers[name] = {"type": "stdio", "command": sys.executable,
                          "args": [str(PLUGINS_DIR / name / m["entry"])]}
         tools += [f"mcp__{name}__{t}" for t in m["tools"]
-                  if context != "wake" or t not in WAKE_TOOL_EXCLUDE.get(name, ())]
+                  if context != "wake" or wake_on.get(name)
+                  or t not in WAKE_TOOL_EXCLUDE.get(name, ())]
     if not servers:
         return None, []
     payload = json.dumps({"mcpServers": servers}, ensure_ascii=False)
