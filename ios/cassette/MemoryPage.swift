@@ -219,12 +219,14 @@ struct MemoryPage: View {
                             Button(role: .destructive) {
                                 Task { try? await service.archiveMemory(id: m.id); await reload() }
                             } label: { Label("删除", systemImage: "trash") }
+                            .tint(.red)   // 全 app 的 .tint(Color.theme) 会盖掉破坏性默认红，显式压回红
                         } else {
                             // 删除：真正让它从列表/搜索/回忆里消失（红键）。名字叫「删除」跟
                             // 「自动归档」栏区分开——底层仍是 delete-to-archive，Ombre 侧可 restore。
                             Button(role: .destructive) {
                                 Task { try? await service.archiveMemory(id: m.id); await reload() }
                             } label: { Label("删除", systemImage: "trash") }
+                            .tint(.red)   // 全 app 的 .tint(Color.theme) 会盖掉破坏性默认红，显式压回红
                             // 遗忘/取消遗忘：toggle，按钮文案本身就是当前状态（灰键，非破坏性）。
                             Button {
                                 Task { try? await service.forgetMemory(id: m.id); await reload() }
@@ -478,6 +480,7 @@ private struct EditMemorySheet: View {
                 }
                 Section {
                     Button("删除这条记忆", role: .destructive) { confirmArchive = true }
+                        .foregroundStyle(.red)   // 全 app tint 会把破坏性红染成主题蓝，显式压回红
                 } footer: {
                     Text("删除＝从列表、搜索、回忆里都移走（比遗忘彻底）。Ombre 不做物理删除，日后仍可恢复。")
                 }
