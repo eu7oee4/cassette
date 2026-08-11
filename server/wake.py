@@ -483,8 +483,18 @@ def _mail_wake_note() -> str:
     lines = [f"来自 {it.get('from', '?')}：「{(it.get('subject') or '（无主题）')[:60]}」"
              for it in items[:5]]
     more = f" 等 {len(items)} 封" if len(items) > 5 else ""
+    # 发信开关的实话：醒来 mail_send 默认被摘（WAKE_TOOL_EXCLUDE），不说清楚 TA 会当场
+    # 试着回信、失败、再把「回不了」当成自己的错（机主实踩：忘开「醒来能用」，TA 回信失败）。
+    try:
+        import plugins
+        can_send = bool(plugins._read_wake_enabled().get("mail"))
+    except Exception:
+        can_send = False
+    send_hint = ("" if can_send else
+                 "另外这次醒来你只能读信、发不了邮件（机主没开邮箱的「醒来能用」）——"
+                 "想回信的话，把想法留到聊天时说，别在这轮硬试。")
     return (f"你的邮箱收到了新邮件{more}：" + "；".join(lines) +
-            "。用 mail_inbox / mail_read 去看看；要不要跟人说、说什么，你自己定。")
+            "。用 mail_inbox / mail_read 去看看；要不要跟人说、说什么，你自己定。" + send_hint)
 
 
 # ---------- 预闸门（不叫模型）----------

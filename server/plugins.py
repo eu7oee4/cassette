@@ -146,7 +146,7 @@ REGISTRY: dict[str, dict] = {
     # WAKE_TOOL_EXCLUDE 摘掉，商店里的「醒来能用」开关放开它——见上面那两段注释。
     "mail": {
         "repo": "https://github.com/eu7oee4/cassette-plugin-mail",
-        "commit": "703f18e2f3ece0308337ab97b468ec3620669ed3",   # 0.1.0
+        "commit": "c64af981fc37f13af6fe655ea99dc82c3ae7ddbc",   # 0.1.1：mail_read 带附件
         "display_name": "邮箱",
         "description": "TA 自己的邮箱：读信、发信（白名单外的收件人要机主在「草稿信箱」里确认）",
     },

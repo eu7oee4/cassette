@@ -217,9 +217,61 @@ def read_mail(uid: str) -> dict:
             "subject": _decode_header(msg.get("Subject")) or "（无主题）",
             "date": _fmt_date(msg),
             "body": body,
+            "attachments": _extract_attachments(msg, uid),
         }
     finally:
         _quiet_logout(conn)
+
+
+# 附件的 inline 上限：文本附件带全文（超了截断）；图片带 base64（太大只报名字——
+# 进上下文的图有 API 上限，别为一张 10MB 原图撑爆一轮对话）；其余类型只报名字和大小。
+_ATT_TEXT_CAP = 20000
+_ATT_IMAGE_MAX = 3 * 1024 * 1024
+
+
+def _safe_filename(name: str) -> str:
+    """外部来信的文件名落盘前消毒：去路径分隔和控制字符，限长。空了给个兜底名。"""
+    name = re.sub(r"[/\\\x00-\x1f]", "_", (name or "").strip()).strip(". ")
+    return name[:80] or "attachment.bin"
+
+
+def _extract_attachments(msg, uid: str) -> list[dict]:
+    """信里的附件 → [{filename, content_type, size, text? | image_b64? | saved_path?}]。
+    一期连附件名字都不报，TA 根本不知道有附件（mianmian 那边寄来的信实踩）。
+    能进上下文的直接带上（文本附件给全文、不太大的图给 base64）；进不了的（PDF、
+    超大图、二进制）落盘 state/mail/attachments/<uid>/，把路径告诉 TA——code 模式里
+    TA 自己能打开，机主在 Mac 上也看得到。"""
+    out = []
+    if not msg.is_multipart():
+        return out
+    for part in msg.walk():
+        fname = part.get_filename()
+        cd = (part.get("Content-Disposition") or "")
+        if not fname and not cd.lower().startswith("attachment"):
+            continue
+        payload = part.get_payload(decode=True) or b""
+        ctype = part.get_content_type()
+        att = {"filename": _decode_header(fname) if fname else "未命名附件",
+               "content_type": ctype, "size": len(payload)}
+        if ctype.startswith("text/") or ctype in ("application/json", "application/xml"):
+            text = _decode_bytes(payload, part.get_content_charset())
+            if len(text) > _ATT_TEXT_CAP:
+                text = text[:_ATT_TEXT_CAP] + f"\n…（附件太长截断，原文 {len(text)} 字符）"
+            att["text"] = text
+        elif ctype.startswith("image/") and 0 < len(payload) <= _ATT_IMAGE_MAX:
+            import base64
+            att["image_b64"] = base64.b64encode(payload).decode("ascii")
+        elif payload:
+            try:
+                d = MAIL_DIR / "attachments" / str(uid)
+                d.mkdir(parents=True, exist_ok=True)
+                p = d / _safe_filename(att["filename"])
+                p.write_bytes(payload)
+                att["saved_path"] = str(p)
+            except OSError:
+                pass   # 落盘失败就只报元数据——附件还在信里，不算丢
+        out.append(att)
+    return out
 
 
 def mark(uid: str, action: str) -> str:
