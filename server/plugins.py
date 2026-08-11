@@ -73,6 +73,14 @@ NO_WAKE_PLUGINS = {"codemode"}
 WAKE_TOGGLEABLE = {"browser", "beacon"}
 WAKE_ENABLED_PATH = state_store.STATE_DIR / "plugins_wake_enabled.json"
 
+# 醒来那条路**插件照挂、但摘掉个别工具**——比上面两档更细的第四档（工具级）。
+# mail 就是为它生的：读信醒来必须能用（「其他信躺收件箱等自然醒自己翻」是机主定的
+# 既定用法），但发信是对外动作——白名单+草稿箱已经拦住陌生收件人，这里摘掉 send
+# 挡的是剩下那半截：凌晨三点没人看着，也不该往白名单地址（机主自己）发信。
+# 机制：只从 --tools/--allowedTools 白名单里摘（strict 模式白名单外调不了），
+# mcp server 本身照起，不用插件配合。
+WAKE_TOOL_EXCLUDE: dict[str, set[str]] = {"mail": {"mail_send"}}
+
 
 def _read_wake_enabled() -> dict:
     try:
@@ -123,6 +131,17 @@ REGISTRY: dict[str, dict] = {
         "commit": "2388151f581f099405be49cac652402d0fe60b5e",
         "display_name": "自己切 Code 模式",
         "description": "让 TA 在聊天里自己切到你电脑上去干活（需后端先开启 Code 模式）",
+    },
+    # 装这个 = 给 TA 一个自己的信箱（读信 + 发信）。真身在宿主 mail_bridge.py（app 的
+    # 「草稿信箱」确认发送共用同一份代码）；宿主侧需先在 .env 配好 CASSETTE_MAIL_*。
+    # 护栏全在 bridge：收件人白名单内直发，白名单外落草稿等机主 app 里确认；每小时封顶。
+    # 醒来那条路整插件照挂（自然醒翻收件箱是既定用法），但 mail_send 被
+    # WAKE_TOOL_EXCLUDE 摘掉——见下面那条注释。
+    "mail": {
+        "repo": "https://github.com/eu7oee4/cassette-plugin-mail",
+        "commit": "703f18e2f3ece0308337ab97b468ec3620669ed3",   # 0.1.0
+        "display_name": "邮箱",
+        "description": "TA 自己的邮箱：读信、发信（白名单外的收件人要机主在「草稿信箱」里确认）",
     },
 }
 
@@ -339,7 +358,8 @@ def mounted(context: str = "chat") -> tuple[Optional[str], list[str]]:
             continue
         servers[name] = {"type": "stdio", "command": sys.executable,
                          "args": [str(PLUGINS_DIR / name / m["entry"])]}
-        tools += [f"mcp__{name}__{t}" for t in m["tools"]]
+        tools += [f"mcp__{name}__{t}" for t in m["tools"]
+                  if context != "wake" or t not in WAKE_TOOL_EXCLUDE.get(name, ())]
     if not servers:
         return None, []
     payload = json.dumps({"mcpServers": servers}, ensure_ascii=False)

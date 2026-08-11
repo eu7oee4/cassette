@@ -31,6 +31,7 @@ import urllib.parse
 import browser_keeper
 import code_bridge
 import config
+import mail_bridge
 import ombre_rest
 import plugins
 import pipeline
@@ -1060,6 +1061,38 @@ def plugins_update(body: PluginIn, x_auth: Optional[str] = Header(default=None, 
 def plugins_uninstall(body: PluginIn, x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
     verify_auth(x_auth)
     return plugins.uninstall(body.name)
+
+
+# ---------- 草稿信箱（mail 插件的待发信）----------
+# 白名单外的收件人，mail_send 只落草稿不发；这里给 app 的「草稿信箱」页读列表、
+# 确认发送（白名单的唯一例外：人当场看过、人按的键）、删除。没装插件时列表照常返回
+# （plugin_installed=false，页面据此提示先装插件）。
+
+
+@app.get("/mail/drafts")
+def mail_drafts_list(x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
+    verify_auth(x_auth)
+    return {"items": mail_bridge.drafts_list(),
+            "configured": mail_bridge.configured(),
+            "plugin_installed": (plugins.PLUGINS_DIR / "mail").is_dir()}
+
+
+@app.post("/mail/drafts/{draft_id}/send")
+def mail_draft_send(draft_id: str, x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
+    verify_auth(x_auth)
+    try:
+        return mail_bridge.draft_send(draft_id)
+    except mail_bridge.MailError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/mail/drafts/{draft_id}/delete")
+def mail_draft_delete(draft_id: str, x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
+    verify_auth(x_auth)
+    try:
+        return mail_bridge.draft_delete(draft_id)
+    except mail_bridge.MailError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 # ---------- 网页（webpage 插件的产物）----------
