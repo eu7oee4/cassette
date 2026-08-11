@@ -26,11 +26,25 @@ struct GameLogEntry: Decodable, Identifiable {
     var id: String { "\(ts)-\(task)-\(status)" }
 }
 
-/// GET /game/tasks 的一项（引擎的任务菜单，来自 MaaYuan interface.json）。
+/// 任务的一个可选项（MaaYuan interface.json 的 option：下拉选一个 case）。
+/// `default` 是 Swift 关键字，全仓唯一一处不得不写 CodingKeys。
+struct GameTaskOption: Decodable {
+    let name: String
+    let cases: [String]
+    let defaultCase: String?
+    enum CodingKeys: String, CodingKey { case name, cases, defaultCase = "default" }
+}
+
+/// GET /game/tasks 的一项。separator=true 是 =====xxx===== 分组头，不可跑。
 struct GameTaskItem: Decodable, Identifiable {
     let name: String
     let doc: String?
+    let options: [GameTaskOption]?
+    let separator: Bool?
     var id: String { name }
+    var isSeparator: Bool { separator == true }
+    /// 分组头的显示文字（剥掉两侧的 =）。
+    var separatorTitle: String { name.trimmingCharacters(in: CharacterSet(charactersIn: "= ")) }
 }
 
 extension ChatService {
@@ -53,10 +67,10 @@ extension ChatService {
         catch { throw ChatServiceError.badResponse }
     }
 
-    func startGameTasks(names: [String]) async throws -> String? {
-        struct Body: Encodable { let names: [String] }
+    func startGameTasks(names: [String], options: [String: [String: String]]) async throws -> String? {
+        struct Body: Encodable { let names: [String]; let options: [String: [String: String]] }
         struct Resp: Decodable { let ok: Bool?; let error: String? }
-        let body = try JSONEncoder().encode(Body(names: names))
+        let body = try JSONEncoder().encode(Body(names: names, options: options))
         // 起跑含设备自愈（冷启动模拟器最多 90s），超时放宽
         let data = try await perform(authedRequest("POST", "/game/tasks/start",
                                                    jsonBody: body, timeout: 120))
@@ -84,16 +98,24 @@ extension ChatService {
 
 // MARK: - 游戏页
 
-/// 抽屉 → 游戏：任务引擎的遥控台（勾任务开跑/叫停/看收成）+ 两本笔记本的编辑入口。
+/// 抽屉 → 游戏：任务引擎的遥控台（勾任务/调选项/开跑/叫停/看收成）+ 两本笔记本。
 /// 剧情会话不在这页管——那是聊天里 TA 自己切的，急停在顶栏 ⏸。
 struct GamePage: View {
     private let service = ChatService()
 
+    /// 任务列表区的固定高度：区内自己滚，「开跑」按钮贴在区下不用滑整页。
+    private let taskAreaHeight: CGFloat = 340
+    /// 选项选择的持久化（照 MaaYuan GUI 的思路：改过的下拉选择记住，下次还是它）。
+    /// 只存本机——这是「从这页开跑」的偏好；TA 在聊天里派单有它自己的选项通道。
+    @AppStorage("gameTaskOptionChoices") private var choicesJSON = "{}"
+
     @State private var status: GameStatus? = nil
     @State private var tasks: [GameTaskItem] = []
     @State private var selected: Set<String> = []
+    @State private var expanded: Set<String> = []   // 展开选项面板的任务
+    @State private var choices: [String: [String: String]] = [:]
     @State private var loading = true
-    @State private var working = false          // 开跑/叫停请求飞行中
+    @State private var working = false
     @State private var errorText: String? = nil
     @State private var noteText: String? = nil
     @State private var noteSeq = 0
@@ -118,7 +140,10 @@ struct GamePage: View {
         .navigationTitle("游戏")
         .navigationBarTitleDisplayMode(.inline)
         .refreshable { await load() }
-        .task { await load() }
+        .task {
+            loadChoices()
+            await load()
+        }
         .overlay(alignment: .bottom) {
             if let note = noteText {
                 Text(note)
@@ -139,10 +164,10 @@ struct GamePage: View {
         List {
             engineSection
             taskSection
+            notesSection      // 笔记本在「最近」上面：日志会越攒越长，别让本子沉底
             if let recent = status?.recent, !recent.isEmpty {
                 recentSection(recent)
             }
-            notesSection
         }
     }
 
@@ -177,29 +202,24 @@ struct GamePage: View {
         }
     }
 
-    // MARK: 任务菜单
+    // MARK: 任务菜单（区内滚动，开跑按钮常驻区底）
 
     private var taskSection: some View {
         Section {
-            ForEach(tasks) { t in
-                Button {
-                    if selected.contains(t.name) { selected.remove(t.name) }
-                    else { selected.insert(t.name) }
-                } label: {
-                    HStack {
-                        Image(systemName: selected.contains(t.name)
-                              ? "checkmark.circle.fill" : "circle")
-                            .foregroundStyle(selected.contains(t.name) ? Color.theme : .secondary)
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(t.name).foregroundStyle(.primary)
-                            if let doc = t.doc, !doc.isEmpty {
-                                Text(doc).font(.caption).foregroundStyle(.secondary)
-                                    .lineLimit(2)
-                            }
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 0) {
+                    ForEach(tasks) { t in
+                        if t.isSeparator {
+                            separatorRow(t)
+                        } else {
+                            taskRow(t)
+                            Divider().padding(.leading, 34)
                         }
                     }
                 }
             }
+            .frame(height: taskAreaHeight)
+            .listRowInsets(EdgeInsets(top: 0, leading: 8, bottom: 0, trailing: 8))
             Button {
                 startRun()
             } label: {
@@ -212,10 +232,94 @@ struct GamePage: View {
             }
             .disabled(working || selected.isEmpty || status?.running == true)
         } header: {
-            Text("任务（按菜单顺序执行）")
+            Text("任务（按菜单顺序执行，列表可上下滑）")
         } footer: {
-            Text("这里开跑用各任务的默认选项；要定制选项（派遣队伍、鸢报细项……）在聊天里让 TA 派单。游戏没开着时记得把「🚀 启动游戏」勾在最前面。")
+            Text("点行选中，点 ⚙ 调该任务的选项（选择会记住）。游戏没开着时记得把「🚀 启动游戏」勾在最前面。")
         }
+    }
+
+    private func separatorRow(_ t: GameTaskItem) -> some View {
+        HStack {
+            Spacer()
+            Text("— \(t.separatorTitle) —")
+                .font(.caption).foregroundStyle(.secondary)
+            Spacer()
+        }
+        .padding(.vertical, 8)
+        .background(Color(.systemGroupedBackground).opacity(0.6))
+    }
+
+    @ViewBuilder
+    private func taskRow(_ t: GameTaskItem) -> some View {
+        Button {
+            if selected.contains(t.name) { selected.remove(t.name) }
+            else { selected.insert(t.name) }
+        } label: {
+            HStack(spacing: 10) {
+                Image(systemName: selected.contains(t.name)
+                      ? "checkmark.circle.fill" : "circle")
+                    .foregroundStyle(selected.contains(t.name) ? Color.theme : .secondary)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(t.name).foregroundStyle(.primary)
+                    if let doc = t.doc, !doc.isEmpty {
+                        Text(doc).font(.caption).foregroundStyle(.secondary).lineLimit(2)
+                    }
+                }
+                Spacer()
+                if let opts = t.options, !opts.isEmpty {
+                    Button {
+                        if expanded.contains(t.name) { expanded.remove(t.name) }
+                        else { expanded.insert(t.name) }
+                    } label: {
+                        Image(systemName: expanded.contains(t.name)
+                              ? "gearshape.fill" : "gearshape")
+                            .foregroundStyle(hasCustomChoices(t) ? Color.theme : .secondary)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(.vertical, 8)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)   // 关键：不吃 List 的 tint，任务名保持正文黑
+        if expanded.contains(t.name), let opts = t.options {
+            optionPanel(task: t.name, options: opts)
+        }
+    }
+
+    /// 选项面板：每个选项一个下拉（MaaYuan 自带 GUI 同款交互，cases 里选一个）。
+    private func optionPanel(task: String, options: [GameTaskOption]) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            ForEach(options, id: \.name) { opt in
+                Menu {
+                    ForEach(opt.cases, id: \.self) { c in
+                        Button {
+                            setChoice(task: task, option: opt.name, value: c)
+                        } label: {
+                            if currentChoice(task: task, option: opt) == c {
+                                Label(c, systemImage: "checkmark")
+                            } else {
+                                Text(c)
+                            }
+                        }
+                    }
+                } label: {
+                    HStack {
+                        Text(opt.name).font(.caption).foregroundStyle(.primary)
+                        Spacer()
+                        Text(currentChoice(task: task, option: opt) ?? "（默认）")
+                            .font(.caption).foregroundStyle(Color.theme)
+                        Image(systemName: "chevron.up.chevron.down")
+                            .font(.caption2).foregroundStyle(.secondary)
+                    }
+                    .padding(.horizontal, 10).padding(.vertical, 6)
+                    .background(RoundedRectangle(cornerRadius: 8)
+                        .fill(Color(.systemGroupedBackground)))
+                }
+            }
+        }
+        .padding(.leading, 34)
+        .padding(.bottom, 8)
     }
 
     // MARK: 最近收成
@@ -265,6 +369,33 @@ struct GamePage: View {
         }
     }
 
+    // MARK: 选项持久化
+
+    private func loadChoices() {
+        if let data = choicesJSON.data(using: .utf8),
+           let d = try? JSONDecoder().decode([String: [String: String]].self, from: data) {
+            choices = d
+        }
+    }
+
+    private func setChoice(task: String, option: String, value: String) {
+        var t = choices[task] ?? [:]
+        t[option] = value
+        choices[task] = t
+        if let data = try? JSONEncoder().encode(choices),
+           let s = String(data: data, encoding: .utf8) {
+            choicesJSON = s
+        }
+    }
+
+    private func currentChoice(task: String, option: GameTaskOption) -> String? {
+        choices[task]?[option.name] ?? option.defaultCase
+    }
+
+    private func hasCustomChoices(_ t: GameTaskItem) -> Bool {
+        !(choices[t.name] ?? [:]).isEmpty
+    }
+
     // MARK: 动作
 
     private func load() async {
@@ -286,8 +417,10 @@ struct GamePage: View {
             defer { working = false }
             do {
                 // 按菜单顺序跑，不按点选顺序——菜单顺序就是作者设计的日常顺序
-                let names = tasks.map(\.name).filter { selected.contains($0) }
-                if let err = try await service.startGameTasks(names: names) {
+                let names = tasks.filter { !$0.isSeparator }.map(\.name)
+                    .filter { selected.contains($0) }
+                let opts = choices.filter { names.contains($0.key) && !$0.value.isEmpty }
+                if let err = try await service.startGameTasks(names: names, options: opts) {
                     errorText = err
                 } else {
                     showNote("开跑了，结果会推送通知")

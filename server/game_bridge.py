@@ -234,8 +234,16 @@ def tasks_catalog() -> list[dict]:
             "doc": t.get("doc", ""),
             "options": opts,
             "unsupported_advanced": t.get("advanced", []),
+            # =====xxx===== 是 MaaYuan 给自家 GUI 用的视觉分组条目（entry 恒为 stop）：
+            # 标出来让 app 渲染成分组头，别当成可跑的任务。
+            "separator": _is_separator(t),
         })
     return out
+
+
+def _is_separator(task: dict) -> bool:
+    n = (task.get("name") or "").strip()
+    return len(n) > 2 and n.startswith("=") and n.endswith("=")
 
 
 def _merge_override(dst: dict, src: dict) -> None:
@@ -254,6 +262,8 @@ def resolve_task(name: str, choices: dict[str, str]) -> tuple[str, dict]:
     task = next((t for t in data.get("task", []) if t.get("name") == name), None)
     if task is None:
         raise KeyError(f"任务不存在: {name}")
+    if _is_separator(task):
+        raise KeyError(f"「{name}」是分组标题不是任务，别派它")
     override: dict = {}
     _merge_override(override, task.get("pipeline_override", {}))
     options = data.get("option", {})
