@@ -173,11 +173,11 @@ async def translate_events(events, finalize):
 
 
 async def stream_claude(prompt: str, translate, images: list | None = None,
-                        file_blocks: list | None = None):
+                        file_blocks: list | None = None, char_id: str | None = None):
     """通用流式：起 claude 子进程 → 把 stream-json 事件交给 translate(events) 翻成 SSE 字节块。
     安全约定同 pipeline.call_claude：base_claude_args + 删 ANTHROPIC_API_KEY。
     带图/文件 → stdin 换成 stream-json 的多模态 user 消息（模型真看到），其余不变。"""
-    args = pipeline.base_claude_args() + \
+    args = pipeline.base_claude_args(char_id=char_id) + \
         ["--output-format", "stream-json", "--verbose", "--include-partial-messages"]
     if images or file_blocks:
         args += ["--input-format", "stream-json"]

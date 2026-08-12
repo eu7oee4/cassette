@@ -24,6 +24,8 @@ memory/
 outbox/
 prompts/persona*
 persona.md
+# 角色注册表：整个目录都是私人数据（真人设 + 接线），只留代码里的默认布局逻辑入库
+server/characters/
 code_addendum.md
 playroom/
 

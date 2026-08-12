@@ -1,5 +1,11 @@
 """运行时状态存储（纯文件 I/O，不依赖 app，可独立测试）。
-所有状态放 server/state/（已 gitignore）。写入走临时文件 + 原子替换，避免半截文件。"""
+所有状态放 server/state/（已 gitignore）。写入走临时文件 + 原子替换，避免半截文件。
+
+多角色（PLAN_multichar M1）：带角色身份的状态按 state/characters/<char_id>/ 分目录——
+wake_log / recent_window / schedule / browse_log / settings(角色部分) / persona_rendered。
+所有相关函数加了缺省 char_id=None（→ 默认角色 "default"），老调用点一行不改语义不变。
+outbox / sticker_catalog 保持全局一份（outbox 条目自带 char_id 字段由写入方填；
+贴纸库一期各角色共用）。旧的扁平布局在 import 时一次性迁入默认角色目录（幂等）。"""
 import json
 import os
 import threading
@@ -12,13 +18,67 @@ from typing import Optional
 STATE_DIR = Path(__file__).resolve().parent / "state"
 STATE_DIR.mkdir(exist_ok=True)
 
+DEFAULT_CHAR_ID = "default"
+CHAR_STATE_ROOT = STATE_DIR / "characters"
+
 OUTBOX_PATH = STATE_DIR / "outbox.json"
-SETTINGS_PATH = STATE_DIR / "settings.json"
-RECENT_WINDOW_PATH = STATE_DIR / "recent_window.json"
-WAKE_LOG_PATH = STATE_DIR / "wake_log.jsonl"
-SCHEDULE_PATH = STATE_DIR / "schedule.json"   # {next_wake_at, last_wake_at}，持久化跨重启
+SETTINGS_PATH = STATE_DIR / "settings.json"   # 全局设置：只剩用户自己的（user_name/pronoun）
 
 RECENT_WINDOW_N = 300  # 窗口存储容量上限；wake 实际注入条数由 settings.wake_window_n 决定
+
+
+def char_state_dir(char_id: Optional[str] = None) -> Path:
+    """角色的 state 目录（懒建）。这里不校验角色是否注册——注册表是 characters.py 的事，
+    state 层保持纯文件 I/O；上层（API）先 resolve 再进来。"""
+    d = CHAR_STATE_ROOT / (char_id or DEFAULT_CHAR_ID)
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _char_path(name: str, char_id: Optional[str] = None) -> Path:
+    return char_state_dir(char_id) / name
+
+
+def _migrate_legacy_layout() -> None:
+    """旧扁平布局 → 默认角色目录，import 时跑一次（幂等）。
+
+    必须能处理「新旧代码跨窗口并跑」：老进程还活着时新代码先迁了一次，老进程随后又在
+    旧路径新建文件继续写——单纯「目标存在就跳过」会把那批写入永远丢在旧位。所以：
+    - append-only 的 .jsonl：两头都在 → 旧文件内容**追加合并**进新位，再删旧文件；
+    - 快照类 .json：两头都在 → 谁 mtime 新用谁（老进程后写的快照是更新的世界）。
+    settings.json 特殊：**拷不搬**——它同时装着用户键（user_name/pronoun，留在全局）
+    和角色键（wake 策略等，进角色目录）；load/save 各取各的，残留的对方键被忽略。
+    同样按 mtime：旧全局文件比角色文件新（老进程存过设置）就重拷一次。"""
+    d = CHAR_STATE_ROOT / DEFAULT_CHAR_ID
+    moves = ["wake_log.jsonl", "recent_window.json", "schedule.json", "browse_log.jsonl",
+             "plugins_enabled.json", "plugins_wake_enabled.json"]
+    if any((STATE_DIR / n).exists() for n in moves):
+        d.mkdir(parents=True, exist_ok=True)
+        for n in moves:
+            src, dst = STATE_DIR / n, d / n
+            if not src.exists():
+                continue
+            if not dst.exists():
+                os.replace(src, dst)
+            elif n.endswith(".jsonl"):
+                with dst.open("a", encoding="utf-8") as f:
+                    f.write(src.read_text("utf-8"))
+                src.unlink()
+            elif src.stat().st_mtime > dst.stat().st_mtime:
+                os.replace(src, dst)
+            else:
+                src.unlink()
+    if SETTINGS_PATH.exists():
+        cs = d / "settings.json"
+        if not cs.exists() or SETTINGS_PATH.stat().st_mtime > cs.stat().st_mtime:
+            d.mkdir(parents=True, exist_ok=True)
+            cs.write_text(SETTINGS_PATH.read_text("utf-8"), "utf-8")
+
+
+_migrate_legacy_layout()
+
+# settings 里属于"用户本人"的键（全局唯一，不随角色走）；其余全是角色键。
+USER_SETTINGS_KEYS = {"user_name", "user_pronoun"}
 
 # settings 内置默认（app 没同步过也能跑）
 DEFAULT_SETTINGS = {
@@ -87,44 +147,55 @@ def clear_live_reply() -> None:
 
 
 # ---------- settings ----------
-def load_settings() -> dict:
+# 一份"完整设置"逻辑上由两处拼成：全局文件出用户键（USER_SETTINGS_KEYS），
+# 角色文件出其余键。load/save 对上层保持"一个 dict 进出"的旧接口。
+def load_settings(char_id: Optional[str] = None) -> dict:
     s = dict(DEFAULT_SETTINGS)
-    s.update(_read_json(SETTINGS_PATH, {}))
+    g = _read_json(SETTINGS_PATH, {})
+    s.update({k: v for k, v in g.items() if k in USER_SETTINGS_KEYS})
+    c = _read_json(_char_path("settings.json", char_id), {})
+    s.update({k: v for k, v in c.items() if k not in USER_SETTINGS_KEYS})
     return s
 
 
-def save_settings(s: dict) -> None:
-    _write_json(SETTINGS_PATH, s)
+def save_settings(s: dict, char_id: Optional[str] = None) -> None:
+    g = _read_json(SETTINGS_PATH, {})
+    g.update({k: v for k, v in s.items() if k in USER_SETTINGS_KEYS})
+    _write_json(SETTINGS_PATH, g)
+    _write_json(_char_path("settings.json", char_id),
+                {k: v for k, v in s.items() if k not in USER_SETTINGS_KEYS})
 
 
-# ---------- recent window（最近对话快照）----------
+# ---------- recent window（最近对话快照，per 角色）----------
 # 醒来时 app 不在场，模型靠这份快照拿上下文（app 仍是历史的唯一主人，这只是后端侧的影子）。
-def write_recent_window(messages: list[dict]) -> None:
-    _write_json(RECENT_WINDOW_PATH, messages[-RECENT_WINDOW_N:])
+def write_recent_window(messages: list[dict], char_id: Optional[str] = None) -> None:
+    _write_json(_char_path("recent_window.json", char_id), messages[-RECENT_WINDOW_N:])
 
 
-def read_recent_window() -> list[dict]:
-    return _read_json(RECENT_WINDOW_PATH, [])
+def read_recent_window(char_id: Optional[str] = None) -> list[dict]:
+    return _read_json(_char_path("recent_window.json", char_id), [])
 
 
-# ---------- wake log（醒来极简元数据，append-only；删除时整体重写）----------
-def append_wake_log(entry: dict) -> None:
-    with WAKE_LOG_PATH.open("a", encoding="utf-8") as f:
+# ---------- wake log（醒来极简元数据，append-only；删除时整体重写；per 角色）----------
+def append_wake_log(entry: dict, char_id: Optional[str] = None) -> None:
+    with _char_path("wake_log.jsonl", char_id).open("a", encoding="utf-8") as f:
         f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
 
-def overwrite_wake_log(entries: list[dict]) -> None:
+def overwrite_wake_log(entries: list[dict], char_id: Optional[str] = None) -> None:
     """整体重写 wake_log（心流日志删除某条后用）。唯一临时名 + 原子替换（mianmian 同款）。"""
-    tmp = WAKE_LOG_PATH.with_name(f".{WAKE_LOG_PATH.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+    p = _char_path("wake_log.jsonl", char_id)
+    tmp = p.with_name(f".{p.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
     tmp.write_text("".join(json.dumps(e, ensure_ascii=False) + "\n" for e in entries), "utf-8")
-    tmp.replace(WAKE_LOG_PATH)
+    tmp.replace(p)
 
 
-def read_wake_log(limit: Optional[int] = None) -> list[dict]:
-    if not WAKE_LOG_PATH.exists():
+def read_wake_log(limit: Optional[int] = None, char_id: Optional[str] = None) -> list[dict]:
+    p = _char_path("wake_log.jsonl", char_id)
+    if not p.exists():
         return []
     out = []
-    for ln in WAKE_LOG_PATH.read_text("utf-8").splitlines():
+    for ln in p.read_text("utf-8").splitlines():
         ln = ln.strip()
         if not ln:
             continue
@@ -135,14 +206,11 @@ def read_wake_log(limit: Optional[int] = None) -> list[dict]:
     return out[-limit:] if limit else out
 
 
-# ---------- browse log（TA 浏览过哪些网页，append-only）----------
+# ---------- browse log（TA 浏览过哪些网页，append-only；per 角色）----------
 # 聊天/醒来两条路的 navigate 都进这里。眼下只落盘不做读取端点：聊天里有聚合灰字可看，
 # 这份留给以后的 Mind 页当素材（同 wake_log 的思路，别清理）。
-BROWSE_LOG_PATH = STATE_DIR / "browse_log.jsonl"
-
-
-def append_browse_log(entry: dict) -> None:
-    with BROWSE_LOG_PATH.open("a", encoding="utf-8") as f:
+def append_browse_log(entry: dict, char_id: Optional[str] = None) -> None:
+    with _char_path("browse_log.jsonl", char_id).open("a", encoding="utf-8") as f:
         f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
 
@@ -158,14 +226,14 @@ def write_sticker_catalog(catalog: list[dict]) -> None:
     _write_json(STICKER_CATALOG_PATH, catalog)
 
 
-# ---------- 醒来调度（next_wake_at 持久化，跨重启）----------
+# ---------- 醒来调度（next_wake_at 持久化，跨重启；per 角色）----------
 # 调度器 tick 靠这份落盘：不落盘的话频繁重启会把定时器重置、永远轮不到自主醒来。
-def read_schedule() -> dict:
-    return _read_json(SCHEDULE_PATH, {})
+def read_schedule(char_id: Optional[str] = None) -> dict:
+    return _read_json(_char_path("schedule.json", char_id), {})
 
 
-def write_schedule(d: dict) -> None:
-    _write_json(SCHEDULE_PATH, d)
+def write_schedule(d: dict, char_id: Optional[str] = None) -> None:
+    _write_json(_char_path("schedule.json", char_id), d)
 
 
 # ---------- outbox（待送达盒子）----------

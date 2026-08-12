@@ -456,7 +456,11 @@ def _append_sent_log(entry: dict) -> None:
 def _smtp_send(cfg: dict, to: str, subject: str, body: str) -> None:
     # From 必须就是登录账号（163 硬性要求，否则 DT:SPM 退信）；显示名用 TA 的名字。
     msg = MIMEText(body, "plain", "utf-8")
-    msg["From"] = formataddr((str(Header(config.agent_name(), "utf-8")), cfg["address"]))
+    # From 显示名 = 邮箱归属角色的名字（mail 是独占资源，谁的邮箱署谁的名）。
+    import characters
+    import plugins
+    msg["From"] = formataddr((str(Header(characters.display_name(plugins.owner_of("mail")),
+                                         "utf-8")), cfg["address"]))
     msg["To"] = to
     msg["Subject"] = Header(subject or "（无主题）", "utf-8")
     try:

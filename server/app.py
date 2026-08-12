@@ -30,6 +30,7 @@ from pydantic import BaseModel
 import urllib.parse
 
 import browser_keeper
+import characters
 import code_bridge
 import config
 import game_bridge
@@ -42,6 +43,21 @@ import state_store
 import wake
 from notify import bark_push, logerr
 from pipeline import Message
+
+
+def _resolve_char(char_id: Optional[str]) -> str:
+    """API 层的角色解析：None/空 → 默认角色；不认识的角色名 → 404（严格，别静默串人）。"""
+    try:
+        return characters.resolve(char_id)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
+def _session_char() -> str:
+    """当前 code/game 会话话语归谁：按活跃档案的独占插件归属走（M1 会话全局唯一，
+    只是把归属记对，M2 app 按 char_id 路由消息时直接可用）。"""
+    prof = code_bridge.active_profile() or "code"
+    return plugins.owner_of("game-story" if prof == "game" else "codemode")
 
 
 def _browser_keeper_watchdog() -> None:
@@ -65,8 +81,8 @@ def _mail_watcher() -> None:
     while True:
         on = False
         try:
-            on = bool(json.loads((state_store.STATE_DIR / "plugins_enabled.json")
-                                 .read_text("utf-8")).get("mail"))
+            # 邮箱是独占资源：开关看**归属角色**的启用表（plugins.owner_of）。
+            on = bool(plugins._read_enabled(plugins.owner_of("mail")).get("mail"))
         except Exception:
             pass
         if on and mail_bridge.configured():
@@ -83,6 +99,7 @@ def _mail_watcher() -> None:
 @asynccontextmanager
 async def _lifespan(_app: FastAPI):
     """启动 wake 调度器（on_event 已被 FastAPI 弃用，用 lifespan）。"""
+    characters.ensure_layout()   # 默认角色目录补齐（state 侧旧布局迁移在 state_store import 时已做）
     tasks = []
     if config.PROACTIVE_ENABLED:
         tasks.append(asyncio.create_task(wake.scheduler_loop()))
@@ -211,6 +228,7 @@ def _file_to_block(f: FileInput) -> dict:
 
 class ChatRequest(BaseModel):
     messages: list[Message]            # 完整对话历史，最后一条应是用户的新消息
+    char_id: Optional[str] = None      # 跟哪个角色说（多角色）；不传 = 默认角色（旧 app 兼容）
     session_id: Optional[str] = None   # 仅用于 app 记账，后端不依赖它记忆
     stickers: Optional[list[StickerInfo]] = None  # 表情库清单(id+描述)，供模型挑着发/改描述
     client_req_id: Optional[str] = None  # 断连补投关联 id：rescue 条目带回给 app 替换半截气泡
@@ -241,21 +259,22 @@ class ChatResponse(BaseModel):
     game_started: bool = False           # 这轮他自己切去玩游戏了 → app 亮终端面板 + 系统灰字
 
 
-def _prepare_chat(req: ChatRequest) -> tuple[str, dict]:
+def _prepare_chat(req: ChatRequest, char_id: Optional[str] = None) -> tuple[str, dict]:
     """校验 + 表情清单落盘 + 拼 prompt + handle 映射。失败抛 HTTPException（流开始前，能正常返 4xx）。"""
     if not req.messages:
         raise HTTPException(status_code=400, detail="messages 不能为空")
     last = req.messages[-1]
     if last.role != "user" or not last.text.strip():
         raise HTTPException(status_code=400, detail="最后一条必须是非空的用户消息")
-    # 表情清单：转成朴素 dict，持久化一份（醒来时后端不在 app 手里也能挑表情发）。
+    # 表情清单：转成朴素 dict，持久化一份（醒来时后端不在 app 手里也能挑表情发；全角色共用）。
     catalog = pipeline.to_catalog(req.stickers)
     if catalog:
         try:
             state_store.write_sticker_catalog(catalog)
         except Exception as e:
             logerr(f"写 sticker_catalog 失败: {e}")
-    return pipeline.build_prompt(req.messages, catalog), pipeline.sticker_handle_map(catalog)
+    return (pipeline.build_prompt(req.messages, catalog, char_id=char_id),
+            pipeline.sticker_handle_map(catalog))
 
 
 # ---------- recent_window 的唯一口径 ----------
@@ -265,34 +284,34 @@ def _prepare_chat(req: ChatRequest) -> tuple[str, dict]:
 #   ② code 模式：_code_window_append() 逐条追加（那边没有"完整历史"可覆盖）；
 #   ③ /window/sync：app 删/编辑了消息，不生成、只把窗口对齐（A1）。
 
-def _overwrite_window_from(messages: list[Message]) -> bool:
-    """用 app 发来的这份历史整体覆盖 recent_window。返回是否真写了。
+def _overwrite_window_from(messages: list[Message], char_id: Optional[str] = None) -> bool:
+    """用 app 发来的这份历史整体覆盖该角色的 recent_window。返回是否真写了。
     ⚠️ 迷你历史护栏：1 条历史的 curl 请求会把 300 条窗口冲空，finalize 里那道同名护栏
     读到的已是被冲掉的窗口，形同虚设——所以每个覆盖点都得自己设一道。"""
     try:
         snap = [{"role": m.role, "text": m.text, "ts": m.ts} for m in messages]
         with state_store.WINDOW_LOCK:
-            cur = state_store.read_recent_window()
+            cur = state_store.read_recent_window(char_id)
             if len(snap) < 5 and len(cur) > len(snap):
                 return False   # 短历史请求不覆盖丰满窗口
-            state_store.write_recent_window(snap)
+            state_store.write_recent_window(snap, char_id)
         return True
     except Exception as e:
         logerr(f"写 recent_window 失败: {e}")
         return False
 
 
-def _snapshot_incoming_window(req: ChatRequest) -> None:
+def _snapshot_incoming_window(req: ChatRequest, char_id: Optional[str] = None) -> None:
     """轮一开始就把眼下的对话（含刚收到的 user 消息）写进 recent_window——
     这轮可能跑很久，中途 wake 醒来不该只看到上一轮的世界。收尾 finalize 用带回复的完整版覆盖。
     被护栏挡下时新消息由 finalize 的追加分支补进。"""
-    _overwrite_window_from(req.messages)
+    _overwrite_window_from(req.messages, char_id)
     # 上一轮的残留正文清掉：断连/异常那一支不走 finalize，不在这儿清就会漏进下一次自切。
     state_store.clear_live_reply()
 
 
 def finalize_chat_reply(reply: str, stored: list[dict], req: ChatRequest,
-                        handle_to_id: dict) -> ChatResponse:
+                        handle_to_id: dict, char_id: Optional[str] = None) -> ChatResponse:
     """回复的统一后处理（解析表情/[[next_wake]] 标记 / 写窗口快照 → 组响应）。
     非流式和流式收尾共用，保证两条路一字不差。"""
     # 解析并剥掉表情标记：他要发哪几张、改了哪些描述。
@@ -304,9 +323,9 @@ def finalize_chat_reply(reply: str, stored: list[dict], req: ChatRequest,
     if next_min is not None:
         at = int(time.time()) + next_min * 60
         with state_store.SCHEDULE_LOCK:
-            sched = state_store.read_schedule()
+            sched = state_store.read_schedule(char_id)
             sched["next_wake_at"] = at
-            state_store.write_schedule(sched)
+            state_store.write_schedule(sched, char_id)
         next_wake_hint = pipeline.next_wake_note(next_raw, at)
         logerr(f"聊天里定了下次醒来：{next_raw} → {pipeline.fmt_ts(at)}")
 
@@ -325,12 +344,12 @@ def finalize_chat_reply(reply: str, stored: list[dict], req: ChatRequest,
                                     if i in sticker_sends)
         snap.append({"role": "assistant", "text": snap_text, "ts": int(time.time())})
         with state_store.WINDOW_LOCK:
-            cur = state_store.read_recent_window()
+            cur = state_store.read_recent_window(char_id)
             if len(req.messages) < 5 and len(cur) > len(snap):
                 cur.extend(snap[-2:])   # 只追加这轮的一来一回
-                state_store.write_recent_window(cur)
+                state_store.write_recent_window(cur, char_id)
             else:
-                state_store.write_recent_window(snap)
+                state_store.write_recent_window(snap, char_id)
     except Exception as e:
         logerr(f"写 recent_window 失败: {e}")
 
@@ -352,7 +371,8 @@ def finalize_chat_reply(reply: str, stored: list[dict], req: ChatRequest,
             stored.append({"tool": "browse", "text": "\n".join(browse_urls)})
             try:
                 state_store.append_browse_log({"ts": int(time.time()), "time": pipeline.now_str(),
-                                               "source": "chat", "urls": browse_urls})
+                                               "source": "chat", "urls": browse_urls},
+                                              char_id=char_id)
             except Exception as e:
                 logerr(f"记 browse_log 失败: {e}")
 
@@ -379,7 +399,8 @@ def finalize_chat_reply(reply: str, stored: list[dict], req: ChatRequest,
     if mem_stored:
         try:
             state_store.append_wake_log({"ts": int(time.time()), "time": pipeline.now_str(),
-                                         "source": "chat", "stored": mem_stored})
+                                         "source": "chat", "stored": mem_stored},
+                                        char_id=char_id)
         except Exception as e:
             logerr(f"记 chat stored 失败: {e}")
 
@@ -405,20 +426,22 @@ def health():
 def chat(req: ChatRequest, x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
     """非流式聊天（流式的回退路，两条路收尾共用 finalize 保证一致）。"""
     verify_auth(x_auth)
-    prompt, handle_to_id = _prepare_chat(req)
-    _snapshot_incoming_window(req)
+    cid = _resolve_char(req.char_id)
+    prompt, handle_to_id = _prepare_chat(req, cid)
+    _snapshot_incoming_window(req, cid)
     # 文件转 block 在调用前做：类型不支持/解不开在这里 400，不进子进程。
     file_blocks = [_file_to_block(f) for f in (req.files or [])]
-    wake.chat_turn_begin()
+    wake.chat_turn_begin(cid)
     try:
         if req.images or file_blocks:
             reply, stored = pipeline.call_claude_multimodal(prompt, req.images or [],
-                                                            file_blocks=file_blocks)
+                                                            file_blocks=file_blocks,
+                                                            char_id=cid)
         else:
-            reply, stored = pipeline.call_claude(prompt)
+            reply, stored = pipeline.call_claude(prompt, char_id=cid)
     finally:
-        wake.chat_turn_end()
-    return finalize_chat_reply(reply, stored, req, handle_to_id)
+        wake.chat_turn_end(cid)
+    return finalize_chat_reply(reply, stored, req, handle_to_id, char_id=cid)
 
 
 # 进行中的聊天轮（client_req_id 集合）：app 断流后用 GET /chat/active 对账——
@@ -436,12 +459,14 @@ def chat_active(x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
 async def chat_stream(req: ChatRequest, x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
     """流式聊天：SSE 逐字回复。协议见 sse.py。"""
     verify_auth(x_auth)
-    prompt, handle_to_id = _prepare_chat(req)   # 校验在流开始前，能正常返 4xx
+    cid = _resolve_char(req.char_id)
+    prompt, handle_to_id = _prepare_chat(req, cid)   # 校验在流开始前，能正常返 4xx
     file_blocks = [_file_to_block(f) for f in (req.files or [])]   # 同上：4xx 趁早
-    _snapshot_incoming_window(req)
+    _snapshot_incoming_window(req, cid)
 
     def finalize(reply: str, stored: list[dict]) -> dict:
-        return jsonable_encoder(finalize_chat_reply(reply, stored, req, handle_to_id))
+        return jsonable_encoder(finalize_chat_reply(reply, stored, req, handle_to_id,
+                                                    char_id=cid))
 
     async def gen():
         rid = req.client_req_id or ""
@@ -459,7 +484,7 @@ async def chat_stream(req: ChatRequest, x_auth: Optional[str] = Header(default=N
                     def translate(events):
                         return sse.translate_events(events, finalize)
                     async for chunk in sse.stream_claude(prompt, translate, images=req.images,
-                                                         file_blocks=file_blocks):
+                                                         file_blocks=file_blocks, char_id=cid):
                         # ⚠️ 字节嗅探依赖 sse.sse() 用 json.dumps 默认分隔符（": " 带空格）——
                         # 正文里出现同样字样会被转义成 \" 不误判；若改压缩分隔符此检测会静默失效。
                         if b'"type": "done"' in chunk:
@@ -477,10 +502,10 @@ async def chat_stream(req: ChatRequest, x_auth: Optional[str] = Header(default=N
                 finally:
                     # 轮结束点在生产端而非 gen()：客户端断了子进程还在跑（断连守护），
                     # 那段时间对 wake 来说这轮仍是"进行中"。
-                    wake.chat_turn_end()
+                    wake.chat_turn_end(cid)
                     q.put_nowait(None)
 
-            wake.chat_turn_begin()
+            wake.chat_turn_begin(cid)
             producer = asyncio.create_task(_produce())
 
             async def _rescue_if_undelivered():
@@ -510,13 +535,15 @@ async def chat_stream(req: ChatRequest, x_auth: Optional[str] = Header(default=N
                         state_store.outbox_append({"id": uuid.uuid4().hex[:12], "ts": int(time.time()),
                                                    "text": text, "sticker_ids": stickers,
                                                    "stored": final.get("stored") or [],
+                                                   "char_id": cid,
                                                    "delivered": False, "origin": "chat_rescue",
                                                    "req_id": rid})
-                        bark_push(text if text else "（发来了表情）")
+                        bark_push(text if text else "（发来了表情）",
+                                  title=characters.display_name(cid))
                         logerr("/chat/stream 客户端断了，完整回复已补投 outbox")
                     else:
                         state_store.outbox_append({"id": uuid.uuid4().hex[:12], "ts": int(time.time()),
-                                                   "text": "", "error": True,
+                                                   "text": "", "error": True, "char_id": cid,
                                                    "delivered": False, "origin": "chat_error",
                                                    "req_id": rid})
                         logerr("/chat/stream 断连守护：这轮没产出，投 error 标记条目")
@@ -559,6 +586,7 @@ async def chat_stream(req: ChatRequest, x_auth: Optional[str] = Header(default=N
 # ---------- 窗口同步（app 侧历史变了但不生成）----------
 class WindowSyncIn(BaseModel):
     messages: list[Message]   # app 侧当前历史（和 /chat 同口径，最近 ~100 条）
+    char_id: Optional[str] = None   # 同 ChatRequest：不传 = 默认角色
 
 
 @app.post("/window/sync")
@@ -569,7 +597,7 @@ def window_sync(body: WindowSyncIn, x_auth: Optional[str] = Header(default=None,
     **不触发任何生成**：只覆盖窗口。护栏和 /chat 那条路共用（见 _overwrite_window_from），
     所以删到只剩几条时窗口不会被冲空——宁可窗口略旧，也不能让醒来失忆。"""
     verify_auth(x_auth)
-    written = _overwrite_window_from(body.messages)
+    written = _overwrite_window_from(body.messages, _resolve_char(body.char_id))
     return {"ok": True, "written": written, "n": len(body.messages)}
 
 
@@ -639,13 +667,15 @@ def _validate_hhmm(s: str) -> None:
 
 
 @app.get("/settings")
-def get_settings(x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
+def get_settings(char: Optional[str] = None,
+                 x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
     verify_auth(x_auth)
-    return state_store.load_settings()
+    return state_store.load_settings(_resolve_char(char))
 
 
 @app.post("/settings")
-def post_settings(body: SettingsIn, x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
+def post_settings(body: SettingsIn, char: Optional[str] = None,
+                  x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
     verify_auth(x_auth)
     _validate_hhmm(body.active_start)
     _validate_hhmm(body.active_end)
@@ -665,7 +695,7 @@ def post_settings(body: SettingsIn, x_auth: Optional[str] = Header(default=None,
     saved = body.model_dump()
     saved["agent_name"] = saved["agent_name"].strip()
     saved["user_name"] = saved["user_name"].strip()
-    state_store.save_settings(saved)
+    state_store.save_settings(saved, _resolve_char(char))
     return saved
 
 
@@ -735,15 +765,16 @@ def _require_code() -> None:
 
 
 def _code_window_append(role: str, text: str) -> None:
-    """code 模式的对话也写进 recent_window——不然醒来时它对这段完全失明，会拿着几小时前的
-    世界说胡话。加锁口径同 finalize。"""
+    """code 模式的对话也写进 recent_window（会话归属角色的那份）——不然醒来时它对这段
+    完全失明，会拿着几小时前的世界说胡话。加锁口径同 finalize。"""
     if not (text or "").strip():
         return
     try:
+        cid = _session_char()
         with state_store.WINDOW_LOCK:
-            window = state_store.read_recent_window()
+            window = state_store.read_recent_window(cid)
             window.append({"role": role, "text": text, "ts": int(time.time())})
-            state_store.write_recent_window(window)
+            state_store.write_recent_window(window, cid)
     except Exception as e:
         logerr(f"code 写 recent_window 失败: {e}")
 
@@ -800,11 +831,13 @@ def code_start(inp: CodeStartIn, x_auth: Optional[str] = Header(default=None, al
 
 
 def _code_mcp_configs() -> list:
-    """给 code 会话挂的 MCP：长期记忆跟着走（不然切过去就失忆了）。
-    插件不挂——那些工具是给聊天用的，code 会话手上有真家伙，不需要。"""
-    if not pipeline.ombre_alive():
+    """给 code 会话挂的 MCP：长期记忆跟着走（不然切过去就失忆了）——挂的是**会话归属
+    角色**的那份记忆（codemode 的 owner）。插件不挂——那些工具是给聊天用的，
+    code 会话手上有真家伙，不需要。"""
+    cid = plugins.owner_of("codemode")
+    if not pipeline.ombre_alive(cid):
         return []
-    return [str(pipeline._ombre_mcp_config())]
+    return [str(pipeline._ombre_mcp_config(cid))]
 
 
 @app.post("/code/send")
@@ -910,6 +943,7 @@ def code_append(inp: CodeAppendIn, x_auth: Optional[str] = Header(default=None, 
     written = state_store.outbox_append_once(
         {"id": uuid.uuid4().hex[:12], "ts": int(time.time()),
          "text": text, "sticker_ids": [], "delivered": False,
+         "char_id": _session_char(),
          "origin": "code", "hook_key": dedupe_key},
         dedupe_key, origin="code")
     if not written:
@@ -945,7 +979,8 @@ def codemode_start(inp: CodemodeStartIn, x_auth: Optional[str] = Header(default=
         raise HTTPException(status_code=400, detail="task 不能为空")
     if code_bridge.session_alive():
         return {"ok": False, "error": "会话占用中：已经有一个 code 会话在跑，别杀掉正在干的活"}
-    window = state_store.read_recent_window()
+    cid = plugins.owner_of("codemode")
+    window = state_store.read_recent_window(cid)
     conv = [{"ts": w.get("ts"), "role": w.get("role"), "text": w.get("text", "")}
             for w in window][-CODE_HISTORY_CAP:]
     # ⚠️ 补上"这一轮 TA 自己刚说过、但还没落进窗口"的话——这个工具是 `claude -p` 跑到一半
@@ -972,7 +1007,8 @@ def codemode_start(inp: CodemodeStartIn, x_auth: Optional[str] = Header(default=
         try:
             state_store.outbox_append({"id": uuid.uuid4().hex[:12], "ts": int(time.time()),
                                        "text": f"〔切到 Code 模式，task 如下〕\n\n{task}",
-                                       "sticker_ids": [], "delivered": False, "origin": "code"})
+                                       "sticker_ids": [], "delivered": False,
+                                       "char_id": cid, "origin": "code"})
         except Exception as e:
             logerr(f"code task 回显失败: {e}")
     return r
@@ -1008,20 +1044,23 @@ async def _code_dialog_watchdog() -> None:
 # app 显式提示"记忆服务不在线"，不影响聊天。
 
 @app.get("/memories")
-def list_memories(sort: str = "created", q: str = "",
+def list_memories(sort: str = "created", q: str = "", char: Optional[str] = None,
                   x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
-    """记忆列表。sort: created(最新创建，默认) / activity(活跃度分)。带 q= 走搜索。"""
+    """记忆列表（char= 指定角色，各角色各自的 Ombre）。sort: created(最新创建，默认) /
+    activity(活跃度分)。带 q= 走搜索。"""
     verify_auth(x_auth)
+    cid = _resolve_char(char)
     if q.strip():
-        return ombre_rest.call("/api/search?q=" + urllib.parse.quote(q.strip()))
+        return ombre_rest.call("/api/search?q=" + urllib.parse.quote(q.strip()), char_id=cid)
     mode = "score" if sort == "activity" else "created_desc"
-    return ombre_rest.call(f"/api/buckets?sort={mode}")
+    return ombre_rest.call(f"/api/buckets?sort={mode}", char_id=cid)
 
 
 @app.get("/memories/{mem_id}")
-def memory_detail(mem_id: str, x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
+def memory_detail(mem_id: str, char: Optional[str] = None,
+                  x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
     verify_auth(x_auth)
-    return ombre_rest.call(f"/api/bucket/{urllib.parse.quote(mem_id)}")
+    return ombre_rest.call(f"/api/bucket/{urllib.parse.quote(mem_id)}", char_id=_resolve_char(char))
 
 
 class MemoryEditIn(BaseModel):
@@ -1037,25 +1076,29 @@ class MemoryEditIn(BaseModel):
 
 
 @app.post("/memories/{mem_id}/edit")
-def memory_edit(mem_id: str, body: MemoryEditIn,
+def memory_edit(mem_id: str, body: MemoryEditIn, char: Optional[str] = None,
                 x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
     verify_auth(x_auth)
     fields = {k: v for k, v in body.model_dump().items() if v is not None}
     if not fields:
         raise HTTPException(status_code=400, detail="没有要改的字段")
-    return ombre_rest.call(f"/api/bucket/{urllib.parse.quote(mem_id)}/edit", fields)
+    return ombre_rest.call(f"/api/bucket/{urllib.parse.quote(mem_id)}/edit", fields,
+                           char_id=_resolve_char(char))
 
 
 @app.post("/memories/{mem_id}/forget")
-def memory_forget(mem_id: str, x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
+def memory_forget(mem_id: str, char: Optional[str] = None,
+                  x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
     """主动遗忘开关（toggle dont_surface）：不再主动浮现，但没抹掉——搜索仍找得到，
     还在列表里。app 那个键的文案就是它的两态（遗忘 / 取消遗忘）。返回 {dont_surface}。"""
     verify_auth(x_auth)
-    return ombre_rest.call(f"/api/bucket/{urllib.parse.quote(mem_id)}/forget", {})
+    return ombre_rest.call(f"/api/bucket/{urllib.parse.quote(mem_id)}/forget", {},
+                           char_id=_resolve_char(char))
 
 
 @app.post("/memories/{mem_id}/archive")
-def memory_archive(mem_id: str, x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
+def memory_archive(mem_id: str, char: Optional[str] = None,
+                   x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
     """归档：走 Ombre 的 delete-to-archive（DELETE ?confirm=true）——移进档案区并盖 deleted_at，
     从记忆列表 / 搜索 / 回忆里都不再返回，是「从记忆页真正移走」。
 
@@ -1063,7 +1106,8 @@ def memory_archive(mem_id: str, x_auth: Optional[str] = Header(default=None, ali
     列表只过滤 deleted_at → 归档后照样留在页面（踩过：app 里看着消失是乐观动画，刷新就回来）。
     delete-to-archive 才真移走，且 Ombre 设计上仍可 restore、绝不物理删除。"""
     verify_auth(x_auth)
-    return ombre_rest.call(f"/api/bucket/{urllib.parse.quote(mem_id)}?confirm=true", method="DELETE")
+    return ombre_rest.call(f"/api/bucket/{urllib.parse.quote(mem_id)}?confirm=true",
+                           method="DELETE", char_id=_resolve_char(char))
 
 
 # ---------- 插件商店 ----------
@@ -1072,12 +1116,14 @@ def memory_archive(mem_id: str, x_auth: Optional[str] = Header(default=None, ali
 class PluginIn(BaseModel):
     name: str
     enabled: Optional[bool] = None   # toggle 用
+    char_id: Optional[str] = None    # 开关是每个角色自己的；不传 = 默认角色
 
 
 @app.get("/plugins")
-def plugins_list(x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
+def plugins_list(char: Optional[str] = None,
+                 x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
     verify_auth(x_auth)
-    return {"items": plugins.list_status()}
+    return {"items": plugins.list_status(_resolve_char(char))}
 
 
 @app.post("/plugins/install")
@@ -1091,7 +1137,7 @@ def plugins_toggle(body: PluginIn, x_auth: Optional[str] = Header(default=None, 
     verify_auth(x_auth)
     if body.enabled is None:
         raise HTTPException(status_code=400, detail="缺 enabled 字段")
-    return plugins.toggle(body.name, body.enabled)
+    return plugins.toggle(body.name, body.enabled, _resolve_char(body.char_id))
 
 
 @app.post("/plugins/wake_toggle")
@@ -1100,7 +1146,7 @@ def plugins_wake_toggle(body: PluginIn, x_auth: Optional[str] = Header(default=N
     verify_auth(x_auth)
     if body.enabled is None:
         raise HTTPException(status_code=400, detail="缺 enabled 字段")
-    return plugins.wake_toggle(body.name, body.enabled)
+    return plugins.wake_toggle(body.name, body.enabled, _resolve_char(body.char_id))
 
 
 @app.post("/plugins/update")
@@ -1266,7 +1312,8 @@ def game_story_start(inp: GameStoryStartIn,
     if holder:
         return {"ok": False, "error": "任务引擎正在用模拟器跑日常，等它跑完再玩（task_status 可看进度）"}
     task = (inp.task or "").strip()
-    window = state_store.read_recent_window()
+    cid = plugins.owner_of("game-story")
+    window = state_store.read_recent_window(cid)
     conv = [{"ts": w.get("ts"), "role": w.get("role"), "text": w.get("text", "")}
             for w in window][-CODE_HISTORY_CAP:]
     live = pipeline.strip_markers(state_store.get_live_reply()).strip()
@@ -1284,8 +1331,8 @@ def game_story_start(inp: GameStoryStartIn,
             f"\n〔现在是 {pipeline.now_str()}〕先 game_notes_read 翻翻剧情本看看上次到哪了，"
             "想看什么自己挑。")
     context = scene + "\n\n【下面是你们刚才的对话】\n" + timeline + _GAME_CTX_CAVEAT + tail
-    mcp = ([str(pipeline._ombre_mcp_config())] if pipeline.ombre_alive() else []) + [str(cfg)]
-    tools = (pipeline.OMBRE_TOOLS if pipeline.ombre_alive() else []) + GAME_SESSION_TOOLS
+    mcp = ([str(pipeline._ombre_mcp_config(cid))] if pipeline.ombre_alive(cid) else []) + [str(cfg)]
+    tools = (pipeline.OMBRE_TOOLS if pipeline.ombre_alive(cid) else []) + GAME_SESSION_TOOLS
     r = code_bridge.start(context, config.AUTH_KEY, mcp_configs=mcp,
                           profile="game", tools=tools)
     if not r.get("ok"):
@@ -1296,7 +1343,8 @@ def game_story_start(inp: GameStoryStartIn,
         try:
             state_store.outbox_append({"id": uuid.uuid4().hex[:12], "ts": int(time.time()),
                                        "text": f"〔去玩游戏了，说好的是〕\n\n{task}",
-                                       "sticker_ids": [], "delivered": False, "origin": "game"})
+                                       "sticker_ids": [], "delivered": False,
+                                       "char_id": cid, "origin": "game"})
         except Exception as e:
             logerr(f"game task 回显失败: {e}")
     return r
@@ -1475,12 +1523,14 @@ def _mind_entry_id(e: dict) -> str:
 
 
 @app.get("/mind")
-def mind(limit: int = 100, x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
-    """醒来日志尾部，倒序（最新在前）。只挑对用户有意义的字段，别把整条内部记录裸奔出去。"""
+def mind(limit: int = 100, char: Optional[str] = None,
+         x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
+    """醒来日志尾部，倒序（最新在前；char= 指定角色）。只挑对用户有意义的字段，
+    别把整条内部记录裸奔出去。"""
     verify_auth(x_auth)
     limit = min(max(limit, 1), 300)
     items = []
-    for w in reversed(state_store.read_wake_log(limit=limit)):
+    for w in reversed(state_store.read_wake_log(limit=limit, char_id=_resolve_char(char))):
         entry = {
             "id": _mind_entry_id(w),   # 按原始记录算哈希（删除按同口径匹配）
             "ts": w.get("ts"),
@@ -1502,15 +1552,17 @@ def mind(limit: int = 100, x_auth: Optional[str] = Header(default=None, alias="X
 
 class MindDeleteIn(BaseModel):
     id: str
+    char_id: Optional[str] = None
 
 
 @app.post("/mind/delete")
 def mind_delete(body: MindDeleteIn, x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
     """删掉心流日志里指定 id 的记录（app 左滑删除，mianmian 同款：内容哈希定位+整体重写）。"""
     verify_auth(x_auth)
-    entries = state_store.read_wake_log()
+    cid = _resolve_char(body.char_id)
+    entries = state_store.read_wake_log(char_id=cid)
     kept = [e for e in entries if _mind_entry_id(e) != body.id]
     removed = len(entries) - len(kept)
     if removed:
-        state_store.overwrite_wake_log(kept)
+        state_store.overwrite_wake_log(kept, char_id=cid)
     return {"ok": True, "removed": removed}

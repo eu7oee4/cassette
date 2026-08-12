@@ -187,8 +187,14 @@ def _build_system(profile: str = "code") -> str:
     不是干活深度）。人设里的 {{AGENT_NAME}}/{{USER_NAME}} 占位符照聊天那边一起渲染。
 
     game 档案再往后接插件带的出厂纪律（story_discipline.md）：主仓 addendum 管通用守则，
-    游戏专属的机制事实/坐标小抄跟着插件发版走，改纪律不用动主仓。"""
-    files = [config.PERSONA_PATH]
+    游戏专属的机制事实/坐标小抄跟着插件发版走，改纪律不用动主仓。
+
+    多角色：人设取**会话归属角色**的（codemode/game-story 的 owner）——
+    会话是独占资源，谁的资源谁的人设。"""
+    import characters
+    import plugins
+    cid = plugins.owner_of("game-story" if profile == "game" else "codemode")
+    files = [characters.persona_path(cid)]
     if profile == "game":
         files.append(config.game_addendum_path())
         files.append(BASE / "plugins" / "game-story" / "prompts" / "story_discipline.md")
@@ -201,7 +207,7 @@ def _build_system(profile: str = "code") -> str:
         except Exception:
             pass
     text = "\n\n".join(parts)
-    return (text.replace("{{AGENT_NAME}}", config.agent_name())
+    return (text.replace("{{AGENT_NAME}}", characters.display_name(cid))
                 .replace("{{USER_NAME}}", config.user_name()))
 
 

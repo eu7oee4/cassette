@@ -25,10 +25,12 @@ from typing import Optional
 import functools
 
 import browser_keeper
+import characters
 import code_bridge
 import config
 import mail_bridge
 import pipeline
+import plugins
 import state_store
 from notify import bark_push, logerr
 
@@ -37,26 +39,31 @@ MIN_WAKE_GAP_SEC = 180                                    # 两次醒来最小�
 FREQ_PROB_15 = {"low": 0.08, "mid": 0.20, "high": 0.40}   # 按 15min 一次校准的醒来概率（按 tick 缩放）
 
 
-# ---------- 主 chat 活跃轮计数（wake 避让用）----------
+def _cid(char_id: Optional[str]) -> str:
+    return char_id or state_store.DEFAULT_CHAR_ID
+
+
+# ---------- 主 chat 活跃轮计数（wake 避让用，per 角色）----------
 # chat 轮进行中 wake 撞进来，会拿着过期 recent_window 说胡话——避让到下个 tick。
-_chat_turns = {"n": 0}
+# 按角色分开数：Cass 在聊天不该拦住别人醒来（各聊各的、各有各的窗口）。
+_chat_turns: dict[str, int] = {}
 
 
-def chat_turn_begin() -> None:
-    _chat_turns["n"] += 1
+def chat_turn_begin(char_id: Optional[str] = None) -> None:
+    _chat_turns[_cid(char_id)] = _chat_turns.get(_cid(char_id), 0) + 1
 
 
-def chat_turn_end() -> None:
-    _chat_turns["n"] = max(0, _chat_turns["n"] - 1)
+def chat_turn_end(char_id: Optional[str] = None) -> None:
+    _chat_turns[_cid(char_id)] = max(0, _chat_turns.get(_cid(char_id), 0) - 1)
 
 
-def chat_turn_active() -> bool:
-    return _chat_turns["n"] > 0
+def chat_turn_active(char_id: Optional[str] = None) -> bool:
+    return _chat_turns.get(_cid(char_id), 0) > 0
 
 
 # ---------- code 模式（wake 避让 + prompt 告知用）----------
-_code_avoid = {"logged": False}   # 避让日志只在进入 code 模式那次打一条，别每 tick 刷屏
-_budget_hit = {"logged": False}   # 醒来预算耗尽的日志同理：只在撞上那次打一条
+_code_avoid: dict[str, bool] = {}   # 避让日志只在进入 code 模式那次打一条，别每 tick 刷屏（per 角色）
+_budget_hit: dict[str, bool] = {}   # 醒来预算耗尽的日志同理：只在撞上那次打一条（per 角色）
 
 
 def code_session_open() -> bool:
@@ -133,10 +140,10 @@ _UNSENT_WHY = {
 }
 
 
-def unsent_block(u: str) -> str:
+def unsent_block(u: str, char_id: Optional[str] = None) -> str:
     """上次想说但没送出去的那段话（给醒来 prompt 用）。没有则空串。
     只看**最后一条** message 记录：后来成功发过消息，这事自然就翻篇了。"""
-    last_msg = next((w for w in reversed(state_store.read_wake_log(limit=50))
+    last_msg = next((w for w in reversed(state_store.read_wake_log(limit=50, char_id=char_id))
                      if w.get("action") == "message"), None)
     if not last_msg or last_msg.get("pushed"):
         return ""
@@ -153,14 +160,15 @@ def unsent_block(u: str) -> str:
 
 
 # ---------- 醒来提示词 ----------
-def wake_prompt(settings: dict, forced: bool = False, note: str = "") -> str:
+def wake_prompt(settings: dict, forced: bool = False, note: str = "",
+                char_id: Optional[str] = None) -> str:
     """forced＝这是一次硬触发的醒来（绕开了所有软闸）。影响两处：打扰控制那句不再注入
     （闸对它不生效，说了就是骗他），以及 code 会话那段的措辞。
     note＝硬触发的缘由（如「有新邮件」），非空就整段注入——不告诉他为什么醒，
     他只会当成一次普通的随机醒来，到点的事就黄了。"""
     u = config.user_name()
     now_str = pipeline.now_str()
-    window = state_store.read_recent_window()
+    window = state_store.read_recent_window(char_id)
 
     gap_line = ""
     if window and window[-1].get("ts"):
@@ -178,12 +186,13 @@ def wake_prompt(settings: dict, forced: bool = False, note: str = "") -> str:
     # 长期记忆（Ombre 挂上才有）：引导 + 近 12h 已存清单——不给清单模型会把
     # 时间线里同一件事每次醒来都存一遍（mianmian 实踩）。
     memory_section = ""
-    if pipeline.ombre_alive():
+    if pipeline.ombre_alive(char_id):
         lines = ["【你有自己的长期记忆（Ombre 工具）：想不起细节可以先 breath；"
                  "这次醒来若有值得留住的，用 hold 存下来。】"]
         # 只算**真存下的**：没成功的（工具被拒/报错）当然要能再存一次，
         # 摆进"别重复存"清单等于把那件事永久封杀了。
-        recent_stored = [s.get("text", "") for w in state_store.read_wake_log(limit=100)
+        recent_stored = [s.get("text", "")
+                         for w in state_store.read_wake_log(limit=100, char_id=char_id)
                          if int(w.get("ts", 0)) > int(time.time()) - 12 * 3600
                          for s in (w.get("stored") or []) if s.get("ok", True)]
         if recent_stored:
@@ -192,7 +201,7 @@ def wake_prompt(settings: dict, forced: bool = False, note: str = "") -> str:
         memory_section = "\n" + "\n".join(lines) + "\n"
 
     # 上次憋回去的话：让他自己决定要不要重提（别白想一场）。
-    unsent_section = unsent_block(u)
+    unsent_section = unsent_block(u, char_id)
 
     # 表情库（持久化的清单；醒来发消息也能配表情）。不给改描述——那是聊天里的事。
     sb = pipeline.sticker_block(state_store.read_sticker_catalog(), allow_desc=False)
@@ -201,7 +210,7 @@ def wake_prompt(settings: dict, forced: bool = False, note: str = "") -> str:
     # 这轮发消息会被打扰控制拦下 → 先告诉他再让他想（闸门只拦推送不拦思考，但他有权知道）。
     # 硬触发不受这些闸管（try_push 里 force 直接跳过），所以这句一个字都不能说——
     # 告诉他"发了也送不出去"会让他干脆不发，而这条恰恰是必须送到的。
-    blocked = None if forced else push_block(settings)
+    blocked = None if forced else push_block(settings, char_id)
     blocked_section = f"\n{blocked[1]}\n" if blocked else ""
 
     # 醒来预算见底 → 如实告知。这道闸拦的是"醒"本身，他定的 NEXT 会不会兑现取决于余额，
@@ -210,7 +219,7 @@ def wake_prompt(settings: dict, forced: bool = False, note: str = "") -> str:
     budget_section = ""
     bw = settings.get("wake_daily_budget")
     if bw is not None:
-        left = int(bw) - wakes_today() - 1   # 本次醒来还没记日志，先扣掉自己
+        left = int(bw) - wakes_today(char_id) - 1   # 本次醒来还没记日志，先扣掉自己
         if left <= 1:
             tail = (f"这次之后今天还能自发醒 {left} 次" if left > 0
                     else "这已经是今天最后一次自发醒来")
@@ -267,12 +276,12 @@ def parse_wake_output(text: str) -> tuple[str, str, str, Optional[int], str]:
 
 
 # ---------- 起模型 ----------
-def run_claude_wake(prompt: str) -> tuple[Optional[str], list[dict]]:
+def run_claude_wake(prompt: str, char_id: Optional[str] = None) -> tuple[Optional[str], list[dict]]:
     """起一次 claude -p（醒来用），collect_all_text 拼接全部文本段。失败/超时返回 (None, [])，不抛。
 
     ⚠️ context='wake' 不能省：醒来这条路上有些插件工具是不挂的（plugins.NO_WAKE_PLUGINS），
     默认值是 chat（全挂）。省掉它 = 一次没人看着的随机醒来手上多出自切 code 模式这种能力。"""
-    args = (pipeline.base_claude_args(context="wake")
+    args = (pipeline.base_claude_args(context="wake", char_id=char_id)
             + ["--output-format", "stream-json", "--verbose"])
     try:
         proc = subprocess.run(args, input=prompt, capture_output=True, text=True,
@@ -293,16 +302,16 @@ def _date_str(ts: int) -> str:
     return datetime.fromtimestamp(ts, config.APP_TZ).strftime("%Y-%m-%d")
 
 
-def wakes_today() -> int:
-    """今天已经醒来几次（source=="wake" 的日志条数）。含 error/none/被拦推送的——都起过模型，
-    烧的都是真 token。只读尾部 1000 条，口径与 push_block 一致（覆盖好几天，够数）。
+def wakes_today(char_id: Optional[str] = None) -> int:
+    """这个角色今天已经醒来几次（source=="wake" 的日志条数）。含 error/none/被拦推送的——
+    都起过模型，烧的都是真 token。只读尾部 1000 条，口径与 push_block 一致（覆盖好几天，够数）。
     chat 侧的 stored 事件是 source=="chat"，天然不算。"""
     today = _date_str(int(time.time()))
-    return sum(1 for w in state_store.read_wake_log(limit=1000)
+    return sum(1 for w in state_store.read_wake_log(limit=1000, char_id=char_id)
                if w.get("source") == "wake" and _date_str(int(w.get("ts", 0))) == today)
 
 
-def push_block(settings: dict) -> Optional[tuple[str, str]]:
+def push_block(settings: dict, char_id: Optional[str] = None) -> Optional[tuple[str, str]]:
     """算这会儿若要推送会被哪道闸拦。返回 (机器码, 给模型看的提示句)；None=不会被拦。
     醒来拼 prompt 前算好注入——闸门只拦推送不拦思考，但他有权先知道再决定做什么，
     别让他以为发出去了（实锤缺陷：被拦的消息在他下轮时间线里看着像发过）。"""
@@ -311,7 +320,7 @@ def push_block(settings: dict) -> Optional[tuple[str, str]]:
     tail = "——本轮你发消息将不会被推送，发了什么 ta 也收不到。】"
     # 只读尾部（append-only 日志会一直变长，全量 parse 违背"工作集有界"）；
     # 1000 条覆盖好几天的醒来记录，每日计数/最近间隔都够。
-    pushed_logs = [w for w in state_store.read_wake_log(limit=1000)
+    pushed_logs = [w for w in state_store.read_wake_log(limit=1000, char_id=char_id)
                    if w.get("action") == "message" and w.get("pushed")]
 
     dm = settings.get("daily_max")
@@ -330,7 +339,7 @@ def push_block(settings: dict) -> Optional[tuple[str, str]]:
 
     q = settings.get("quiet_after_user_min")
     if q:
-        window = state_store.read_recent_window()
+        window = state_store.read_recent_window(char_id)
         user_ts = next((int(m["ts"]) for m in reversed(window)
                         if m.get("role") == "user" and m.get("ts")), None)
         if user_ts is not None and now_ts - user_ts < q * 60:
@@ -343,7 +352,8 @@ def try_push(text: str, settings: dict, thoughts: str = "", trigger: str = "",
              sticker_ids: Optional[list] = None, bark_text: str = "",
              next_wake_at: Optional[int] = None, next_wake_note: str = "",
              started_ts: Optional[int] = None, stored: Optional[list] = None,
-             browse: Optional[list] = None, force: bool = False) -> bool:
+             browse: Optional[list] = None, force: bool = False,
+             char_id: Optional[str] = None) -> bool:
     """硬顶闸（每天条数 + 最小间隔 + 静默）。只拦推送、不拦思考。通过 → 进 outbox + Bark + 追加窗口。
     thoughts＝这次醒来的内心，一并记进日志（连被抑制的也记）。
     sticker_ids＝这条消息附带的表情（app 按 id 取本地图上屏）；
@@ -373,46 +383,50 @@ def try_push(text: str, settings: dict, thoughts: str = "", trigger: str = "",
     # 醒来生成期间（几十秒）用户发了新消息 → 这条讲的是旧世界的事，发出去必乱序还答非所问。
     # 整条抑制，原文记日志可查。
     if not force:
-        window = state_store.read_recent_window()
+        window = state_store.read_recent_window(char_id)
         fresh_user = next((int(m["ts"]) for m in reversed(window)
                            if m.get("role") == "user" and m.get("ts")
                            and int(m["ts"]) > started_ts), None)
         if fresh_user is not None:
             state_store.append_wake_log({**base, "content": text[:500], "pushed": False,
-                                         "note": "stale_user_msg"})
+                                         "note": "stale_user_msg"}, char_id=char_id)
             logerr("message 被抑制：生成期间用户发了新消息（stale）")
             return False
 
-    blocked = None if force else push_block(settings)
+    blocked = None if force else push_block(settings, char_id)
     if blocked:
         note, _ = blocked
         # 被拦的正文也记进日志——不然事后（Mind 页）只知道他想发、不知道他想说什么。
-        state_store.append_wake_log({**base, "content": text[:500], "pushed": False, "note": note})
+        state_store.append_wake_log({**base, "content": text[:500], "pushed": False,
+                                     "note": note}, char_id=char_id)
         logerr(f"message 被抑制：{note}")
         return False
 
     state_store.outbox_append({"id": uuid.uuid4().hex[:12], "ts": started_ts, "text": text,
                                "sticker_ids": sticker_ids or [],
+                               "char_id": _cid(char_id),
                                "delivered": False, "origin": "wake"})
     # 窗口记他自己视角的一句（带 [sticker_sN] 占位），方便之后回忆自己发过表情。
     # 加锁：chat finalize 可能在并发覆盖窗口，读改写不锁会互踩丢条。
     with state_store.WINDOW_LOCK:
-        window = state_store.read_recent_window()
+        window = state_store.read_recent_window(char_id)
         window.append({"role": "assistant", "text": (bark_text or text), "ts": started_ts})
-        state_store.write_recent_window(window)
-    ok = bark_push(bark_text or text)
-    state_store.append_wake_log({**base, "pushed": True, "bark": ok})
+        state_store.write_recent_window(window, char_id)
+    ok = bark_push(bark_text or text, title=characters.display_name(char_id))
+    state_store.append_wake_log({**base, "pushed": True, "bark": ok}, char_id=char_id)
     return True
 
 
-def do_wake_sync(settings: dict, trigger: str, force: bool = False, note: str = "") -> dict:
+def do_wake_sync(settings: dict, trigger: str, force: bool = False, note: str = "",
+                 char_id: Optional[str] = None) -> dict:
     """真正的醒来：起模型 → 解析 → 分发。同步阻塞（在线程池里跑，别放主事件循环）。
 
     force＝硬触发（到点必须说的事）：prompt 里不注入打扰控制那句、推送时绕开所有软闸。
     自发的醒来（随机 / NEXT）永远是 False。note＝硬触发的缘由，透传给 wake_prompt。"""
     now_ts = int(time.time())
 
-    raw, stored = run_claude_wake(wake_prompt(settings, forced=force, note=note))
+    raw, stored = run_claude_wake(wake_prompt(settings, forced=force, note=note,
+                                              char_id=char_id), char_id=char_id)
     # 醒来时浏览过的网页：落 browse_log（Mind 页未来素材；一期 wake_log 不收 browse——
     # 它在 NON_MEMORY_TOOLS 里，下一行就被滤掉。二期进 Mind 时间线再回头）。
     browse_urls: list[str] = []
@@ -424,7 +438,8 @@ def do_wake_sync(settings: dict, trigger: str, force: bool = False, note: str = 
     if browse_urls:
         try:
             state_store.append_browse_log({"ts": now_ts, "time": pipeline.now_str(),
-                                           "source": "wake", "urls": browse_urls})
+                                           "source": "wake", "urls": browse_urls},
+                                          char_id=char_id)
         except Exception as e:
             logerr(f"记 browse_log 失败: {e}")
     # 浏览器去留标记：统一在这里剥+结算——剥在 parse_wake_output 之前，
@@ -439,14 +454,14 @@ def do_wake_sync(settings: dict, trigger: str, force: bool = False, note: str = 
 
     if raw is None:
         state_store.append_wake_log({"ts": now_ts, "time": pipeline.now_str(), "source": "wake",
-                                     "action": "error", "trigger": trigger})
+                                     "action": "error", "trigger": trigger}, char_id=char_id)
         # 错误退避 30 分钟：最小间隔闸(180s)小于 tick(300s) 拦不住重试——claude 登录态过期
         # 这类持续失败场景会每个 tick 起一次注定失败的子进程。不动他自定的 next_wake_at。
         with state_store.SCHEDULE_LOCK:
-            sched = state_store.read_schedule()
+            sched = state_store.read_schedule(char_id)
             sched["last_wake_at"] = now_ts
             sched["cooldown_until"] = now_ts + 1800
-            state_store.write_schedule(sched)
+            state_store.write_schedule(sched, char_id)
         return {"action": "error"}
 
     thoughts, action, content, next_min, next_raw = parse_wake_output(raw)
@@ -467,7 +482,7 @@ def do_wake_sync(settings: dict, trigger: str, force: bool = False, note: str = 
                                     sticker_ids=sticker_ids, bark_text=bark_text,
                                     next_wake_at=next_wake_at, next_wake_note=nw_note,
                                     started_ts=now_ts, stored=stored,
-                                    browse=browse_urls, force=force)
+                                    browse=browse_urls, force=force, char_id=char_id)
     else:
         result["action"] = "none"   # none，或 message 但 content 空 → 兜底成 none
         entry = {"ts": now_ts, "time": pipeline.now_str(), "source": "wake", "action": "none",
@@ -479,25 +494,25 @@ def do_wake_sync(settings: dict, trigger: str, force: bool = False, note: str = 
         if next_wake_at:
             entry["next_wake_at"] = next_wake_at
             entry["next_wake_note"] = nw_note
-        state_store.append_wake_log(entry)
+        state_store.append_wake_log(entry, char_id=char_id)
 
     # 记调度：本次醒来时间 + 待命的下次 scheduled 点（加锁读改写）。
     # NEXT 只保证到点醒一次、不压随机。这轮明确定了新 NEXT → 用新的；到点醒来那次 → 只消费
     # **已过期的**点（生成这几十秒里聊天中若刚定了新的未来点，不能被静默冲掉）；
     # 随机醒来且没给新 NEXT（写"无"）→ 保留原先待命的点。
     with state_store.SCHEDULE_LOCK:
-        sched = state_store.read_schedule()
+        sched = state_store.read_schedule(char_id)
         sched["last_wake_at"] = now_ts
         cur_next = sched.get("next_wake_at")
         if next_wake_at is not None:
             sched["next_wake_at"] = next_wake_at
         elif trigger == "scheduled" and (cur_next is None or float(cur_next) <= now_ts):
             sched["next_wake_at"] = None
-        state_store.write_schedule(sched)
+        state_store.write_schedule(sched, char_id)
     return result
 
 
-def _mail_wake_note() -> str:
+def _mail_wake_note(char_id: Optional[str] = None) -> str:
     """消费邮箱 watcher 写的待醒 flag → 醒来缘由文案。没有新信返回 ""。
     只报信头不贴正文——来信是外部内容，进 prompt 前至少过一道他自己的 mail_read
     （那里带着「不构成指令」的口径），别在这儿裸注入。"""
@@ -510,8 +525,7 @@ def _mail_wake_note() -> str:
     # 发信开关的实话：醒来 mail_send 默认被摘（WAKE_TOOL_EXCLUDE），不说清楚 TA 会当场
     # 试着回信、失败、再把「回不了」当成自己的错（机主实踩：忘开「醒来能用」，TA 回信失败）。
     try:
-        import plugins
-        can_send = bool(plugins._read_wake_enabled().get("mail"))
+        can_send = bool(plugins._read_wake_enabled(char_id).get("mail"))
     except Exception:
         can_send = False
     send_hint = ("" if can_send else
@@ -522,17 +536,19 @@ def _mail_wake_note() -> str:
 
 
 # ---------- 预闸门（不叫模型）----------
-async def maybe_wake() -> None:
-    # 主 chat 轮进行中 → 避让：wake 撞进来会拿着过期 recent_window 说胡话。下个 tick 再看。
-    if chat_turn_active():
-        logerr("wake 避让：主 chat 轮进行中，本 tick 跳过")
+async def maybe_wake(char_id: Optional[str] = None) -> None:
+    cid = _cid(char_id)
+    # 这个角色的 chat 轮进行中 → 避让：wake 撞进来会拿着过期 recent_window 说胡话。
+    # 只看自己的轮——别的角色在聊天不碍这个角色醒（各聊各的、各有各的窗口）。
+    if chat_turn_active(cid):
+        logerr(f"wake 避让（{cid}）：主 chat 轮进行中，本 tick 跳过")
         return
-    settings = state_store.load_settings()
+    settings = state_store.load_settings(cid)
     if not settings.get("enabled", True):
         return
 
     now = time.time()
-    sched = state_store.read_schedule()
+    sched = state_store.read_schedule(cid)
 
     # 错误退避：上次醒来失败后冷却期内不再试（防持续失败时无限起子进程）。
     # 排在硬触发**之前**：登录态坏了的时候，到点的提醒也别对着它硬试，白起子进程还发不出去。
@@ -553,23 +569,29 @@ async def maybe_wake() -> None:
     # 本地 flag，这里只读文件、不碰网络（预闸门保持纯本地的口径）。flag **先消费再醒**：
     # 醒失败（claude 登录态坏之类）不重试硬触发——信躺在收件箱丢不了，下次自然醒 /
     # 机主来问照样看得见；反着写会在持续失败时每个 tick 都硬起一次注定失败的子进程。
-    mail_note = _mail_wake_note()
-    if mail_note:
-        loop = asyncio.get_running_loop()
-        await loop.run_in_executor(
-            None, functools.partial(do_wake_sync, settings, "mail", True, note=mail_note))
-        return
+    # mail 是独占资源（plugins.EXCLUSIVE）：新信只把**归属角色**硬叫醒。
+    # flag 是消费式的（consume），非归属角色不去碰——碰了等于替别人把信的唤醒吞掉。
+    if plugins.owner_of("mail") == cid:
+        mail_note = _mail_wake_note(cid)
+        if mail_note:
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(
+                None, functools.partial(do_wake_sync, settings, "mail", True,
+                                        note=mail_note, char_id=cid))
+            return
 
     # code 模式开着 → 自发的醒来一律避让。那会儿他人在电脑前干活，随机戳一条聊天气泡
     # 既是打扰，又会跟他在 code 会话里说的话挤在同一个聊天框里打架。
     # ⚠️ 这里 return 不写任何盘：他自己定的 next_wake_at 原地待命，退出 code 模式后
     # 下一个 tick 就过期兑现，一次不丢。硬触发在上面已经走掉了，不受这道闸管。
+    # M1 口径：会话全局唯一，避让对**所有角色**生效（宁可多让一拍，别让别的角色的
+    # 醒来消息和会话话语挤同屏）；M2 消息按角色分会话后可收窄到会话归属角色。
     if code_session_open():
-        if not _code_avoid["logged"]:
-            logerr("wake 避让：code 模式开着，自发的醒来全部跳过（硬触发不受影响）")
-            _code_avoid["logged"] = True
+        if not _code_avoid.get(cid):
+            logerr(f"wake 避让（{cid}）：code 模式开着，自发的醒来全部跳过（硬触发不受影响）")
+            _code_avoid[cid] = True
         return
-    _code_avoid["logged"] = False
+    _code_avoid[cid] = False
 
     # 最小间隔闸：距上次醒来太近就跳过（防两种醒来背靠背撞）。
     if now - float(sched.get("last_wake_at") or 0) < MIN_WAKE_GAP_SEC:
@@ -587,7 +609,7 @@ async def maybe_wake() -> None:
         # 用户刚说过话就别随机戳（往回找最后一条 user 消息——window 末条通常是模型自己的回复）。
         q = settings.get("quiet_after_user_min")
         if q:
-            window = state_store.read_recent_window()
+            window = state_store.read_recent_window(cid)
             user_ts = next((int(m["ts"]) for m in reversed(window)
                             if m.get("role") == "user" and m.get("ts")), None)
             if user_ts is not None and now - user_ts < q * 60:
@@ -600,20 +622,21 @@ async def maybe_wake() -> None:
             trigger = "probability"
 
     if trigger:
-        # 醒来预算（每天最多自发醒 N 次）：在起模型之前拦——上面那三道用户闸只拦推送不省
-        # token，这道拦的是"醒"本身。只管自发的（scheduled/probability），硬触发在更早的
-        # 直推口子已经走掉、天然豁免。放在 trigger 判定之后：没事的 tick 不多读一次日志。
+        # 醒来预算（每天最多自发醒 N 次，per 角色）：在起模型之前拦——上面那三道用户闸只拦
+        # 推送不省 token，这道拦的是"醒"本身。只管自发的（scheduled/probability），硬触发在
+        # 更早的直推口子已经走掉、天然豁免。放在 trigger 判定之后：没事的 tick 不多读一次日志。
         # next_wake_at 原地待命不清不改（同 code 避让的路子），日切后第一个 tick 兑现。
         budget = settings.get("wake_daily_budget")
-        if budget is not None and wakes_today() >= int(budget):
-            if not _budget_hit["logged"]:
-                logerr(f"wake 预算：今天自发醒来已达 {budget} 次上限，"
+        if budget is not None and wakes_today(cid) >= int(budget):
+            if not _budget_hit.get(cid):
+                logerr(f"wake 预算（{cid}）：今天自发醒来已达 {budget} 次上限，"
                        f"跳过 {trigger} 醒来（next_wake_at 待命，日切兑现；硬触发不受限）")
-                _budget_hit["logged"] = True
+                _budget_hit[cid] = True
             return
-        _budget_hit["logged"] = False
+        _budget_hit[cid] = False
         loop = asyncio.get_running_loop()
-        await loop.run_in_executor(None, do_wake_sync, settings, trigger)
+        await loop.run_in_executor(
+            None, functools.partial(do_wake_sync, settings, trigger, char_id=cid))
 
 
 async def scheduler_loop() -> None:
@@ -621,7 +644,15 @@ async def scheduler_loop() -> None:
     while True:
         try:
             await asyncio.sleep(WAKE_TICK_SEC)
-            await maybe_wake()
+            # 逐个角色顺序 await：一个 tick 内天然「醒来并发 = 1」——两个角色同时到点
+            # 就排队，绝不叠着起两个 claude -p（PLAN_multichar 的全局并发锁就是这行）。
+            for cid in characters.ids():
+                try:
+                    await maybe_wake(cid)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    logerr(f"tick 出错（{cid}，忽略，继续下一个角色）: {e}")
         except asyncio.CancelledError:
             break
         except Exception as e:

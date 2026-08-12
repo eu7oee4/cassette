@@ -263,7 +263,8 @@ def next_wake_note(raw: str, at: int) -> str:
 
 
 # ---------- prompt ----------
-def build_prompt(messages: list[Message], catalog: Optional[list[dict]] = None) -> str:
+def build_prompt(messages: list[Message], catalog: Optional[list[dict]] = None,
+                 char_id: Optional[str] = None) -> str:
     """把 app 传来的完整历史拼成一次性提示词。人设在系统提示词里，这里只有对话本身。
     时间感（当前时间+时段词、距上一条的间隔）注入在**末尾、紧贴新消息**——放顶部会被
     长对话淹掉，prompt 末尾是 recency 权重最高的位置。恒为 1~2 行、不随历史增长。"""
@@ -275,7 +276,7 @@ def build_prompt(messages: list[Message], catalog: Optional[list[dict]] = None) 
         time_lines.append(f"【距离上一条消息，过了 {gap}】")
 
     extras = [pronoun_hint(), _chat_next_hint()]
-    mb = memory_block()
+    mb = memory_block(char_id)
     if mb:
         extras.append(mb)
     sb = sticker_block(catalog)
@@ -307,14 +308,17 @@ def build_prompt(messages: list[Message], catalog: Optional[list[dict]] = None) 
 
 
 # ---------- 人设渲染 ----------
-def rendered_persona() -> Path:
+def rendered_persona(char_id: Optional[str] = None) -> Path:
     """人设文件支持 {{AGENT_NAME}} / {{USER_NAME}} 占位符（角色名在 .env 配，不用改文件）。
-    每次调用现渲染 → 保持「改人设不用重启」的热读语义；没用占位符就原文件直传，零开销。"""
-    raw = config.PERSONA_PATH.read_text("utf-8")
-    out = raw.replace("{{AGENT_NAME}}", config.agent_name()).replace("{{USER_NAME}}", config.user_name())
+    每次调用现渲染 → 保持「改人设不用重启」的热读语义；没用占位符就原文件直传，零开销。
+    多角色：人设来源和渲染产物都按角色走（characters.persona_path / 角色 state 目录）。"""
+    import characters
+    raw = characters.persona_path(char_id).read_text("utf-8")
+    out = (raw.replace("{{AGENT_NAME}}", characters.display_name(char_id))
+              .replace("{{USER_NAME}}", config.user_name()))
     if out == raw:
-        return config.PERSONA_PATH
-    path = state_store.STATE_DIR / "persona_rendered.md"
+        return characters.persona_path(char_id)
+    path = state_store.char_state_dir(char_id) / "persona_rendered.md"
     tmp = path.with_name(f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
     tmp.write_text(out, "utf-8")
     tmp.replace(path)   # 原子替换：并发请求各写各的 tmp，不会互相踩
@@ -332,15 +336,18 @@ OMBRE_TOOLS = [f"mcp__ombre-brain__{t}" for t in (
 )]
 _OMBRE_PROBE_TIMEOUT = 1.5    # 探活短超时：Ombre 挂了最多拖慢一次请求这么点
 _OMBRE_PROBE_CACHE_SEC = 30   # 探活结果缓存，别每条消息都开一次连接
-_ombre_probe = {"ts": 0.0, "alive": False}
+_ombre_probe: dict[str, dict] = {}   # 按 url 各缓存各的（每个角色可指不同 Ombre 实例）
 
 
-def _ombre_mcp_config() -> Path:
-    """把 OMBRE_MCP_URL(+token) 渲染成 claude 的 mcp-config 文件（.env 配，文件现生成）。"""
-    path = state_store.STATE_DIR / "ombre.mcp.json"
-    server: dict = {"type": "http", "url": config.OMBRE_MCP_URL}
-    if config.OMBRE_MCP_TOKEN:
-        server["headers"] = {"Authorization": f"Bearer {config.OMBRE_MCP_TOKEN}"}
+def _ombre_mcp_config(char_id: Optional[str] = None) -> Path:
+    """把角色的 Ombre 接线（characters.ombre_conf）渲染成 claude 的 mcp-config 文件。
+    产物按角色分文件（角色 state 目录）——两个角色并发起子进程时各读各的，不互踩。"""
+    import characters
+    oc = characters.ombre_conf(char_id)
+    path = state_store.char_state_dir(char_id) / "ombre.mcp.json"
+    server: dict = {"type": "http", "url": oc["mcp_url"]}
+    if oc["mcp_token"]:
+        server["headers"] = {"Authorization": f"Bearer {oc['mcp_token']}"}
     payload = json.dumps({"mcpServers": {"ombre-brain": server}})
     if not path.exists() or path.read_text("utf-8") != payload:
         tmp = path.with_name(f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
@@ -349,31 +356,35 @@ def _ombre_mcp_config() -> Path:
     return path
 
 
-def ombre_alive() -> bool:
-    """快速探活 Ombre 的 /mcp 端点：任何 HTTP 响应都算活（MCP 对裸 GET 回 406 是正常的），
-    连不上/超时=死。OMBRE_ENABLED=0 直接当死。结果缓存 ~30s。
+def ombre_alive(char_id: Optional[str] = None) -> bool:
+    """快速探活角色的 Ombre /mcp 端点：任何 HTTP 响应都算活（MCP 对裸 GET 回 406 是正常的），
+    连不上/超时=死。OMBRE_ENABLED=0 直接当死。结果按 url 缓存 ~30s（角色可各指一个实例，
+    共用一个缓存会把 A 的死活当成 B 的）。
     显式空代理——macOS 系统代理的例外名单常常只有 localhost 没有 127.0.0.1，
     走系统代理会把本机请求吞掉还查不出原因。"""
     if not config.OMBRE_ENABLED:
         return False
+    import characters
+    url = characters.ombre_conf(char_id)["mcp_url"]
     now = time.time()
-    if now - _ombre_probe["ts"] < _OMBRE_PROBE_CACHE_SEC:
-        return _ombre_probe["alive"]
+    probe = _ombre_probe.setdefault(url, {"ts": 0.0, "alive": False})
+    if now - probe["ts"] < _OMBRE_PROBE_CACHE_SEC:
+        return probe["alive"]
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     try:
-        opener.open(config.OMBRE_MCP_URL, timeout=_OMBRE_PROBE_TIMEOUT)
+        opener.open(url, timeout=_OMBRE_PROBE_TIMEOUT)
         alive = True
     except urllib.error.HTTPError:
         alive = True
     except Exception:
         alive = False
-    _ombre_probe["ts"], _ombre_probe["alive"] = now, alive
+    probe["ts"], probe["alive"] = now, alive
     return alive
 
 
-def memory_block() -> str:
+def memory_block(char_id: Optional[str] = None) -> str:
     """记忆工具的使用引导，挂上 Ombre 时注入 prompt（人设保持通用，不预设有没有记忆）。"""
-    if not ombre_alive():
+    if not ombre_alive(char_id):
         return ""
     return ("【你有自己的长期记忆（Ombre 工具）：开场先 breath 让相关记忆自然浮现；"
             "找具体的事用 breath_search。这轮聊到值得留住的，用 hold 存下来，"
@@ -385,7 +396,8 @@ def memory_block() -> str:
 
 # ---------- 子进程 ----------
 def base_claude_args(persona_file: Optional[Path] = None,
-                     context: str = "chat") -> list[str]:
+                     context: str = "chat",
+                     char_id: Optional[str] = None) -> list[str]:
     """所有 claude 调用共用的参数，统一从这里出（别另起一套）。
     各 MCP 源累积（可并列多个 --mcp-config，claude 合并）：Ombre 记忆 + 启用中的插件。
     有工具 → 白名单挂载（--strict-mcp-config 屏蔽机器上其它 MCP；--allowedTools
@@ -393,19 +405,27 @@ def base_claude_args(persona_file: Optional[Path] = None,
     一个没有 → 纯聊天 --tools ""。
 
     context＝这次调用是哪条路（'chat' / 'wake'）：插件按场景分挂，有些工具不给醒来那条路
-    （见 plugins.NO_WAKE_PLUGINS）。默认 chat——醒来的调用方必须自己显式写 context='wake'。"""
+    （见 plugins.NO_WAKE_PLUGINS）。默认 chat——醒来的调用方必须自己显式写 context='wake'。
+
+    char_id＝为哪个角色起模型：人设 / Ombre / 插件集全按角色走。这里也是**引擎缝**：
+    一期只有 claude-code 引擎，char.json 写了别的（如 openai-compat）在这儿有声报错——
+    静默用 claude 顶替等于让别人替这个角色说话。"""
+    import characters
     import plugins   # 函数内 import：plugins 依赖 state_store/config，避免模块级环
+    eng = characters.engine(char_id)
+    if eng != characters.CLAUDE_ENGINE:
+        raise RuntimeError(f"角色引擎 {eng!r} 尚未实现（一期只有 {characters.CLAUDE_ENGINE}）")
     args = [
         "claude", "-p",
         "--model", config.MODEL,
-        "--system-prompt-file", str(persona_file or rendered_persona()),
+        "--system-prompt-file", str(persona_file or rendered_persona(char_id)),
     ]
     mcp_configs: list[str] = []
     tools: list[str] = []
-    if ombre_alive():
-        mcp_configs.append(str(_ombre_mcp_config()))
+    if ombre_alive(char_id):
+        mcp_configs.append(str(_ombre_mcp_config(char_id)))
         tools += OMBRE_TOOLS
-    plug_cfg, plug_tools = plugins.mounted(context)
+    plug_cfg, plug_tools = plugins.mounted(context, char_id)
     if plug_cfg:
         mcp_configs.append(plug_cfg)
         tools += plug_tools
@@ -729,11 +749,12 @@ def multimodal_stdin(prompt: str, images: list, file_blocks: Optional[list[dict]
 
 
 def call_claude_multimodal(prompt: str, images: list,
-                           file_blocks: Optional[list[dict]] = None) -> tuple[str, list[dict]]:
+                           file_blocks: Optional[list[dict]] = None,
+                           char_id: Optional[str] = None) -> tuple[str, list[dict]]:
     """带图/文件的一次性调用（非流式回退路）：stream-json 输入让模型真正看到。
     其余与 call_claude 完全同款（参数/env/解析）。"""
-    args = base_claude_args() + ["--input-format", "stream-json",
-                                 "--output-format", "stream-json", "--verbose"]
+    args = base_claude_args(char_id=char_id) + ["--input-format", "stream-json",
+                                                "--output-format", "stream-json", "--verbose"]
     try:
         proc = subprocess.run(
             args, input=multimodal_stdin(prompt, images, file_blocks),
@@ -750,9 +771,9 @@ def call_claude_multimodal(prompt: str, images: list,
     return reply, stored
 
 
-def call_claude(prompt: str) -> tuple[str, list[dict]]:
+def call_claude(prompt: str, char_id: Optional[str] = None) -> tuple[str, list[dict]]:
     """起一次性 claude -p 子进程（prompt 走 stdin，读到 EOF 才开始），返回 (回复, stored)。"""
-    args = base_claude_args() + ["--output-format", "stream-json", "--verbose"]
+    args = base_claude_args(char_id=char_id) + ["--output-format", "stream-json", "--verbose"]
     try:
         proc = subprocess.run(
             args, input=prompt, capture_output=True, text=True,

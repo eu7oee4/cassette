@@ -42,14 +42,41 @@ import config
 import state_store
 
 PLUGINS_DIR = config.BASE_DIR / "plugins"          # 安装目录（gitignore，装的都是外部仓）
-ENABLED_PATH = state_store.STATE_DIR / "plugins_enabled.json"
-# 挂载清单按调用场景分文件。**不能共用一个路径**：聊天和醒来的工具集不一样（见
-# NO_WAKE_PLUGINS），共用就会互相覆盖——两条路并发起子进程时，谁后写谁说了算，
-# 另一边的 claude 读到的是对方那份。
-MCP_CONFIG_PATHS = {
-    "chat": state_store.STATE_DIR / "plugins.mcp.json",
-    "wake": state_store.STATE_DIR / "plugins.wake.mcp.json",
-}
+
+# 多角色（PLAN_multichar M1）：**安装是全局的**（代码就一份在这台 Mac 上），
+# **启用/醒来开关是每个角色自己的**（进各自的 state/characters/<id>/）。
+
+
+def _enabled_path(char_id=None):
+    return state_store.char_state_dir(char_id) / "plugins_enabled.json"
+
+
+def _wake_enabled_path(char_id=None):
+    return state_store.char_state_dir(char_id) / "plugins_wake_enabled.json"
+
+
+# 挂载清单按（角色 × 场景）分文件。**不能共用一个路径**：聊天和醒来的工具集不一样（见
+# NO_WAKE_PLUGINS），角色之间的插件集也不一样——共用就会互相覆盖，并发起子进程时
+# 谁后写谁说了算，另一边的 claude 读到的是对方那份。
+def _mcp_config_path(context: str, char_id=None):
+    name = "plugins.wake.mcp.json" if context == "wake" else "plugins.mcp.json"
+    return state_store.char_state_dir(char_id) / name
+
+
+# 独占资源插件：背后是一份物理上只有一个的东西——MuMu 模拟器、邮箱账号、Beacon 卡、
+# tmux code 会话、带登录态的那只 Chrome。同一时刻只能归一个角色（plugin_owners.json，
+# 缺省全归默认角色）；别的角色即便拨开了启用开关也不挂载。一期不做共享/转让 UI，
+# 改归属手编 state/plugin_owners.json。
+EXCLUSIVE = {"game-maayuan", "game-story", "mail", "beacon", "codemode", "browser"}
+OWNERS_PATH = state_store.STATE_DIR / "plugin_owners.json"
+
+
+def owner_of(name: str) -> str:
+    try:
+        owners = json.loads(OWNERS_PATH.read_text("utf-8"))
+    except Exception:
+        owners = {}
+    return owners.get(name) or state_store.DEFAULT_CHAR_ID
 
 # 醒来那条路不挂的插件。
 #
@@ -75,7 +102,6 @@ NO_WAKE_PLUGINS = {"codemode", "game-story"}
 # game-maayuan：任务引擎是确定性脚本、不碰消耗，但「醒来发现体力满了自己去清日常」
 # 动的是机主的游戏账号——给不给这份自主，开关交机主。
 WAKE_TOGGLEABLE = {"browser", "beacon", "mail", "game-maayuan"}
-WAKE_ENABLED_PATH = state_store.STATE_DIR / "plugins_wake_enabled.json"
 
 # 醒来那条路**插件照挂、但默认摘掉个别工具**——比上面两档更细的第四档（工具级）。
 # 同时也在 WAKE_TOGGLEABLE 里的插件，「醒来能用」开关的语义随之变细：**开关关的时候
@@ -98,25 +124,25 @@ WAKE_TOGGLE_TEXT: dict[str, tuple[str, str]] = {
 _WAKE_TOGGLE_DEFAULT = ("醒来能用", "打开后 TA 自发醒来时也能用它（默认关）")
 
 
-def _read_wake_enabled() -> dict:
+def _read_wake_enabled(char_id=None) -> dict:
     try:
-        return json.loads(WAKE_ENABLED_PATH.read_text("utf-8"))
+        return json.loads(_wake_enabled_path(char_id).read_text("utf-8"))
     except Exception:
         return {}
 
 
-def wake_toggle(name: str, on: bool) -> dict:
-    """「醒来能用」开关（零联网，下一次醒来生效）。只对 WAKE_TOGGLEABLE 里的插件开放——
-    NO_WAKE_PLUGINS 是硬禁没有开关，普通插件醒来本来就挂、不需要开关。"""
+def wake_toggle(name: str, on: bool, char_id=None) -> dict:
+    """「醒来能用」开关（零联网，下一次醒来生效；per 角色）。只对 WAKE_TOGGLEABLE 里的
+    插件开放——NO_WAKE_PLUGINS 是硬禁没有开关，普通插件醒来本来就挂、不需要开关。"""
     _check_name(name)
     if name not in WAKE_TOGGLEABLE:
         raise HTTPException(status_code=400, detail="这个插件没有「醒来能用」开关")
     if not (PLUGINS_DIR / name).is_dir():
         raise HTTPException(status_code=404, detail="没装这个插件")
     with _LOCK:
-        d = _read_wake_enabled()
+        d = _read_wake_enabled(char_id)
         d[name] = bool(on)
-        _atomic_write(WAKE_ENABLED_PATH, d)
+        _atomic_write(_wake_enabled_path(char_id), d)
     return {"ok": True, "wake_enabled": bool(on)}
 
 # 写死的插件 registry：只认自己名下的仓，且**钉死 commit**——审过哪份代码就装哪份，
@@ -178,9 +204,9 @@ def _atomic_write(path: Path, obj) -> None:
     tmp.replace(path)
 
 
-def _read_enabled() -> dict:
+def _read_enabled(char_id=None) -> dict:
     try:
-        return json.loads(ENABLED_PATH.read_text("utf-8"))
+        return json.loads(_enabled_path(char_id).read_text("utf-8"))
     except Exception:
         return {}
 
@@ -227,10 +253,13 @@ def _installed_commit(name: str) -> str:
     return raw[:7] if len(raw) >= 7 and all(c in "0123456789abcdef" for c in raw) else ""
 
 
-def list_status() -> list[dict]:
-    """registry ∪ 已安装 → 三态清单（not_installed / disabled / enabled）。"""
-    enabled = _read_enabled()
-    wake_on = _read_wake_enabled()
+def list_status(char_id=None) -> list[dict]:
+    """registry ∪ 已安装 → 三态清单（not_installed / disabled / enabled）。
+    开关状态按角色读；独占插件额外带 exclusive/owned 字段（不归这个角色 = 商店里可见
+    但标注归属，开了也不挂载）。"""
+    enabled = _read_enabled(char_id)
+    wake_on = _read_wake_enabled(char_id)
+    me = char_id or state_store.DEFAULT_CHAR_ID
     out = []
     names = list(REGISTRY.keys())
     if PLUGINS_DIR.is_dir():
@@ -259,6 +288,9 @@ def list_status() -> list[dict]:
             # 开关文案后端下发：语义（整插件 or 只某几个工具）是这边定的，app 不该猜。
             "wake_toggle_title": WAKE_TOGGLE_TEXT.get(name, _WAKE_TOGGLE_DEFAULT)[0],
             "wake_toggle_desc": WAKE_TOGGLE_TEXT.get(name, _WAKE_TOGGLE_DEFAULT)[1],
+            # 独占资源插件的归属（见 EXCLUSIVE）：owned=False 时开了也不挂载。
+            "exclusive": name in EXCLUSIVE,
+            "owned": name not in EXCLUSIVE or owner_of(name) == me,
         }
         out.append(item)
     return out
@@ -325,55 +357,65 @@ def update(name: str) -> dict:
     return {"ok": True}
 
 
-def toggle(name: str, on: bool) -> dict:
-    """开/关（零联网）。claude 子进程每轮新起，下一轮聊天/醒来即时生效。"""
+def toggle(name: str, on: bool, char_id=None) -> dict:
+    """开/关（零联网，per 角色）。claude 子进程每轮新起，下一轮聊天/醒来即时生效。"""
     _check_name(name)
     if not (PLUGINS_DIR / name).is_dir():
         raise HTTPException(status_code=404, detail="没装这个插件")
     if on and _read_manifest(name) is None:
         raise HTTPException(status_code=502, detail="插件清单不合法，不能启用")
     with _LOCK:
-        enabled = _read_enabled()
+        enabled = _read_enabled(char_id)
         enabled[name] = bool(on)
-        _atomic_write(ENABLED_PATH, enabled)
+        _atomic_write(_enabled_path(char_id), enabled)
     return {"ok": True, "state": "enabled" if on else "disabled"}
 
 
 def uninstall(name: str) -> dict:
-    """卸载=删目录。插件自己的数据该放 state/（按约定），不跟目录一起消失。"""
+    """卸载=删目录（全局）。开关状态从**每个角色**的启用表里摘掉——只清默认角色的话，
+    别的角色表里残留 true，重装后它会静默复活。插件自己的数据该放 state/（按约定），
+    不跟目录一起消失。"""
     _check_name(name)
     dest = PLUGINS_DIR / name
     if not dest.is_dir():
         raise HTTPException(status_code=404, detail="没装这个插件")
     with _LOCK:
         shutil.rmtree(dest, ignore_errors=True)
-        enabled = _read_enabled()
-        enabled.pop(name, None)
-        _atomic_write(ENABLED_PATH, enabled)
+        char_dirs = [d.name for d in state_store.CHAR_STATE_ROOT.iterdir() if d.is_dir()] \
+            if state_store.CHAR_STATE_ROOT.is_dir() else [state_store.DEFAULT_CHAR_ID]
+        for cid in char_dirs:
+            enabled = _read_enabled(cid)
+            if name in enabled:
+                enabled.pop(name, None)
+                _atomic_write(_enabled_path(cid), enabled)
     return {"ok": True, "state": "not_installed"}
 
 
-def mounted(context: str = "chat") -> tuple[Optional[str], list[str]]:
-    """启用中的合法插件 → (mcp-config 文件路径, 工具白名单)。没有则 (None, [])。
-    config 文件现渲染进 state/（stdio：本仓 venv 的 python 起清单里的 entry）。
+def mounted(context: str = "chat", char_id=None) -> tuple[Optional[str], list[str]]:
+    """这个角色启用中的合法插件 → (mcp-config 文件路径, 工具白名单)。没有则 (None, [])。
+    config 文件现渲染进该角色的 state 目录（stdio：本仓 venv 的 python 起清单里的 entry）。
 
     context＝这次是给谁挂：'chat'（聊天，全挂）或 'wake'（醒来，摘掉 NO_WAKE_PLUGINS）。
-    认不出的 context 一律按 chat 处理——多挂比少挂容易被发现，静默少挂会让人以为工具坏了。"""
-    cfg_path = MCP_CONFIG_PATHS.get(context, MCP_CONFIG_PATHS["chat"])
+    认不出的 context 一律按 chat 处理——多挂比少挂容易被发现，静默少挂会让人以为工具坏了。
+    独占插件（EXCLUSIVE）只挂给归属角色：别的角色开关开着也跳过——那份物理资源不是它的。"""
+    cfg_path = _mcp_config_path(context, char_id)
+    me = char_id or state_store.DEFAULT_CHAR_ID
     wake_on: dict = {}
     if context == "wake":
         # 硬禁的 + 有开关但用户没打开的，醒来都不挂——除非它在 WAKE_TOOL_EXCLUDE 里
         # 有工具级名单：那种开关关掉只摘名单里的工具，插件本身照挂。
-        wake_on = _read_wake_enabled()
+        wake_on = _read_wake_enabled(char_id)
         blocked = NO_WAKE_PLUGINS | {n for n in WAKE_TOGGLEABLE
                                      if not wake_on.get(n) and n not in WAKE_TOOL_EXCLUDE}
     else:
         blocked = set()
-    enabled = _read_enabled()
+    enabled = _read_enabled(char_id)
     servers: dict = {}
     tools: list[str] = []
     for name, on in sorted(enabled.items()):
         if not on or name in blocked:
+            continue
+        if name in EXCLUSIVE and owner_of(name) != me:
             continue
         m = _read_manifest(name)
         if m is None:
