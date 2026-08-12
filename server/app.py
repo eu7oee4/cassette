@@ -389,6 +389,22 @@ def finalize_chat_reply(reply: str, stored: list[dict], req: ChatRequest,
     # 模式那套亮起）；失败不置位，回前台 /code/status 的 profile 字段兜底对齐。
     game_started = any(s.get("tool") == "gamemode" and s.get("ok", True) for s in stored)
 
+    # 切换轮的「后半截话」补递进会话。live_reply（会话开场上下文里那份）只救得了
+    # 调用**之前**说的话；TA 调完 code_start/game_start、这轮收尾前说的话只存在于聊天，
+    # 会话里的 TA 看不见自己刚说过什么（08-13 实锤：聊天里定了昵称「卡带」，
+    # 会话里说「昵称的事我边读边想」）。这里把整轮定稿的发言补送进去——开头可能和
+    # 开场上下文里的 live 段有重叠，框里说明白，比丢话强。
+    if (code_started or game_started) and reply.strip():
+        try:
+            if code_bridge.session_alive():
+                u = config.user_name()
+                code_bridge.send(
+                    f"〔系统补递，不是{u}发的：你切过来的那一轮，你在聊天里说的完整发言"
+                    f"如下。{u}已经看到了，别当新话重说一遍；开头可能和你开场看到的上下文"
+                    "有重叠。〕\n" + reply.strip())
+        except Exception as e:
+            logerr(f"切换轮补递失败: {e}")
+
     # 聊天里存/改的记忆也记进 wake_log（source=chat，无 thoughts 不进时间线）：
     # 醒来的"别重复存"清单靠它才看得到聊天里已存过的。
     # 没成功的（ok=False）也记——TA 下次醒来看到「想存但缺 source_bucket」就知道该补参数；
