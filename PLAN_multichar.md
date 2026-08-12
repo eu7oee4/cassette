@@ -12,6 +12,14 @@
   （mianmian 独有）；**Ombre 使用习惯三行 + 「时间感」保留**（cassette 有同一套记忆工具、同样注入时间）。
   搬家后工具能力全靠 cassette 现有机制给（memory_block、插件 addendum），不写回 persona。
 - **插件商店开关 per 角色分开算**。
+- **角色不绑死 Claude——留通用引擎缝**：char.json 加 `engine` 字段，缺省 `claude-code`
+  （现状：claude -p 子进程 + MCP 全家桶）；预留 `openai-compat`（`{base_url, api_key_env,
+  model}`，OpenAI 兼容协议吃下 DeepSeek/Kimi/Ollama/OpenRouter…，mianmian workgroup 的
+  DeepSeek worker 已验证此路）。M1 只做接口缝——聊天 call_claude/流式、醒来 run_claude_wake
+  三个调用点收拢成 engine 分发——不实现第二引擎（等首个非 Claude 住户入住再写）。
+  能力分层：醒来四段协议/表情标记/房间文本协议通用；MCP 插件与 Ombre MCP 工具是
+  claude-code 专属，通用引擎的记忆走「后端代调 Ombre」（待议）。API 引擎按 token 计费，
+  per 角色预算对它们更要紧。
 - **Ombre 路线**：Cass 先从 ~2.7 升到 2.13.1（与 cassette 对齐，照 mianmian 侧
   `server/PLAN_ombre_upgrade.md` 执行，那份 plan 的数据兼容性已在副本实测过）；
   以后有空两边一起上最新（写此文时上游 2.17.4）。2.13.1→2.17.4 无数据迁移级变更，
@@ -55,7 +63,7 @@
 
 **角色注册表**
 - `server/characters/<char_id>/`：`persona.md` + `char.json`
-  （display_name、ombre_url、wake 设置、独占资源绑定）。可考虑 characters/ 独立 git 仓
+  （display_name、engine、ombre_url、wake 设置、独占资源绑定）。可考虑 characters/ 独立 git 仓
   （沿用 mianmian prompts 仓的版本管理习惯）。
 - 新模块 `server/characters.py` 替掉 import 时解析的 `config.PERSONA_PATH` 单例；
   `config.agent_name()` → char.display_name。现有 TA 启动时自动收编为默认角色（就地迁移旧布局）；
