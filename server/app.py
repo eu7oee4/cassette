@@ -1296,7 +1296,7 @@ def game_tasks_stop(x_auth: Optional[str] = Header(default=None, alias="X-Auth")
 # 终端页/发话/弹窗按钮全复用 /code/* 那排路由（它们打的是「当前活着的会话」）。
 
 GAME_SESSION_TOOLS = [f"mcp__game__{t}" for t in (
-    "game_look", "game_tap", "game_swipe", "game_back",
+    "game_look", "game_watch", "game_tap", "game_swipe", "game_back",
     "game_launch", "game_close", "game_quit", "game_end",
     "game_notes_read", "game_notes_write")]
 
