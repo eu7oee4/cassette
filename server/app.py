@@ -1427,8 +1427,7 @@ async def _game_watchdog() -> None:
                     "笔记本（game_notes_write）、值得留的感受用 hold 存好、跟人道个别，"
                     "然后 game_end 关掉这局（不用 game_quit——游戏画面原地不动，"
                     "重新 game_start 后直接接着读）。速度会回满，笔记本把进度接上。"
-                    "不急，读完这段再收。（手上要是没有 game_end 这个工具，"
-                    f"就跟{config.user_name()}说一声，请 TA 按顶栏的手柄键收摊。）")
+                    "不急，读完这段再收。")
         except asyncio.CancelledError:
             return
         except Exception as e:
