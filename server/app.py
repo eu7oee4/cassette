@@ -1297,7 +1297,7 @@ def game_tasks_stop(x_auth: Optional[str] = Header(default=None, alias="X-Auth")
 
 GAME_SESSION_TOOLS = [f"mcp__game__{t}" for t in (
     "game_look", "game_tap", "game_swipe", "game_back",
-    "game_launch", "game_close", "game_quit",
+    "game_launch", "game_close", "game_quit", "game_end",
     "game_notes_read", "game_notes_write")]
 
 _GAME_CTX_CAVEAT = (
@@ -1382,7 +1382,8 @@ def game_story_start(inp: GameStoryStartIn,
 # 都没动。code 档案绝不适用这套：写代码停下来常常是在等回话，按「没动静」杀会毁活。
 GAME_IDLE_STOP_SEC = 20 * 60
 GAME_WAIT_NUDGE_SEC = 5 * 60
-GAME_SOFT_REMIND_SEC = 90 * 60
+# 60 分钟就提醒（原 90）：08-13 实测一小时正是历史截图体积把单步拖慢的拐点。
+GAME_SOFT_REMIND_SEC = 60 * 60
 
 
 async def _game_watchdog() -> None:
@@ -1420,8 +1421,14 @@ async def _game_watchdog() -> None:
             base = max(started, st["reminded"] or started)
             if started and now - base > GAME_SOFT_REMIND_SEC:
                 st["reminded"] = now
-                code_bridge.send(f"〔系统提醒，不是{config.user_name()}说的〕"
-                                 "玩挺久了——看看要不要收一收，剧情本记了没。")
+                code_bridge.send(
+                    f"〔系统提醒，不是{config.user_name()}说的〕这个会话开了一个钟头，"
+                    "历史里攒的截图会让你每一步越来越慢。读到段落点就收摊重开：进度写进"
+                    "笔记本（game_notes_write）、值得留的感受用 hold 存好、跟人道个别，"
+                    "然后 game_end 关掉这局（不用 game_quit——游戏画面原地不动，"
+                    "重新 game_start 后直接接着读）。速度会回满，笔记本把进度接上。"
+                    "不急，读完这段再收。（手上要是没有 game_end 这个工具，"
+                    f"就跟{config.user_name()}说一声，请 TA 按顶栏的手柄键收摊。）")
         except asyncio.CancelledError:
             return
         except Exception as e:
