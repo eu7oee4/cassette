@@ -54,6 +54,14 @@ struct ProactiveSettingsView: View {
                     }
 
                     Section {
+                        optionalStepper("每天最多醒来", \.wakeDailyBudget, defaultValue: 20, range: 1...50, step: 1, unit: "次")
+                    } header: {
+                        Text("醒来预算")
+                    } footer: {
+                        Text("与下面的「打扰控制」不同：这条拦的是醒来本身（真正省 token）。\n只限自发醒来；到点提醒、邮件唤醒不受限。额度用完后，TA 自己定的下次醒来推迟到明天兑现。")
+                    }
+
+                    Section {
                         optionalStepper("每天最多", \.dailyMax, defaultValue: 10, range: 1...30, step: 1, unit: "条")
                         optionalStepper("最小间隔", \.minIntervalMin, defaultValue: 60, range: 15...360, step: 15, unit: "分钟")
                         optionalStepper("刚聊过后静默", \.quietAfterUserMin, defaultValue: 20, range: 5...120, step: 5, unit: "分钟")

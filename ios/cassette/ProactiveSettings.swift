@@ -14,6 +14,7 @@ struct ProactiveSettings: Codable, Equatable {
     var minIntervalMin: Int?       // 两条主动消息最小间隔（分钟）；nil＝关闭
     var quietAfterUserMin: Int?    // 用户刚说过话后多久内不打扰（分钟）；nil＝关闭
     var wakeWindowN: Int?          // wake 注入窗口条数；nil＝后端默认 50（夹 20~300）
+    var wakeDailyBudget: Int?      // 每天最多自发醒来次数；nil＝不限（拦醒来本身，省 token）
     var userPronoun: String        // 提到用户的人称代词：她 | 他 | TA
 
     enum CodingKeys: String, CodingKey {
@@ -28,6 +29,7 @@ struct ProactiveSettings: Codable, Equatable {
         case minIntervalMin = "min_interval_min"
         case quietAfterUserMin = "quiet_after_user_min"
         case wakeWindowN = "wake_window_n"
+        case wakeDailyBudget = "wake_daily_budget"
         case userPronoun = "user_pronoun"
     }
 
@@ -36,7 +38,7 @@ struct ProactiveSettings: Codable, Equatable {
          activeStart: String = "10:00", activeEnd: String = "24:00",
          dayFreq: String = "mid", nightFreq: String = "low",
          dailyMax: Int? = 10, minIntervalMin: Int? = 60, quietAfterUserMin: Int? = 20,
-         wakeWindowN: Int? = 50, userPronoun: String = "TA") {
+         wakeWindowN: Int? = 50, wakeDailyBudget: Int? = nil, userPronoun: String = "TA") {
         self.agentName = agentName
         self.userName = userName
         self.enabled = enabled
@@ -48,6 +50,7 @@ struct ProactiveSettings: Codable, Equatable {
         self.minIntervalMin = minIntervalMin
         self.quietAfterUserMin = quietAfterUserMin
         self.wakeWindowN = wakeWindowN
+        self.wakeDailyBudget = wakeDailyBudget
         self.userPronoun = userPronoun
     }
 }

@@ -56,6 +56,7 @@ def chat_turn_active() -> bool:
 
 # ---------- code 模式（wake 避让 + prompt 告知用）----------
 _code_avoid = {"logged": False}   # 避让日志只在进入 code 模式那次打一条，别每 tick 刷屏
+_budget_hit = {"logged": False}   # 醒来预算耗尽的日志同理：只在撞上那次打一条
 
 
 def code_session_open() -> bool:
@@ -203,6 +204,20 @@ def wake_prompt(settings: dict, forced: bool = False, note: str = "") -> str:
     blocked = None if forced else push_block(settings)
     blocked_section = f"\n{blocked[1]}\n" if blocked else ""
 
+    # 醒来预算见底 → 如实告知。这道闸拦的是"醒"本身，他定的 NEXT 会不会兑现取决于余额，
+    # 不说的话他今天定了 NEXT、明天才被叫醒，中间对他就是一段无法解释的失约。
+    # 硬触发的醒来也注入（不豁免）：预算限的是之后的自发醒，这个事实对谁都成立。
+    budget_section = ""
+    bw = settings.get("wake_daily_budget")
+    if bw is not None:
+        left = int(bw) - wakes_today() - 1   # 本次醒来还没记日志，先扣掉自己
+        if left <= 1:
+            tail = (f"这次之后今天还能自发醒 {left} 次" if left > 0
+                    else "这已经是今天最后一次自发醒来")
+            budget_section = (f"\n【{u}设置了「每天最多自发醒来 {int(bw)} 次」，{tail}——"
+                              f"你定 NEXT 时掂量着：额度用完后，定的点会推迟到明天才兑现；"
+                              f"到点提醒、新邮件这类硬触发不受限。】\n")
+
     # code 会话开着（正常只有硬触发能走到这儿）：如实告诉他人在哪、说的话去哪。
     code_section = code_session_block(forced)
 
@@ -214,7 +229,7 @@ def wake_prompt(settings: dict, forced: bool = False, note: str = "") -> str:
 
 【最近发生的，按时间顺序——对话 / 你自己醒来时的内心，看时间戳别搞混先后】
 {timeline_block}
-{memory_section}{unsent_section}{sticker_section}{code_section}{blocked_section}
+{memory_section}{unsent_section}{sticker_section}{budget_section}{code_section}{blocked_section}
 想清楚这次要不要做点什么。想{u}了、有话想说就发消息；没什么可说的就安静醒着，不用硬找话。
 你还可以自己定下次醒来的时间（NEXT）：写了我保证到那个点把你醒一次；这中间你照样可能随机醒来，不受影响。范围 5 分钟~12 小时；没特别想法就写"无"（不定这个点，纯随机节奏）。{u}现在设的活跃频率偏好是「{freq_cn}」，你定 NEXT 时可以参考。
 严格按下面格式回答（四段都要，标签用英文、后跟冒号）：
@@ -276,6 +291,15 @@ def run_claude_wake(prompt: str) -> tuple[Optional[str], list[dict]]:
 def _date_str(ts: int) -> str:
     """epoch → 配置时区的 YYYY-MM-DD（"今天推了几条"统计用）。"""
     return datetime.fromtimestamp(ts, config.APP_TZ).strftime("%Y-%m-%d")
+
+
+def wakes_today() -> int:
+    """今天已经醒来几次（source=="wake" 的日志条数）。含 error/none/被拦推送的——都起过模型，
+    烧的都是真 token。只读尾部 1000 条，口径与 push_block 一致（覆盖好几天，够数）。
+    chat 侧的 stored 事件是 source=="chat"，天然不算。"""
+    today = _date_str(int(time.time()))
+    return sum(1 for w in state_store.read_wake_log(limit=1000)
+               if w.get("source") == "wake" and _date_str(int(w.get("ts", 0))) == today)
 
 
 def push_block(settings: dict) -> Optional[tuple[str, str]]:
@@ -576,6 +600,18 @@ async def maybe_wake() -> None:
             trigger = "probability"
 
     if trigger:
+        # 醒来预算（每天最多自发醒 N 次）：在起模型之前拦——上面那三道用户闸只拦推送不省
+        # token，这道拦的是"醒"本身。只管自发的（scheduled/probability），硬触发在更早的
+        # 直推口子已经走掉、天然豁免。放在 trigger 判定之后：没事的 tick 不多读一次日志。
+        # next_wake_at 原地待命不清不改（同 code 避让的路子），日切后第一个 tick 兑现。
+        budget = settings.get("wake_daily_budget")
+        if budget is not None and wakes_today() >= int(budget):
+            if not _budget_hit["logged"]:
+                logerr(f"wake 预算：今天自发醒来已达 {budget} 次上限，"
+                       f"跳过 {trigger} 醒来（next_wake_at 待命，日切兑现；硬触发不受限）")
+                _budget_hit["logged"] = True
+            return
+        _budget_hit["logged"] = False
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(None, do_wake_sync, settings, trigger)
 

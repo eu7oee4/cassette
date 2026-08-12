@@ -624,6 +624,7 @@ class SettingsIn(BaseModel):
     min_interval_min: Optional[int] = None
     quiet_after_user_min: Optional[int] = None
     wake_window_n: Optional[int] = None   # wake 注入窗口条数（None=默认 50；夹 20~300）
+    wake_daily_budget: Optional[int] = None  # 每天最多自发醒来次数；None=不限（拦醒来本身，硬触发豁免）
     user_pronoun: str = "TA"  # 提到用户时的人称代词：她 | 他 | TA
 
 
@@ -650,7 +651,7 @@ def post_settings(body: SettingsIn, x_auth: Optional[str] = Header(default=None,
     _validate_hhmm(body.active_end)
     if body.day_freq not in ("low", "mid", "high") or body.night_freq not in ("low", "mid", "high"):
         raise HTTPException(status_code=400, detail="freq 需为 low/mid/high")
-    for name in ("daily_max", "min_interval_min", "quiet_after_user_min"):
+    for name in ("daily_max", "min_interval_min", "quiet_after_user_min", "wake_daily_budget"):
         v = getattr(body, name)
         if v is not None and v < 0:
             raise HTTPException(status_code=400, detail=f"{name} 不能为负")
