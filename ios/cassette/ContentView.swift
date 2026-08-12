@@ -317,15 +317,17 @@ struct ContentView: View {
                 }
                 Button("取消", role: .cancel) { }
             }
-            // 退出 Code 模式时那边正在干活：说清楚代价再让人按。
-            .confirmationDialog("TA 正在电脑上干活", isPresented: $confirmStopBusy,
-                                titleVisibility: .visible) {
-                Button("停掉并退出", role: .destructive) {
-                    Task { @MainActor in await exitCodeMode() }
+            // 关会话（code/游戏共用）时那边正在干活：说清楚代价再让人按。
+            .confirmationDialog(gameSessionActive ? "TA 正在游戏会话里" : "TA 正在电脑上干活",
+                                isPresented: $confirmStopBusy, titleVisibility: .visible) {
+                Button(gameSessionActive ? "收摊并关掉" : "停掉并退出", role: .destructive) {
+                    Task { @MainActor in await exitSession() }
                 }
-                Button("先不退", role: .cancel) { }
+                Button("先不关", role: .cancel) { }
             } message: {
-                Text("退出会停掉那边正在跑的活，做到一半的东西不会有结果。")
+                Text(gameSessionActive
+                     ? "关掉会结束 TA 的游戏会话（模拟器不会自动关，TA 玩到一半的进度以游戏自己的存档为准）。"
+                     : "退出会停掉那边正在跑的活，做到一半的东西不会有结果。")
             }
             .fullScreenCover(isPresented: Binding(
                 get: { !hasOnboarded },
@@ -466,11 +468,12 @@ struct ContentView: View {
                 .lineLimit(1)
                 .truncationMode(.tail)
             Spacer()
-            // 右侧：游戏急停（引擎在跑/剧情会话开着/急停中才露）+ Code 模式开关
+            // 右侧：游戏急停（引擎在跑/剧情会话开着/急停中才露）+ 会话开关
+            // （code/游戏共用一颗：游戏会话活着时它是手柄样式，点了收摊——mianmian 同款）
             if gamePauseVisible {
                 gamePauseToggle
             }
-            if codeAvailable {
+            if codeAvailable || gameSessionActive {
                 codeToggle
             } else {
                 Color.clear.frame(width: 40, height: 40)
@@ -524,23 +527,26 @@ struct ContentView: View {
         gameEngineRunning = st.running
     }
 
-    /// Code 模式开关：切入=起会话并注入最近历史；切出=停会话回普通聊天。
+    /// 会话开关（code/游戏共用）：切入=起 code 会话；亮着时点击=关掉当前会话。
+    /// 游戏会话是 TA 自己切进去的（game_start），这颗按钮对它只有「关」这半边。
     private var codeToggle: some View {
         Button(action: toggleCodeMode) {
             Group {
                 if codeSwitching {
-                    ProgressView().tint(codeMode ? .white : Color.theme)
+                    ProgressView().tint(sessionMode ? .white : Color.theme)
                 } else {
-                    Image(systemName: "chevron.left.forwardslash.chevron.right")
+                    Image(systemName: gameSessionActive ? "gamecontroller.fill"
+                          : "chevron.left.forwardslash.chevron.right")
                         .font(.system(size: 15, weight: .semibold))
-                        .foregroundStyle(codeMode ? Color.white : Color.theme)
+                        .foregroundStyle(sessionMode ? Color.white : Color.theme)
                 }
             }
             .frame(width: 40, height: 30)
-            .background(Capsule().fill(codeMode ? Color.theme : Color.clear))
+            .background(Capsule().fill(sessionMode ? Color.theme : Color.clear))
         }
         .disabled(codeSwitching)
-        .accessibilityLabel(codeMode ? "Code 模式：开（点这里退出）" : "切进 Code 模式")
+        .accessibilityLabel(gameSessionActive ? "游戏会话：开（点这里收摊）"
+                            : codeMode ? "Code 模式：开（点这里退出）" : "切进 Code 模式")
     }
 
     // MARK: - 发送 / 流式接收
@@ -561,10 +567,17 @@ struct ContentView: View {
     /// 会话里发消息。
     private func toggleCodeMode() {
         dismissKeyboard()
-        // TA 正在游戏会话里：起 code 会话会把它杀掉（start 先杀光所有档案）。
-        // 先让 TA 收摊或在顶栏急停，别一键把人从游戏里踹出来。
-        if gameSessionActive, !codeMode {
-            errorText = "TA 正在游戏会话里，先等 TA 收摊（或按 ⏸ 急停）再切 Code 模式。"
+        // 游戏会话活着：这一下是「收摊」。正玩着先问一句（和退 code 同款确认）。
+        if gameSessionActive {
+            codeSwitching = true
+            Task { @MainActor in
+                defer { codeSwitching = false }
+                if let st = try? await chatService.codeStatus(probeBusy: true), st.busy == true {
+                    confirmStopBusy = true
+                    return
+                }
+                await exitSession()
+            }
             return
         }
         codeSwitching = true
@@ -577,7 +590,7 @@ struct ContentView: View {
                     confirmStopBusy = true
                     return
                 }
-                await exitCodeMode()
+                await exitSession()
             } else {
                 do {
                     try await chatService.codeStart(history: chatStore.messages)
@@ -590,17 +603,19 @@ struct ContentView: View {
         }
     }
 
-    /// 真的退出 Code 模式：停掉 Mac 上那个会话。
+    /// 真的关掉当前会话（code/游戏共用）：停掉 Mac 上那个 tmux 会话。
     @MainActor
-    private func exitCodeMode() async {
+    private func exitSession() async {
+        let wasGame = gameSessionActive
         do {
             try await chatService.codeStop()
             codeMode = false
+            gameSessionActive = false
             terminalExpanded = false
-            chatStore.appendSystemMessage("已退出 Code 模式")
+            chatStore.appendSystemMessage(wasGame ? "游戏会话关掉了" : "已退出 Code 模式")
         } catch {
             // 停不掉就别翻开关：翻了下一次回前台 syncCodeMode 又会按"会话还活着"
-            // 给翻回来，还补一条"已切进 Code 模式"，人看着莫名其妙。
+            // 给翻回来，还补一条系统灰字，人看着莫名其妙。
             errorText = "没能停掉会话：\((error as? ChatServiceError)?.errorDescription ?? error.localizedDescription)"
         }
     }
