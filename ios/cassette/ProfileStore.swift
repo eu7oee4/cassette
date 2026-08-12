@@ -1,29 +1,42 @@
 import SwiftUI
 
-/// 身份资料：两个头像（我 / 对方），本地持久化到 Documents/Profile/。
+/// 身份资料：我的头像 + **当前会话角色**的头像，本地持久化到 Documents/Profile/。
 /// （顶栏标题走 settings.agentName，不在这里。）
+/// 多角色（M2）：对方头像按角色分文件——默认角色沿用老的 other.png（零迁移），
+/// 其他角色是 char_<id>.png。切会话时 switchCharacter 重载。
 @MainActor
 final class ProfileStore: ObservableObject {
-    /// 两个头像的图片（nil = 用占位图）。
+    /// 两个头像的图片（nil = 用占位图）。otherAvatar = 当前会话角色的。
     @Published private(set) var meAvatar: UIImage?
     @Published private(set) var otherAvatar: UIImage?
 
     private let fm = FileManager.default
+    private var currentCharID: String
 
     private var dir: URL {
         fm.urls(for: .documentDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("Profile", isDirectory: true)
     }
+
+    private func charAvatarURL(_ charID: String) -> URL {
+        dir.appendingPathComponent(charID == "default" ? "other.png" : "char_\(charID).png")
+    }
+
     private func avatarURL(_ sender: MessageSender) -> URL {
-        dir.appendingPathComponent(sender == .me ? "me.png" : "other.png")
+        sender == .me ? dir.appendingPathComponent("me.png") : charAvatarURL(currentCharID)
     }
 
     init() {
-        let d = fm.urls(for: .documentDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("Profile", isDirectory: true)
-        try? fm.createDirectory(at: d, withIntermediateDirectories: true)
-        meAvatar = UIImage(contentsOfFile: d.appendingPathComponent("me.png").path)
-        otherAvatar = UIImage(contentsOfFile: d.appendingPathComponent("other.png").path)
+        currentCharID = CurrentCharacter.id
+        try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        meAvatar = UIImage(contentsOfFile: dir.appendingPathComponent("me.png").path)
+        otherAvatar = UIImage(contentsOfFile: charAvatarURL(currentCharID).path)
+    }
+
+    /// 切换当前会话角色：重载对方头像。
+    func switchCharacter(_ charID: String) {
+        currentCharID = charID
+        otherAvatar = UIImage(contentsOfFile: charAvatarURL(charID).path)
     }
 
     /// 取某一方的头像图片（可能为 nil）。
@@ -31,7 +44,12 @@ final class ProfileStore: ObservableObject {
         sender == .me ? meAvatar : otherAvatar
     }
 
-    /// 设置某一方的头像：缩放到合适大小 + 写文件 + 刷新界面。
+    /// 任意角色的头像（会话列表行用），不影响当前状态。
+    func avatarImage(forCharacter charID: String) -> UIImage? {
+        UIImage(contentsOfFile: charAvatarURL(charID).path)
+    }
+
+    /// 设置某一方的头像：缩放到合适大小 + 写文件 + 刷新界面。对方 = 当前会话角色。
     func setAvatar(_ sender: MessageSender, image: UIImage) {
         let scaled = image.downscaled(maxDimension: 512)
         guard let png = scaled.pngData() else { return }

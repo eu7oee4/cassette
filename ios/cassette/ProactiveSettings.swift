@@ -60,16 +60,32 @@ struct ProactiveSettings: Codable, Equatable {
 final class ProactiveSettingsStore: ObservableObject {
     @Published var settings: ProactiveSettings
 
-    private let key = "proactive_settings"
+    // 本地缓存按角色分 key（默认角色沿用老 key，零迁移）；后端请求经 authedRequest
+    // 自动带当前角色。切会话后调 reloadForCurrentCharacter()。
+    private var key: String {
+        let id = CurrentCharacter.id
+        return id == "default" ? "proactive_settings" : "proactive_settings_\(id)"
+    }
     private let service = ChatService()
 
     init() {
+        settings = Self.loadLocal(key: CurrentCharacter.id == "default"
+                                  ? "proactive_settings"
+                                  : "proactive_settings_\(CurrentCharacter.id)")
+    }
+
+    private static func loadLocal(key: String) -> ProactiveSettings {
         if let data = UserDefaults.standard.data(forKey: key),
            let s = try? JSONDecoder().decode(ProactiveSettings.self, from: data) {
-            settings = s
-        } else {
-            settings = ProactiveSettings()
+            return s
         }
+        return ProactiveSettings()
+    }
+
+    /// 切会话后：先上本地缓存的该角色设置（即时），再找后端对齐。
+    func reloadForCurrentCharacter() async {
+        settings = Self.loadLocal(key: key)
+        await refreshFromServer()
     }
 
     private func saveLocal() {

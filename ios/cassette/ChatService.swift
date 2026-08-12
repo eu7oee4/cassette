@@ -37,6 +37,7 @@ struct PendingMessage: Decodable, Identifiable {
     let req_id: String?          // 断连补投的关联 id：撤半截气泡换完整回复用
     let error: Bool?             // true＝那轮没产出（claude 挂了）：清等待+提示重发，不撤半截
     let stored: [StoredMemory]?  // 那轮的工具产物：补渲染 done 独有的（browse 灰字/网页卡片）
+    let char_id: String?         // 这条是谁说的（多角色路由）；老条目 nil = 默认角色
 }
 
 /// 发给后端的一条历史消息。
@@ -70,6 +71,7 @@ struct OutgoingFile {
 /// 后端无状态，靠这份历史理解上下文。session_id 仅供记账，nil 时自动省略。
 private struct ChatRequestBody: Encodable {
     let messages: [OutMessage]
+    let char_id: String?       // 跟哪个角色说（多角色）；后端缺省 = 默认角色
     let session_id: String?
     let stickers: [Sticker]?   // 表情库清单(id+描述)，供模型挑着发/改描述
     let client_req_id: String? // 断连补投的关联 id：后端 rescue 条目带回，app 用它替换半截气泡
@@ -148,7 +150,8 @@ struct ChatService {
             filesData.map { FileOut(data: $0.data.base64EncodedString(),
                                     media_type: $0.mime, name: $0.name) }
         request.httpBody = try JSONEncoder().encode(
-            ChatRequestBody(messages: outMessages, session_id: sessionId,
+            ChatRequestBody(messages: outMessages, char_id: CurrentCharacter.id,
+                            session_id: sessionId,
                             stickers: stickers.isEmpty ? nil : stickers,
                             client_req_id: reqId, images: images, files: files)
         )
@@ -314,7 +317,7 @@ struct ChatService {
     /// 删/编辑消息后把当前历史推给后端对齐 recent_window（**不触发生成**）。
     /// 这类操作纯本地，不推的话在下次发消息之前，TA 每次醒来看到的都是删改之前的世界。
     func syncWindow(history: [ChatMessage]) async throws {
-        struct Body: Encodable { let messages: [OutMessage] }
+        struct Body: Encodable { let messages: [OutMessage]; let char_id: String? }
         // 过滤和条数口径必须和 /chat 一字不差——两条路写的是同一个窗口。
         let messages = history.filter { !$0.isMemoryNote && !$0.isSystem && !$0.isBrowseNote }
             .suffix(Self.sendHistoryCap)
@@ -323,8 +326,19 @@ struct ChatService {
                            text: $0.plainText,
                            ts: Int($0.timestamp.timeIntervalSince1970))
             }
-        let body = try JSONEncoder().encode(Body(messages: Array(messages)))
+        let body = try JSONEncoder().encode(Body(messages: Array(messages),
+                                                 char_id: CurrentCharacter.id))
         _ = try await perform(authedRequest("POST", "/window/sync", jsonBody: body))
+    }
+
+    // MARK: - 角色清单
+
+    /// 后端注册的全部角色（会话列表数据源）。默认角色永远在第一位。
+    func getCharacters() async throws -> [CharacterInfo] {
+        let data = try await perform(authedRequest("GET", "/characters"))
+        struct Wrap: Decodable { let items: [CharacterInfo] }
+        do { return try JSONDecoder().decode(Wrap.self, from: data).items }
+        catch { throw ChatServiceError.badResponse }
     }
 
     /// 后端正在跑的聊天轮（client_req_id 集合）。断流后对账用：不在跑=这轮丢了。
@@ -431,9 +445,13 @@ struct ChatService {
     // MARK: - 内部请求工具
 
     // internal：MemoryPage 等功能页的服务扩展也走这两个（统一鉴权/错误翻译，别另起一套）
+    // 统一追加当前角色（?char=）：设置/心流/记忆/插件这些角色态端点一处全覆盖；
+    // 全局端点（/pending /code/* 等）后端不声明该参数、FastAPI 直接忽略，无害。
     func authedRequest(_ method: String, _ path: String, jsonBody: Data? = nil,
                        timeout: TimeInterval = 20) throws -> URLRequest {
-        guard let url = URL(string: BackendConfig.baseURL + path) else { throw ChatServiceError.badURL }
+        let sep = path.contains("?") ? "&" : "?"
+        guard let url = URL(string: BackendConfig.baseURL + path + sep + "char=" + CurrentCharacter.id)
+        else { throw ChatServiceError.badURL }
         var req = URLRequest(url: url)
         req.httpMethod = method
         req.setValue(BackendConfig.authKey, forHTTPHeaderField: "X-Auth")

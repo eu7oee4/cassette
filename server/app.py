@@ -422,6 +422,14 @@ def health():
     return {"ok": True}
 
 
+@app.get("/characters")
+def characters_list(x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
+    """角色清单（app 会话列表的数据源）。默认角色永远在第一位。"""
+    verify_auth(x_auth)
+    return {"items": [{"id": cid, "display_name": characters.display_name(cid)}
+                      for cid in characters.ids()]}
+
+
 @app.post("/chat", response_model=ChatResponse)
 def chat(req: ChatRequest, x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
     """非流式聊天（流式的回退路，两条路收尾共用 finalize 保证一致）。"""
@@ -1133,20 +1141,23 @@ def plugins_install(body: PluginIn, x_auth: Optional[str] = Header(default=None,
 
 
 @app.post("/plugins/toggle")
-def plugins_toggle(body: PluginIn, x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
+def plugins_toggle(body: PluginIn, char: Optional[str] = None,
+                   x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
     verify_auth(x_auth)
     if body.enabled is None:
         raise HTTPException(status_code=400, detail="缺 enabled 字段")
-    return plugins.toggle(body.name, body.enabled, _resolve_char(body.char_id))
+    # 角色可从 body 或 query 来（app 的统一漏斗走 query），body 优先。
+    return plugins.toggle(body.name, body.enabled, _resolve_char(body.char_id or char))
 
 
 @app.post("/plugins/wake_toggle")
-def plugins_wake_toggle(body: PluginIn, x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
+def plugins_wake_toggle(body: PluginIn, char: Optional[str] = None,
+                        x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
     """「醒来能用」开关（只有 plugins.WAKE_TOGGLEABLE 里的插件有；零联网，下次醒来生效）。"""
     verify_auth(x_auth)
     if body.enabled is None:
         raise HTTPException(status_code=400, detail="缺 enabled 字段")
-    return plugins.wake_toggle(body.name, body.enabled, _resolve_char(body.char_id))
+    return plugins.wake_toggle(body.name, body.enabled, _resolve_char(body.char_id or char))
 
 
 @app.post("/plugins/update")
@@ -1556,10 +1567,11 @@ class MindDeleteIn(BaseModel):
 
 
 @app.post("/mind/delete")
-def mind_delete(body: MindDeleteIn, x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
+def mind_delete(body: MindDeleteIn, char: Optional[str] = None,
+                x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
     """删掉心流日志里指定 id 的记录（app 左滑删除，mianmian 同款：内容哈希定位+整体重写）。"""
     verify_auth(x_auth)
-    cid = _resolve_char(body.char_id)
+    cid = _resolve_char(body.char_id or char)
     entries = state_store.read_wake_log(char_id=cid)
     kept = [e for e in entries if _mind_entry_id(e) != body.id]
     removed = len(entries) - len(kept)

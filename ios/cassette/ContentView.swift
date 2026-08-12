@@ -4,10 +4,14 @@ import QuickLook
 import UniformTypeIdentifiers
 
 struct ContentView: View {
-    @StateObject private var chatStore = ChatStore()       // 聊天记录的主人（本地持久化）
+    @StateObject private var chatStore = ChatStore()       // 聊天记录的主人（本地持久化，按会话分仓）
     @StateObject private var profileStore = ProfileStore() // 头像 + 顶栏标题
-    @StateObject private var proactiveStore = ProactiveSettingsStore() // 主动消息设置
+    @StateObject private var proactiveStore = ProactiveSettingsStore() // 主动消息设置（当前角色的）
     @StateObject private var stickerStore = StickerStore() // 表情包库
+    @StateObject private var charListStore = CharacterListStore() // 角色清单（会话列表数据源）
+
+    // 当前会话角色。ChatService 拼请求时读同一个 key（CurrentCharacter），天然对齐。
+    @AppStorage(CurrentCharacter.key) private var currentCharID = "default"
 
     @Environment(\.scenePhase) private var scenePhase
 
@@ -157,6 +161,13 @@ struct ContentView: View {
     @ViewBuilder
     private func destination(for page: DrawerPage) -> some View {
         switch page {
+        case .conversations:
+            ConversationsPage(charStore: charListStore, chatStore: chatStore,
+                              currentID: currentCharID,
+                              switchDisabled: isGenerating) { c in
+                switchCharacter(to: c.id)
+                navPath.removeAll()
+            }
         case .memory:
             MemoryPage()
         case .mind:
@@ -440,9 +451,20 @@ struct ContentView: View {
             }
     }
 
-    /// 顶栏标题 = AI 的名字（首启起的，设置页可改）。抽屉顶部也用它。
+    /// 顶栏标题 = 当前会话角色的名字（settings 是当前角色的；空时用角色清单兜底）。
     private var topTitle: String {
-        proactiveStore.settings.agentName.isEmpty ? "cassette" : proactiveStore.settings.agentName
+        if !proactiveStore.settings.agentName.isEmpty { return proactiveStore.settings.agentName }
+        return charListStore.name(for: currentCharID) ?? "cassette"
+    }
+
+    /// 切到另一个角色的会话。流式生成中不切（NoSave 气泡没落盘）；调用方按钮已禁用，这里双保险。
+    private func switchCharacter(to id: String) {
+        guard id != currentCharID, !isGenerating else { return }
+        chatStore.switchConversation(id)
+        currentCharID = id
+        profileStore.switchCharacter(id)
+        sessionId = nil
+        Task { await proactiveStore.reloadForCurrentCharacter() }
     }
 
     // 顶部导航栏：左猫爪开抽屉，居中标题；右侧空占位配平保持标题居中
@@ -463,10 +485,25 @@ struct ContentView: View {
                 Color.clear.frame(width: 40, height: 40)
             }
             Spacer()
-            Text(topTitle)
-                .font(.headline)
-                .lineLimit(1)
-                .truncationMode(.tail)
+            // 标题可点：进会话列表（多角色切换）。别的会话有未读时名字旁亮一个小圆点。
+            Button {
+                dismissKeyboard()
+                navPath.append(DrawerPage.conversations)
+            } label: {
+                HStack(spacing: 5) {
+                    Text(topTitle)
+                        .font(.headline)
+                        .foregroundStyle(.primary)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                    if chatStore.otherUnreadTotal > 0 {
+                        Circle().fill(Color.theme).frame(width: 7, height: 7)
+                    }
+                    Image(systemName: "chevron.down")
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                }
+            }
             Spacer()
             // 右侧：游戏急停（引擎在跑/剧情会话开着/急停中才露）+ 会话开关
             // （code/游戏共用一颗：游戏会话活着时它是手柄样式，点了收摊——mianmian 同款）
@@ -1052,6 +1089,26 @@ struct ContentView: View {
             guard !pending.isEmpty else { return }
             for p in pending {
                 let ts = Date(timeIntervalSince1970: TimeInterval(p.ts))
+                // 多角色路由：别的角色的消息直接写进对方会话文件 + 未读 +1，不混进当前聊天。
+                // 对方的 error/rescue 记账（rescueWaiting）都是当前会话的 UI 概念，不适用——跳过。
+                let conv = p.char_id ?? "default"
+                if conv != currentCharID {
+                    if p.error != true {
+                        if !p.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                            chatStore.insertProactive(text: p.text, timestamp: ts,
+                                                      conversation: conv)
+                        }
+                        for sid in p.sticker_ids ?? [] {
+                            if let st = stickerStore.sticker(id: sid) {
+                                chatStore.insertProactiveSticker(
+                                    url: stickerStore.imageURL(for: st),
+                                    description: st.description,
+                                    timestamp: ts, conversation: conv)
+                            }
+                        }
+                    }
+                    continue
+                }
                 // error 标记条目＝那轮没产出（claude 挂了）：清等待熄点+提示重发；
                 // 半截气泡**不撤**——那是他真说过的话。
                 // 提示只在真清掉了等待条目时追加一次：ack 失败重拉时条目已不在，不再重复灰字。

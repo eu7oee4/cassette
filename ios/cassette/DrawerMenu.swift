@@ -3,10 +3,11 @@ import SwiftUI
 /// 抽屉能去的页面。层级：聊天 → 抽屉 → 页面 → 详情，返回逐层退（PLAN_cassette_v2 §0）。
 /// 占位页随 PR2-5/PR8 逐个换成真页面。
 enum DrawerPage: String, Hashable, CaseIterable {
-    case memory, mind, history, drafts, game, plugins, settings
+    case conversations, memory, mind, history, drafts, game, plugins, settings
 
     var title: String {
         switch self {
+        case .conversations: return "会话"
         case .memory:   return "记忆 · Ombre-Brain"
         case .mind:     return "心流日志"
         case .history:  return "聊天记录"
@@ -19,6 +20,7 @@ enum DrawerPage: String, Hashable, CaseIterable {
 
     var icon: String {
         switch self {
+        case .conversations: return "person.2"
         case .memory:   return "brain"
         case .mind:     return "waveform"
         case .history:  return "clock.arrow.circlepath"
