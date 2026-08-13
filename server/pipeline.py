@@ -482,6 +482,29 @@ def _parse_tool_menu(text: str) -> list[dict]:
     return [b for b in blocks if b["title"] and b["body"]]
 
 
+_menu_gap_seen: dict[str, str] = {}   # 每种「漏了哪些」只喊一次，别每轮刷屏
+
+
+def _warn_uncovered(context: str, by_short: dict, rendered_needs: set) -> None:
+    """挂载了、但这一轮没有任何菜单块提到的工具 → 往日志里喊一条。
+
+    为什么要机械查而不是靠纪律：开了工具延迟之后，**菜单没覆盖的工具在 TA 眼里只是一个
+    光秃秃的名字**，等于装了个他用不上的东西。上新插件忘了补菜单是必然会发生的事
+    （实锤：mail_mark 就这么漏了一版）。
+    比的是**渲染出来的块**不是文件里所有块——这样连「块写得太粗、被 needs 过滤掉了」
+    也能一起抓出来（读信/发信合成一块那种，正是文件头警告过的坑）。
+    只认 mcp__ 开头的：ToolSearch 这类内置工具不该出现在能力菜单里。"""
+    missing = sorted({s for s, full in by_short.items() if full.startswith("mcp__")}
+                     - rendered_needs)
+    key = ",".join(missing)
+    if _menu_gap_seen.get(context) == key:
+        return
+    _menu_gap_seen[context] = key
+    if missing:
+        logerr(f"能力菜单没覆盖到这些工具（{context}）：{'、'.join(missing)}"
+               f" —— 去 tool_menu.md 补一块，不然 TA 只看得见名字、不知道能干嘛")
+
+
 def tool_menu_block(context: str = "chat", char_id: Optional[str] = None) -> str:
     """人话版能力菜单，按本轮实际挂载的工具过滤后渲染。没有一块过得了就返回空串。
 
@@ -506,16 +529,19 @@ def tool_menu_block(context: str = "chat", char_id: Optional[str] = None) -> str
         by_short.setdefault(full.rsplit("__", 1)[-1], full)
 
     lines: list[str] = []
+    rendered_needs: set[str] = set()
     for b in _parse_tool_menu(text):
         if b["when"] and b["when"] != context:
             continue
         fulls = [by_short[n] for n in b["needs"] if n in by_short]
         if len(fulls) != len(b["needs"]):
             continue        # 缺任一个 → 整块不提
+        rendered_needs.update(b["needs"])
         lines.append(f"■ {b['title']}")
         lines.append("  " + b["body"].replace("\n", "\n  "))
         if fulls:
             lines.append("  工具：" + ", ".join(fulls))
+    _warn_uncovered(context, by_short, rendered_needs)
     if not lines:
         return ""
 
