@@ -183,12 +183,19 @@ def wake_prompt(settings: dict, forced: bool = False, note: str = "",
     freq_cn = {"low": "低（少打扰）", "mid": "中", "high": "高（可以勤快点）"}.get(
         settings.get("day_freq" if is_daytime(settings, now) else "night_freq", "low"), "中")
 
-    # 长期记忆（Ombre 挂上才有）：引导 + 近 12h 已存清单——不给清单模型会把
-    # 时间线里同一件事每次醒来都存一遍（mianmian 实踩）。
-    memory_section = ""
+    # 人话版能力菜单（和聊天同一份文件，按本轮实际挂载过滤）。
+    # 这里原来是一句写死的记忆引导：「想不起细节可以先 breath」——条件式措辞，而最该浮
+    # 记忆的时候恰恰是他不觉得自己想不起来的时候（同款坑的复盘见 tool_menu.example.md
+    # 文件头的体例警告）。换成渲染菜单：口径和聊天一条，以后改一处两条路都生效。
+    # context='wake' 不能省：过滤链会自动摘掉醒来不挂的块（codemode 硬禁、「醒来能用」
+    # 开关没打开的插件），needs 里缺任一个工具的块整块不提。
+    menu = pipeline.tool_menu_block("wake", char_id)
+    menu_section = f"\n{menu}\n" if menu else ""
+
+    # 近 12h 已存清单：菜单里没有这东西，得单独留着——不给清单模型会把时间线里
+    # 同一件事每次醒来都存一遍（mianmian 实踩）。
+    stored_section = ""
     if pipeline.ombre_alive(char_id):
-        lines = ["【你有自己的长期记忆（Ombre 工具）：想不起细节可以先 breath；"
-                 "这次醒来若有值得留住的，用 hold 存下来。】"]
         # 只算**真存下的**：没成功的（工具被拒/报错）当然要能再存一次，
         # 摆进"别重复存"清单等于把那件事永久封杀了。
         recent_stored = [s.get("text", "")
@@ -196,9 +203,8 @@ def wake_prompt(settings: dict, forced: bool = False, note: str = "",
                          if int(w.get("ts", 0)) > int(time.time()) - 12 * 3600
                          for s in (w.get("stored") or []) if s.get("ok", True)]
         if recent_stored:
-            lines.append("【最近 12 小时你已经存过这些，别重复存：" +
-                         "；".join(t[:60] for t in recent_stored[-8:] if t) + "】")
-        memory_section = "\n" + "\n".join(lines) + "\n"
+            stored_section = ("\n【最近 12 小时你已经存过这些，别重复存：" +
+                              "；".join(t[:60] for t in recent_stored[-8:] if t) + "】\n")
 
     # 上次憋回去的话：让他自己决定要不要重提（别白想一场）。
     unsent_section = unsent_block(u, char_id)
@@ -238,7 +244,7 @@ def wake_prompt(settings: dict, forced: bool = False, note: str = "",
 
 【最近发生的，按时间顺序——对话 / 你自己醒来时的内心，看时间戳别搞混先后】
 {timeline_block}
-{memory_section}{unsent_section}{sticker_section}{budget_section}{code_section}{blocked_section}
+{menu_section}{stored_section}{unsent_section}{sticker_section}{budget_section}{code_section}{blocked_section}
 想清楚这次要不要做点什么。想{u}了、有话想说就发消息；没什么可说的就安静醒着，不用硬找话。
 你还可以自己定下次醒来的时间（NEXT）：写了我保证到那个点把你醒一次；这中间你照样可能随机醒来，不受影响。范围 5 分钟~12 小时；没特别想法就写"无"（不定这个点，纯随机节奏）。{u}现在设的活跃频率偏好是「{freq_cn}」，你定 NEXT 时可以参考。
 严格按下面格式回答（四段都要，标签用英文、后跟冒号）：
@@ -532,8 +538,15 @@ def _mail_wake_note(char_id: Optional[str] = None) -> str:
     send_hint = ("" if can_send else
                  "另外这次醒来你只能读信、发不了邮件（机主没开邮箱的「醒来能用」）——"
                  "想回信的话，把想法留到聊天时说，别在这轮硬试。")
+    # 工具名从本轮实际挂载的名单里取，**不手写**（口径同 pipeline.tool_menu_block）：
+    # 手写的名字会随插件改名过期，而名字错了 TA 就调不动。一个都没挂上就不提工具，
+    # 只报有新信——提一个不在场的名字比不提更糟。
+    by_short = {n.rsplit("__", 1)[-1]: n
+                for n in pipeline.mounted_tool_names("wake", char_id)}
+    reads = [by_short[t] for t in ("mail_inbox", "mail_read") if t in by_short]
+    how = f"。用 {' / '.join(reads)} 去看看；" if reads else "。"
     return (f"你的邮箱收到了新邮件{more}：" + "；".join(lines) +
-            "。用 mail_inbox / mail_read 去看看；要不要跟人说、说什么，你自己定。" + send_hint)
+            how + "要不要跟人说、说什么，你自己定。" + send_hint)
 
 
 # ---------- 预闸门（不叫模型）----------

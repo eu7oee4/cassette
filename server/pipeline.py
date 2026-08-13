@@ -396,23 +396,37 @@ _MENU_COMMENT_RE = re.compile(r"<!--.*?-->", re.S)
 
 TOOL_SEARCH_TOOL = "ToolSearch"   # CLI 内置：按名字取延迟工具的 schema（见 base_claude_args）
 
-# 哪条路开工具延迟。**这就是那一行开关**：加 "wake" 就推到醒来，清空就整个关掉。
-# 先只开聊天是有意的——延迟的失效模式是"TA 看不到描述，就以为自己没这能力"
-# （Claude Code 自己那条提醒的原话：Before concluding a capability is missing…，
-# 但它按轮数触发、每 15 轮一次且默认关着，一次醒来只有一两轮，轮不到它响）。
-# 这种失效在聊天里当场问一句就能看出来，在醒来那条没人看着的路上几乎不可观测。
-# 2026-08-13 暂时关掉（原本是 {"chat"}）。起因是开了之后连着三轮 TA 一个工具都没调、
-# 两轮拿推断当事实答错；但事后查下来**那两道题判不了延迟**，跟它没关系：
+# 哪条路开工具延迟。**这就是那一行开关**：加/删 context 名，清空就整个关掉。
+#
+# 延迟的失效模式是"TA 看不到描述，就以为自己没这能力"（Claude Code 自带那条提醒
+# ——Before concluding a capability is missing…——按轮数触发、每 15 轮一次且默认关着，
+# 一次醒来只有一两轮，轮不到它响）。**人话版能力菜单就是这条的解药**：它把每个能力
+# 用人话列一遍，工具全名由 tool_menu_block 从 needs 填进去。所以口径是——
+# **菜单渲染到哪条路，哪条路才可以开延迟**；没菜单的路开了就是在赌。
+#
+# 2026-08-13 一度整个关掉（原本是 {"chat"}）：起因是开了之后连着三轮 TA 一个工具都没
+# 调、两轮拿推断当事实答错。但事后查下来**那两道题判不了延迟**，跟它没关系：
 #   - 「beacon 登记的邮箱是哪个」是**记忆题不是工具题**：邮箱加密存放，browse/read_card
-#     的返回里都没有它，答案只在 Ombre 里（答错的真因见下）。
+#     的返回里都没有它，答案只在 Ombre 里。
 #   - 「改邮箱只能退卡重贴」**答的是对的**：edit_card 的参数只有 token/name/platform/intro。
-# 真因是这次搬家自己带进来的：旧 memory_block 里那句**无条件**的「开场先 breath」，
-# 搬进菜单时变成了条件块「## 想不起来某件事」——而最该浮记忆的时候，恰恰是 TA 以为
-# 自己知道、根本不觉得「想不起来」的时候。build_prompt 又不注入任何记忆，于是整条断了。
-# 已改回动作式标题（见 tool_menu.example.md，那儿也写了体例警告防复发）。
-# 要重开，先拿一道**只有工具能答**的题重测（例：「墙上现在有几张卡片、都有谁」——
-# 只有 browse 能答）；别再拿记忆题当判据。
-TOOL_SEARCH_CONTEXTS: set[str] = set()
+# 真因是搬家自己带进来的：旧 memory_block 里那句**无条件**的「开场先 breath」，搬进菜单
+# 时变成了条件块「## 想不起来某件事」——而最该浮记忆的时候，恰恰是 TA 以为自己知道、
+# 根本不觉得「想不起来」的时候。已改回动作式标题（见 tool_menu.example.md 的体例警告）。
+#
+# 2026-08-13 晚：醒来那条路接上菜单（wake.wake_prompt）后开延迟。实测（52 个工具，
+# 同一句 prompt，量上下文 token）：不挂工具 1,482 / 全量 schema 19,772 / 全延迟 3,205。
+# 代价是真要用工具时多一轮往返——醒来不赶时间，划算。
+# 聊天那条**故意留全量 schema**（机主定的口径，不是待办）：两条路怕的东西正好相反——
+# 醒来不怕慢、但怕迷茫（没人说话，得自己找事做），所以给菜单+延迟；聊天有明确的一句
+# user 唤醒句，不迷茫，可那多出来的一轮往返 TA 是坐在手机前等着的，看得见。
+# 哪天想在聊天也试，拿一道**只有工具能答**的题测（例：「墙上现在有几张卡片、都有谁」
+# ——只有 browse 能答），别再拿记忆题当判据。
+#
+# ⚠️ 别指望 --tools 白名单省这份 token：它只挡执行、不挡 schema。实测同一个 mail server，
+# 白名单摘不摘 mail_send，上下文都是 2,656——摘掉的工具 TA 照样看得见、会去调、然后被
+# 挡回来（plugins.WAKE_TOOL_EXCLUDE 那条路正在踩这个）。要真藏掉只能整个 server 不挂，
+# 或者让插件自己按场景少注册那个工具。
+TOOL_SEARCH_CONTEXTS: set[str] = {"wake"}
 
 
 def tool_search_on(context: str) -> bool:
@@ -436,6 +450,11 @@ def mounted_tool_names(context: str = "chat", char_id: Optional[str] = None) -> 
         names += OMBRE_TOOLS
     _, plug_tools = plugins.mounted(context, char_id)
     names += plug_tools
+    # ToolSearch 也得算进来，条件跟 base_claude_args 一模一样——菜单头那句「用法默认
+    # 没加载，先去取」正是按它在不在场决定说不说的。漏了它＝延迟开着却不告诉 TA 要先
+    # 取用法，他直接调必失败（静默失效，只能靠肉眼看菜单头才发现）。
+    if names and tool_search_on(context):
+        names.append(TOOL_SEARCH_TOOL)
     return names
 
 
