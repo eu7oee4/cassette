@@ -401,7 +401,18 @@ TOOL_SEARCH_TOOL = "ToolSearch"   # CLI 内置：按名字取延迟工具的 sch
 # （Claude Code 自己那条提醒的原话：Before concluding a capability is missing…，
 # 但它按轮数触发、每 15 轮一次且默认关着，一次醒来只有一两轮，轮不到它响）。
 # 这种失效在聊天里当场问一句就能看出来，在醒来那条没人看着的路上几乎不可观测。
-TOOL_SEARCH_CONTEXTS = {"chat"}
+# 2026-08-13 暂时关掉（原本是 {"chat"}）。起因是开了之后连着三轮 TA 一个工具都没调、
+# 两轮拿推断当事实答错；但事后查下来**那两道题判不了延迟**，跟它没关系：
+#   - 「beacon 登记的邮箱是哪个」是**记忆题不是工具题**：邮箱加密存放，browse/read_card
+#     的返回里都没有它，答案只在 Ombre 里（答错的真因见下）。
+#   - 「改邮箱只能退卡重贴」**答的是对的**：edit_card 的参数只有 token/name/platform/intro。
+# 真因是这次搬家自己带进来的：旧 memory_block 里那句**无条件**的「开场先 breath」，
+# 搬进菜单时变成了条件块「## 想不起来某件事」——而最该浮记忆的时候，恰恰是 TA 以为
+# 自己知道、根本不觉得「想不起来」的时候。build_prompt 又不注入任何记忆，于是整条断了。
+# 已改回动作式标题（见 tool_menu.example.md，那儿也写了体例警告防复发）。
+# 要重开，先拿一道**只有工具能答**的题重测（例：「墙上现在有几张卡片、都有谁」——
+# 只有 browse 能答）；别再拿记忆题当判据。
+TOOL_SEARCH_CONTEXTS: set[str] = set()
 
 
 def tool_search_on(context: str) -> bool:
