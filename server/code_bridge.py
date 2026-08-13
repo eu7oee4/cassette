@@ -384,6 +384,29 @@ def start(context_text: str, auth_key: str, cwd: Optional[str] = None,
 #   ⑤ 块里必须有 TUI 画的 ❯ 选择光标（require_cursor；有页脚兜底时不苛求这个，
 #      别把老路收紧）
 #   ⑥ 编号照旧必须 1..N 连续
+#
+# ⚠️ 第三种：**弹窗底下垫着排队消息**（08-13 真机两次实锤——弹窗在场时 send 恰好挤进
+# 「paste 落进输入框 → Enter 排队成功 → 弹窗接管画面」的毫秒窗口，消息进了 CC 的排队区，
+# CC 把待处理消息画在页脚/选项块**下面**）：
+#
+#      Do you want to proceed?
+#      ❯ 1. Yes
+#        2. No
+#     （空行）
+#      Esc to cancel · Tab to amend · ctrl+e to explain
+#     （空行）
+#       ❯ 〔现在是 2026年08月13日 周四 22:23(晚上)〕      ← 排队消息，❯ 后面不是编号
+#         我觉得wake适合菜单+延迟；聊天适合全量schema。…   ← 续行，缩进
+#     （空行——多段消息中间有空行）
+#         所以菜单+延迟这套测试完没问题，就留在wake…
+#
+# 排队行的形态是实抓的（v2.1.231，排队区渲染成 "  ❯ 消息首行" + 缩进续行，❯ 同选项
+# 光标是 U+276F）。这个形态下页脚不再是画面末几行、选项块也不贴底，闸 ①/④ 全灭 →
+# dialog_pending 返 False → send 护栏 fail-open，下一条消息的 Enter 直接按在 ❯ 1. Yes 上。
+# 所以进检测前先 _strip_queued 剥掉尾部排队块（闸 ⑦）：
+#   ⑦ 只剥「从最上面一个排队标记行到屏幕底」这一段；往上扫的途中撞到横线（输入框在场
+#      = 没弹窗）就原样返回什么都不剥，撞到页脚/选项行（弹窗本体）就停。剥完喂给
+#      原有闸 ①–⑥，一个都不松。
 # 以后 CC 换了弹窗样式，照着上面的办法抓一份真画面再改，别凭印象加字样。
 
 # 选项行：前面可能有个 ❯ 光标（单捕获出来，闸 ⑤ 要用），也容忍框线（旧版本画过框）。
@@ -393,6 +416,10 @@ _OPTION_RE = re.compile(r"^[\s│|]*([❯›>])?\s*(\d+)[.)]\s+(.+?)\s*[│|]?\s
 _CONT_RE = re.compile(r"^[\s│|]{3,}(\S.*?)\s*[│|]?\s*$")
 # 页脚里的按键提示段，形如 "Esc to cancel" / "esc to exit"
 _FOOTER_SEG_RE = re.compile(r"^(?:esc|escape)\s+to\s+\w+", re.I)
+# 排队消息的首行（闸 ⑦），形如 "  ❯ 〔现在是…〕"：❯ 后面**不是**编号——编号的是选项行。
+# 只认 ❯/›，不收裸 >：正文里 markdown 引用块就是 "> " 开头，收了它就把正文剥没了。
+# 已知残留：消息本身以 "1. " 这类编号开头时会被认成选项行 → 不剥 → 退化成修复前的行为。
+_QUEUED_RE = re.compile(r"^\s*[❯›]\s+(?!\d+[.)])\S")
 # 选项尾巴上的按键注解，按钮上不用显示
 _KEYHINT_RE = re.compile(r"\s*\((?:esc|enter|tab|shift\+tab|ctrl\+\w+)\)\s*$", re.I)
 
@@ -426,6 +453,41 @@ def _is_rule(line: str) -> bool:
     return bool(s) and set(s) == {"─"}
 
 
+def _is_footer_line(line: str) -> bool:
+    """一排 `·` 隔开的短按键提示，其中一段形如 "Esc to xxx"（闸 ②）。"""
+    segs = [s.strip() for s in line.split("·")]
+    if any(len(s) > _FOOTER_SEG_MAX for s in segs):
+        return False
+    return any(_FOOTER_SEG_RE.match(s) for s in segs)
+
+
+def _strip_queued(lines: list) -> list:
+    """剥掉屏幕尾部的排队消息块（闸 ⑦，见模块顶部第三种形态）。
+
+    从底往上扫，记住**最上面**那个排队标记行，从它开始剁到底——排队区可以有好几条
+    消息、各自带缩进续行和段间空行，逐行分辨「续行还是正文」分不动，但块顶永远是
+    一个 ❯ 标记行，认准它就够。途中撞到横线 = 输入框在场 = 没弹窗，原样返回；撞到
+    页脚/选项行 = 到弹窗本体了，停。排队消息里恰好回显了页脚字样的病态情况会让
+    剥除提前停——那时检测退化成修复前的行为，不会更糟。"""
+    cut = -1
+    for i in range(len(lines) - 1, -1, -1):
+        line = lines[i]
+        if not line.strip():
+            continue
+        if _is_rule(line):
+            return lines
+        if _is_footer_line(line) or _OPTION_RE.match(line):
+            break
+        if _QUEUED_RE.match(line):
+            cut = i
+    if cut < 0:
+        return lines
+    out = lines[:cut]
+    while out and not out[-1].strip():   # 剥完把尾巴的空行也掐掉，保持 _screen 的不变量
+        out.pop()
+    return out
+
+
 def _footer_idx(lines: list) -> int:
     """页脚那一行的下标；不是弹窗返回 -1。见上面那段注释里的闸 ① ②。"""
     seen = 0
@@ -438,10 +500,7 @@ def _footer_idx(lines: list) -> int:
         seen += 1
         if seen > _FOOTER_LOOKBACK:
             return -1
-        segs = [s.strip() for s in line.split("·")]
-        if any(len(s) > _FOOTER_SEG_MAX for s in segs):
-            continue
-        if any(_FOOTER_SEG_RE.match(s) for s in segs):
+        if _is_footer_line(line):
             return i
     return -1
 
@@ -498,13 +557,13 @@ def _parse_options(lines: list, footer: int, require_cursor: bool = False) -> li
     return opts[:9]
 
 
-def dialog_pending() -> bool:
+def dialog_pending(screen_text: Optional[str] = None) -> bool:
     """有没有确认框正等着按键。send 的护栏靠它——**两种形态都得认**：
     只认页脚的话，无页脚的 Fetch 弹窗会放 send 过去，粘贴的文字被弹窗吃掉、
     结尾的 Enter 直接按在 ❯ 1. Yes 上（08-10 实锤，弹窗被无声放行）。"""
     if not session_alive():
         return False
-    lines = _screen()
+    lines = _strip_queued(_screen(screen_text))
     if _footer_idx(lines) >= 0:
         return True
     return bool(_parse_options(lines, len(lines), require_cursor=True))
@@ -515,7 +574,7 @@ def dialog_options(screen_text: Optional[str] = None) -> list:
 
     以前 app 那排按钮是写死的「1 允许 / 2 总允许 / 3 拒绝」——描述不准，而且选项经常
     不止三个（选文件、选方案的面板能有四五个）。文案一律取自弹窗原文，有几个渲染几个。"""
-    lines = _screen(screen_text)
+    lines = _strip_queued(_screen(screen_text))
     footer = _footer_idx(lines)
     if footer >= 0:
         return _parse_options(lines, footer)
@@ -524,12 +583,14 @@ def dialog_options(screen_text: Optional[str] = None) -> list:
 
 
 # ---------- 发消息 / 按键 / 抓画面 ----------
-def _input_box() -> Optional[list]:
+def _input_box(text: Optional[str] = None) -> Optional[list]:
     """输入框那一格的内容（TUI 里最后两条横线之间那块）。认不出来就返回 None。"""
-    r = _tmux("capture-pane", "-t", _session(), "-p")
-    if r.returncode != 0:
-        return None
-    lines = [ln.rstrip() for ln in r.stdout.splitlines()]
+    if text is None:
+        r = _tmux("capture-pane", "-t", _session(), "-p")
+        if r.returncode != 0:
+            return None
+        text = r.stdout
+    lines = [ln.rstrip() for ln in text.splitlines()]
     seps = [i for i, ln in enumerate(lines) if ln.strip() and set(ln.strip()) == {"─"}]
     if len(seps) < 2:
         return None
@@ -599,9 +660,23 @@ def send(text: str) -> dict:
     # 按下 Enter 就是替 TA 选中 ❯ 停着的那项（多半是 Yes，等于无声放行）。不按的话：
     # 弹窗冒在 paste 前，文字已被弹窗吃了，重发就行；冒在 paste 后，文字还留在输入框里，
     # 下次 send 的 _clear_input 会收拾掉。两种都比替 TA 按掉权限强。
-    if dialog_pending():
+    #
+    # ⚠️ 只「再查一次弹窗」关不死这个窗口（08-13 两次实锤，正是这 0.2 秒和 Enter 之间
+    # 弹窗才画出来）。所以改成要**正向证据**：抓一帧画面，同一帧上既要没弹窗、又要
+    # 亲眼看到输入框还在且装着刚 paste 的内容，才允许按 Enter。弹窗接管画面的瞬间
+    # 输入框整个不画（_input_box 返 None），这一条就把它挡住了。查完到 Enter 之间
+    # 只剩一次 tmux 调用的毫秒级空隙，比原来窄了两个量级。
+    snap = _tmux("capture-pane", "-t", _session(), "-p").stdout or ""
+    if dialog_pending(snap):
         return {"ok": False, "dialog": True,
                 "error": "刚要提交时弹窗冒了出来，这条没发出去——先按掉弹窗再发一次"}
+    box = _input_box(snap)
+    if box is None or not "".join(ln.lstrip("❯ ").strip() for ln in box):
+        # 输入框认不出 / 是空的 = paste 的内容没落进去（多半正被弹窗或重绘吃着）。
+        # 注意空判可能被 ghost text 骗过（它抓屏时和真内容同形）——骗过也只是照旧
+        # 按了 Enter，ghost text 不会被提交，和修复前同险，不加倍。
+        return {"ok": False, "dialog": True,
+                "error": "刚要提交时输入框不见了/是空的，这条没发出去——看一眼终端再发一次"}
     _tmux("send-keys", "-t", _session(), "Enter")   # 这才是唯一的提交动作
     return {"ok": True}
 
