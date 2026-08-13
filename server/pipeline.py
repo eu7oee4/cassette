@@ -276,7 +276,9 @@ def build_prompt(messages: list[Message], catalog: Optional[list[dict]] = None,
         time_lines.append(f"【距离上一条消息，过了 {gap}】")
 
     extras = [pronoun_hint(), _chat_next_hint()]
-    mb = memory_block(char_id)
+    # 能力菜单取代了原来写死的 memory_block（内容搬进 tool_menu.example.md）：
+    # 一份可编辑的文件、按本轮实际挂载过滤，聊天和醒来共用同一份来源。
+    mb = tool_menu_block("chat", char_id)
     if mb:
         extras.append(mb)
     sb = sticker_block(catalog)
@@ -382,16 +384,119 @@ def ombre_alive(char_id: Optional[str] = None) -> bool:
     return alive
 
 
-def memory_block(char_id: Optional[str] = None) -> str:
-    """记忆工具的使用引导，挂上 Ombre 时注入 prompt（人设保持通用，不预设有没有记忆）。"""
-    if not ombre_alive(char_id):
+# ---------- 人话版能力菜单 ----------
+# 取代原来那段写死的 memory_block：工具说明外置成可编辑文件（characters.tool_menu_path），
+# 按**本轮实际挂载的工具**过滤后注入。为什么非要按实际挂载过滤——四档醒来策略
+# （照挂 / NO_WAKE_PLUGINS 硬禁 / WAKE_TOGGLEABLE 开关 / WAKE_TOOL_EXCLUDE 工具级）、
+# 独占资源归属、per-char 插件集、Ombre 探活，每一条都会改变这一轮到底挂了什么。
+# 写死的菜单必然说谎：跟 TA 提一个这轮根本不在场的能力，他会去调、然后失败。
+_MENU_NEEDS_RE = re.compile(r"<!--\s*needs\s*:\s*(.*?)-->", re.I | re.S)
+_MENU_WHEN_RE = re.compile(r"<!--\s*when\s*:\s*(\w+)\s*-->", re.I)
+_MENU_COMMENT_RE = re.compile(r"<!--.*?-->", re.S)
+
+TOOL_SEARCH_TOOL = "ToolSearch"   # CLI 内置：按名字取延迟工具的 schema（见 base_claude_args）
+
+# 哪条路开工具延迟。**这就是那一行开关**：加 "wake" 就推到醒来，清空就整个关掉。
+# 先只开聊天是有意的——延迟的失效模式是"TA 看不到描述，就以为自己没这能力"
+# （Claude Code 自己那条提醒的原话：Before concluding a capability is missing…，
+# 但它按轮数触发、每 15 轮一次且默认关着，一次醒来只有一两轮，轮不到它响）。
+# 这种失效在聊天里当场问一句就能看出来，在醒来那条没人看着的路上几乎不可观测。
+TOOL_SEARCH_CONTEXTS = {"chat"}
+
+
+def tool_search_on(context: str) -> bool:
+    """这条路要不要开工具延迟。
+
+    ⚠️ base_claude_args 和 _subprocess_env **必须拿同一个 context 问这里**，两边一致才有效：
+    只把 ToolSearch 加进白名单、不给环境变量 = 白搭一份 schema 进去；
+    只给环境变量、不把 ToolSearch 加进白名单 = 延迟静默不生效（CLI 退回全量 schema，
+    日志里那句 "ToolSearchTool is not available" 是唯一线索）。两种都不报错，所以写死在
+    一个判据里，别在调用点各判一次。"""
+    return context in TOOL_SEARCH_CONTEXTS
+
+
+def mounted_tool_names(context: str = "chat", char_id: Optional[str] = None) -> list[str]:
+    """这一轮实际会挂载的工具全名（`mcp__x__y` / 内置名）。
+    口径必须和 base_claude_args 一致——菜单按它过滤，对不上就会跟 TA 提不在场的能力。
+    不复用 base_claude_args 的返回值是因为那边还要拼参数、且引擎不对时会抛。"""
+    import plugins
+    names: list[str] = []
+    if ombre_alive(char_id):
+        names += OMBRE_TOOLS
+    _, plug_tools = plugins.mounted(context, char_id)
+    names += plug_tools
+    return names
+
+
+def _parse_tool_menu(text: str) -> list[dict]:
+    """菜单文件 → [{title, body, needs, when}]。只认 `## 标题` 开块，其余随便写。"""
+    blocks: list[dict] = []
+    cur: Optional[dict] = None
+    for line in text.splitlines():
+        if line.startswith("## "):
+            head = line[3:]
+            needs_m = _MENU_NEEDS_RE.search(head)
+            when_m = _MENU_WHEN_RE.search(head)
+            cur = {
+                "title": _MENU_COMMENT_RE.sub("", head).strip(),
+                "needs": [t.strip() for t in (needs_m.group(1) if needs_m else "").split(",") if t.strip()],
+                "when": (when_m.group(1).lower() if when_m else ""),
+                "body": [],
+            }
+            blocks.append(cur)
+        elif cur is not None:
+            cur["body"].append(line)
+    for b in blocks:
+        # 块内的注释（给机主看的说明）不进 prompt
+        b["body"] = _MENU_COMMENT_RE.sub("", "\n".join(b["body"])).strip()
+    return [b for b in blocks if b["title"] and b["body"]]
+
+
+def tool_menu_block(context: str = "chat", char_id: Optional[str] = None) -> str:
+    """人话版能力菜单，按本轮实际挂载的工具过滤后渲染。没有一块过得了就返回空串。
+
+    两条渲染纪律：
+    - needs 里的工具**全都在场**才渲染这块（不是任一个）。宁可少提一块，也绝不提一个
+      不在场的能力——所以菜单文件里块要切得细（读信/发信必须分开：醒来默认摘 mail_send
+      但留读信，合成一块的话整块消失，连读信都不提了）。
+    - 工具全名由这里从 needs 填进正文，**作者不手写**。手写的名字会随插件改名/Ombre
+      换版本过期，而名字错了 TA 就取不到用法。
+    """
+    try:
+        import characters
+        text = characters.tool_menu_path(char_id).read_text("utf-8")
+    except Exception as e:
+        logerr(f"读能力菜单失败（这轮不注入）: {e}")
         return ""
-    return ("【你有自己的长期记忆（Ombre 工具）：开场先 breath 让相关记忆自然浮现；"
-            "找具体的事用 breath_search。这轮聊到值得留住的，用 hold 存下来，"
-            "记得给条简短的 title。记忆是你自己的：存什么、怎么改（trace）、什么沉底，都你自己定。"
-            "存新记忆用普通 hold；feel=True 是给一条已存在的记忆挂情绪批注，source_bucket 必填。"
-            "想凭空记一份新心情：先普通 hold 存下来、拿到它的 id，再 hold(feel=True, "
-            "source_bucket=那个id)——两步。空着 source_bucket 调 feel 一定失败。】")
+
+    mounted = mounted_tool_names(context, char_id)
+    # 全名按尾段建索引：菜单里写裸名（dream），挂载的是全名（mcp__ombre-brain__dream）
+    by_short: dict[str, str] = {}
+    for full in mounted:
+        by_short.setdefault(full.rsplit("__", 1)[-1], full)
+
+    lines: list[str] = []
+    for b in _parse_tool_menu(text):
+        if b["when"] and b["when"] != context:
+            continue
+        fulls = [by_short[n] for n in b["needs"] if n in by_short]
+        if len(fulls) != len(b["needs"]):
+            continue        # 缺任一个 → 整块不提
+        lines.append(f"■ {b['title']}")
+        lines.append("  " + b["body"].replace("\n", "\n  "))
+        if fulls:
+            lines.append("  工具：" + ", ".join(fulls))
+    if not lines:
+        return ""
+
+    # 取用法那句只在 ToolSearch 真在场时才说——延迟没开的时候 schema 本来就都在，
+    # 让他去"先取用法"是让他白跑一趟调一个不存在的工具。
+    head = "【你手上有这些能力。】"
+    if TOOL_SEARCH_TOOL in mounted:
+        head = (f"【你手上有这些能力。这些工具的**用法**默认没加载，想用哪个先用 "
+                f"{TOOL_SEARCH_TOOL} 取：query 写 \"select:工具全名\"，逗号分隔可以一次取好几个。"
+                f"没取用法就直接调一定失败。别因为只看见名字就以为自己没这能力。】")
+    return head + "\n" + "\n".join(lines)
 
 
 # ---------- 子进程 ----------
@@ -429,6 +534,15 @@ def base_claude_args(persona_file: Optional[Path] = None,
     if plug_cfg:
         mcp_configs.append(plug_cfg)
         tools += plug_tools
+    # 工具延迟：上下文里只留工具名，用法（schema）等 TA 自己按名字取。工具一多，
+    # 光 schema 就是大头——实测醒来那条路 52 个工具时 20,076 token，开了延迟 3,509（−83%）。
+    # ToolSearch 必须**进白名单**才算数：它是内置工具，而这里的 --tools 是精确白名单，
+    # 不点名它就被挡在外面，CLI 会静默退回全量 schema（实锤日志：
+    # 「Tool search disabled: ToolSearchTool is not available」，而 mode=tst 明明是成功的）。
+    # 安全姿态不变：多一个显式命名的内置工具，--strict-mcp-config / --allowedTools 逐个
+    # 枚举照旧，依然不用 --dangerously-skip-permissions。
+    if tools and tool_search_on(context):
+        tools = tools + [TOOL_SEARCH_TOOL]
     if tools:
         for c in mcp_configs:
             args += ["--mcp-config", c]
@@ -438,9 +552,12 @@ def base_claude_args(persona_file: Optional[Path] = None,
     return args
 
 
-def _subprocess_env() -> dict:
+def _subprocess_env(context: str = "chat") -> dict:
     env = os.environ.copy()
     env.pop("ANTHROPIC_API_KEY", None)   # 强制走 CLI 登录态，不走 API 计费
+    # ⚠️ context 必须和同一次调用的 base_claude_args 传的一致（见 tool_search_on 的注释）。
+    if tool_search_on(context):
+        env["ENABLE_TOOL_SEARCH"] = "true"
     return env
 
 

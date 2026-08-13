@@ -90,6 +90,22 @@ def persona_path(char_id: Optional[str] = None) -> Path:
     return config.BASE_DIR / "persona.example.md"
 
 
+def tool_menu_path(char_id: Optional[str] = None) -> Path:
+    """角色的人话版能力菜单（pipeline.tool_menu_block 渲染它）。口径同 persona_path：
+    角色目录里有 tool_menu.md 就用它 → 默认角色退 server/tool_menu.md（机主编辑的那份）
+    → 都没有就退 example。**退 example 是必须的**：菜单缺席时 TA 在延迟模式下只看得见
+    一串名字，会以为自己没那些能力（见 example 文件顶部注释），宁可用默认版。"""
+    cid = resolve(char_id)
+    p = CHARS_DIR / cid / "tool_menu.md"
+    if p.exists():
+        return p
+    if cid == DEFAULT_ID:
+        p = config.BASE_DIR / "tool_menu.md"
+        if p.exists():
+            return p
+    return config.BASE_DIR / "tool_menu.example.md"
+
+
 def display_name(char_id: Optional[str] = None) -> str:
     """角色名：per-char settings 的 agent_name（app 里改的）→ char.json display_name
     → config 兜底默认。默认角色的读法与旧 config.agent_name() 完全同值。"""

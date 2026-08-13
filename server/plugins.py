@@ -187,6 +187,30 @@ REGISTRY: dict[str, dict] = {
         "display_name": "邮箱",
         "description": "TA 自己的邮箱：读信、发信（白名单外的收件人要机主在「草稿信箱」里确认）",
     },
+    # 游戏两档是**两件不同的事**，所以是两个插件、两个醒来开关，别合并：
+    # game-maayuan 是「派引擎去干活」——确定性脚本照任务图截屏点按，TA 只当掌柜不碰屏幕，
+    #   派完就返回、结果之后自己去查。醒来开关关着的时候整族不挂（WAKE_TOGGLEABLE）。
+    # game-story 是「TA 自己去玩」——常驻会话里本人盲操，是消遣不是干活。起初随 codemode
+    #   硬禁，08-13 机主改成开关制（看守/急停/消耗护栏兜底齐了）。
+    # 两个都独占同一台模拟器（EXCLUSIVE），同一时刻只归一个角色。
+    #
+    # ⚠️ 两个都有**宿主侧前提**，装完不配好是跑不起来的（同 browser 要先起服务）：
+    # MuMu 模拟器装好、游戏登录过、分辨率切 720×1280@320、`.env` 里 GAME_MODE_ENABLED=1
+    # 重启后端；game-maayuan 还要在 server venv 里跑一次 tools/fetch_maayuan.py 拉任务资源。
+    # 所以下面 description 里带上前提——**未安装时商店显示的就是 REGISTRY 这句**
+    # （list_status 取 (manifest or reg)），别让人装完才发现缺东西。
+    "game-maayuan": {
+        "repo": "https://github.com/eu7oee4/cassette-plugin-game-maayuan",
+        "commit": "e06ee9c61b99caa9a3295bf9b3a3d3f130cc490f",
+        "display_name": "游戏日常-如鸢",
+        "description": "派任务引擎替机主清《如鸢》日常（内核是 MaaYuan 任务图，只支持如鸢；AI 只当掌柜不碰屏幕）。需 MuMu 模拟器 + 后端开 GAME_MODE_ENABLED，装完照插件 README 配一遍",
+    },
+    "game-story": {
+        "repo": "https://github.com/eu7oee4/cassette-plugin-game-story",
+        "commit": "bfc42edd839283b3337992bf34c811d41b8ebc33",
+        "display_name": "游戏剧情-通用版",
+        "description": "TA 自己切去玩游戏看剧情：常驻会话里本人盲操（截图→坐标→点按），边玩边把见闻转播进聊天。默认为《如鸢》调校，换别的二游要自己改守则——装前先看 README 的风险须知（含反自动化处罚）。需 MuMu 模拟器 + 后端开 GAME_MODE_ENABLED",
+    },
 }
 
 _NAME_RE = re.compile(r"^[a-z0-9_-]{1,40}$")

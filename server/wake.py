@@ -285,7 +285,8 @@ def run_claude_wake(prompt: str, char_id: Optional[str] = None) -> tuple[Optiona
             + ["--output-format", "stream-json", "--verbose"])
     try:
         proc = subprocess.run(args, input=prompt, capture_output=True, text=True,
-                              env=pipeline._subprocess_env(), timeout=config.CLAUDE_TIMEOUT_SEC)
+                              env=pipeline._subprocess_env("wake"),
+                              timeout=config.CLAUDE_TIMEOUT_SEC)
     except subprocess.TimeoutExpired:
         logerr("醒来调用超时")
         return None, []
