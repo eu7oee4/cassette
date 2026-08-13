@@ -176,7 +176,7 @@ def wake_prompt(settings: dict, forced: bool = False, note: str = "",
 
     # wake 注入条数：用户可调，默认 50；夹取防手滑（容量上限见 state_store.RECENT_WINDOW_N）。
     wake_n = min(max(int(settings.get("wake_window_n") or 50), 20), 300)
-    timeline = pipeline.build_context_timeline(window[-wake_n:])
+    timeline = pipeline.build_context_timeline(window[-wake_n:], char_id=char_id)
     timeline_block = timeline if timeline else "（最近没有对话）"
 
     now = datetime.now(config.APP_TZ)

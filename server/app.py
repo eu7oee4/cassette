@@ -811,9 +811,12 @@ _CODE_CTX_CAVEAT = (
 )
 
 
-def _code_context(conv: list[dict], scene: str, tail: str = "") -> str:
-    """拼注入给新会话的第一段话：场景 + 最近的对话（和聊天同款渲染）+ 告诫。"""
-    timeline = pipeline.build_context_timeline(conv, reflect_limit=5) if conv else "（还没聊过什么）"
+def _code_context(conv: list[dict], scene: str, tail: str = "",
+                  char_id: Optional[str] = None) -> str:
+    """拼注入给新会话的第一段话：场景 + 最近的对话（和聊天同款渲染）+ 告诫。
+    char_id＝这次会话归谁（时间线里的内心要取他自己那份 wake_log，别混进别的角色的）。"""
+    timeline = (pipeline.build_context_timeline(conv, reflect_limit=5, char_id=char_id)
+                if conv else "（还没聊过什么）")
     return (scene + "\n\n【下面是你们刚才的对话】\n" + timeline + _CODE_CTX_CAVEAT + tail)
 
 
@@ -847,7 +850,10 @@ def code_start(inp: CodeStartIn, x_auth: Optional[str] = Header(default=None, al
              f"{config.user_name()} 多半是有活要你干，也可能只是继续聊。")
     tail = ("\n【说明】活干到关键节点或者干完了，正常跟 TA 说话就行——你说的话会回到 TA 的"
             "聊天气泡里。先打个招呼说你切过来了。")
-    r = code_bridge.start(_code_context(conv, scene, tail), config.AUTH_KEY, cwd=inp.cwd,
+    # 会话归属＝codemode 的 owner（M1 口径：会话全局唯一）。时间线里的内心和挂的 Ombre
+    # 取同一个角色，别一个记忆是他的、一份内心是别人的。
+    r = code_bridge.start(_code_context(conv, scene, tail, char_id=plugins.owner_of("codemode")),
+                          config.AUTH_KEY, cwd=inp.cwd,
                           mcp_configs=_code_mcp_configs())
     if not r.get("ok"):
         raise HTTPException(status_code=409, detail=r.get("error", "起会话失败"))
@@ -1022,7 +1028,8 @@ def codemode_start(inp: CodemodeStartIn, x_auth: Optional[str] = Header(default=
             "（哪个文件、哪段逻辑、什么原因）都是没工具时写的、没验证过，先自己读代码确认；"
             "拿不准 TA 到底要什么，直接在聊天里问，别照着这段自己往下干。〕\n\n"
             "【说明】活干到关键节点或者干完了，正常跟 TA 说话就行——你说的话会回到 TA 的聊天气泡里。")
-    r = code_bridge.start(_code_context(conv, scene, tail), config.AUTH_KEY, cwd=inp.cwd,
+    r = code_bridge.start(_code_context(conv, scene, tail, char_id=cid),
+                          config.AUTH_KEY, cwd=inp.cwd,
                           mcp_configs=_code_mcp_configs())
     if r.get("ok"):
         logerr(f"自切 code 模式：{task[:80]}")
@@ -1356,7 +1363,8 @@ def game_story_start(inp: GameStoryStartIn,
              "现在这个会话里你手上有模拟器里的游戏（game_* 工具 + 你的记忆；没有电脑，"
              f"跑不了命令，Read 只用来看 {u} 发来的图）。这个会话是常驻的：{u}随时会插话，"
              "你说的每段话都实时回到 TA 的聊天气泡里。")
-    timeline = pipeline.build_context_timeline(conv, reflect_limit=5) if conv else "（还没聊过什么）"
+    timeline = (pipeline.build_context_timeline(conv, reflect_limit=5, char_id=cid)
+                if conv else "（还没聊过什么）")
     tail = (f"\n【这次去干什么】\n〔现在是 {pipeline.now_str()}〕\n{task}\n"
             f"〔这段是你在聊天里自己说的打算，已经原样回显给{u}了，说歪了 TA 会来纠正。〕"
             if task else
