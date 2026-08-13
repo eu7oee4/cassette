@@ -359,6 +359,13 @@ struct ChatService {
         let cwd: String        // 会话默认工作目录，显示用
         let busy: Bool?        // TA 正在跑活吗（只有 probeBusy 时才是真值）
         let profile: String?   // 活着的是哪个档案：code / game（游戏剧情会话共用这套路由）
+        // 「电脑上的会话」这样独占资源现在归谁（后端 plugins.EXCLUSIVE 的 tmux）。
+        // 会话全机只有一个，不归当前角色时按钮要禁掉——不禁的话按下去只吃一个 409。
+        let owner: String?
+        let owner_name: String?
+        // 正开着的这个会话是谁的（起会话那一刻钉死的）。和 owner 可能不同：会话开着期间
+        // 归属被转走过。判「这个会话是不是我这边的」用它，别用 owner。
+        let session_char: String?
     }
 
     /// 会话画面的一帧 + 当前确认弹窗的选项。

@@ -585,7 +585,7 @@ async def maybe_wake(char_id: Optional[str] = None) -> None:
     # 机主来问照样看得见；反着写会在持续失败时每个 tick 都硬起一次注定失败的子进程。
     # mail 是独占资源（plugins.EXCLUSIVE）：新信只把**归属角色**硬叫醒。
     # flag 是消费式的（consume），非归属角色不去碰——碰了等于替别人把信的唤醒吞掉。
-    if plugins.owner_of("mail") == cid:
+    if plugins.owner_of("mailbox") == cid:
         mail_note = _mail_wake_note(cid)
         if mail_note:
             loop = asyncio.get_running_loop()

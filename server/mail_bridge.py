@@ -459,7 +459,7 @@ def _smtp_send(cfg: dict, to: str, subject: str, body: str) -> None:
     # From 显示名 = 邮箱归属角色的名字（mail 是独占资源，谁的邮箱署谁的名）。
     import characters
     import plugins
-    msg["From"] = formataddr((str(Header(characters.display_name(plugins.owner_of("mail")),
+    msg["From"] = formataddr((str(Header(characters.display_name(plugins.owner_of("mailbox")),
                                          "utf-8")), cfg["address"]))
     msg["To"] = to
     msg["Subject"] = Header(subject or "（无主题）", "utf-8")

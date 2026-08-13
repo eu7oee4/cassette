@@ -55,7 +55,10 @@
   不告知 = 他定了 NEXT 却不兑现，是骗他。
 - 设置页加一行 UI，与现有三闸并列，文案区分「说话预算」vs「醒来预算」。
 - **预算按角色分，不共用**：M0 上线时只有一个角色，设置先挂全局 settings.json；
-  M1 随其它 wake 策略一并移入 char.json，每角色独立预算、各数各的 wake_log。
+  M1 随其它 wake 策略一并移入角色的设置。**实施时改了落点**（2026-08-14 订正）：
+  没进 char.json，进的是 `state/characters/<id>/settings.json`——app 的设置页本来就在
+  读写这份，进 char.json 就得再开一条写路径。char.json 只留接线（engine/ombre/display_name），
+  会被人改的策略留在 settings。每角色独立预算、各数各的 wake_log。
   不设全局总闸——总量 = 各角色预算之和，要收紧就分别调低（全局总闸有「先醒先得」
   抢额度的问题，不做）；全局只留「醒来并发 = 1」的锁。
 
@@ -76,8 +79,19 @@
 - `outbox.json` 保持全局一份，每条加 `char_id`（App 路由用）；`/pending/ack` 不变。
 - 插件启用状态 per-char（`state/characters/<id>/plugins_enabled.json`）；
   MCP config 按（角色 × context）渲染，文件名带角色前缀防互踩。
-- **独占资源**：game（一台 MuMu）、mail（一个邮箱）、beacon（一装置一卡）声明 `exclusive: true`，
-  同一时刻只绑一个角色（绑定写 char.json）。一期不做共享——游戏归谁、别人就开不了。
+- **独占资源**（2026-08-14 订正，原文按插件分归属是错的）：归属的核心是「这东西只有一份，
+  所以同一时刻只能给一个人用」。归属记在**资源**上不记在插件上——一个插件可能吃好几样
+  （game-story 既要游戏账号又要会话），几个插件可能吃同一样（两个 game 插件共用一个账号，
+  按插件分开记的话两个角色会同时上手同一个号）。表在 `plugins.EXCLUSIVE`（插件 → 资源列表），
+  归属存 `state/plugin_owners.json`（**不是 char.json**：它是「这样东西归谁」，不是角色属性），
+  改归属走 `POST /plugins/owner` 或手编该文件。插件挂不挂 = 它吃的每一样资源都归你。
+  一期不做共享/占用轮转——归谁、别人就开不了。
+  - 真的只有一份：`maayuan`（机主的《如鸢》账号，**不是"MuMu 只有一台"**——模拟器能开
+    多实例，卡住的是账号）、`beacon`（一装置一卡）。
+  - **暂时**只有一份（是我们自己限的，将来每人一份，做成之后就从 EXCLUSIVE 里删掉）：
+    `mailbox` ← 最该做，邮箱是身份不是设备，共用一个意味着 A 会读到写给 B 的信；
+    `chrome` ← 端口和 profile 目录本来就是参数，卡在宿主侧（mounted 不给插件传 env、
+    keeper 是单例）；`tmux` ← 留到三期工作群（每人一台"自己的 MacBook"）。
 
 **wake 调度多角色**
 - 仍是一个 `scheduler_loop`，每 tick 遍历角色：各自 next_wake_at / 概率 / 预算。

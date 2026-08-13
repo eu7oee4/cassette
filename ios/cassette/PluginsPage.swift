@@ -18,7 +18,18 @@ struct PluginItem: Decodable, Identifiable {
     // 语义在宿主那边定，app 不猜。旧后端没这俩字段 → 回退通用文案。
     let wake_toggle_title: String?
     let wake_toggle_desc: String?
+    // 独占资源归属（后端 plugins.EXCLUSIVE）：这插件背后是一份只有一个的东西时，
+    // 只有归属角色能真正挂上它——**别的角色即使把开关拨开了也不挂**。
+    // owner 空串 = 它吃的几样资源分属不同人，那就谁都用不了（后端如实回空，别猜一个名字）。
+    let exclusive: Bool?
+    let owned: Bool?
+    let owner: String?
+    let owner_name: String?
+    let resources: [String]?
     var id: String { name }
+
+    /// 这行要不要显示"不归你"的说明。旧后端没这几个字段 → nil，一律当归你（老行为）。
+    var blockedByOwner: Bool { exclusive == true && owned == false }
 
     /// version 是作者手写的、靠自觉（两个不同 commit 可以都自称 0.1.0），sha 才是真身份。
     /// 装着的那个跟 registry 钉的对不上 = 这份没跟上，左滑「更新」能对齐。
@@ -28,7 +39,35 @@ struct PluginItem: Decodable, Identifiable {
     }
 }
 
+/// 一样独占资源 + 现在归谁 + 谁在吃它（后端 /plugins/resources）。
+struct ResourceItem: Decodable, Identifiable {
+    let resource: String
+    let label: String
+    let owner: String
+    let owner_name: String
+    let plugins: [String]
+    var id: String { resource }
+}
+
+struct ResourcesResponse: Decodable {
+    let items: [ResourceItem]
+    let characters: [CharacterInfo]
+}
+
 extension ChatService {
+    func getResources() async throws -> ResourcesResponse {
+        let data = try await perform(authedRequest("GET", "/plugins/resources"))
+        guard let r = try? JSONDecoder().decode(ResourcesResponse.self, from: data)
+        else { throw ChatServiceError.badResponse }
+        return r
+    }
+
+    func setResourceOwner(resource: String, charID: String) async throws {
+        struct Body: Encodable { let resource: String; let char_id: String }
+        let body = try JSONEncoder().encode(Body(resource: resource, char_id: charID))
+        _ = try await perform(authedRequest("POST", "/plugins/owner", jsonBody: body))
+    }
+
     func getPlugins() async throws -> [PluginItem] {
         let data = try await perform(authedRequest("GET", "/plugins"))
         struct Wrap: Decodable { let items: [PluginItem] }
@@ -82,6 +121,7 @@ struct PluginsPage: View {
     @State private var uninstallTarget: PluginItem? = nil
     @State private var noteText: String? = nil       // 操作成功的短提示（2.5s 自动消失）
     @State private var noteSeq = 0                   // 提示计时的世代号，防前一条掐掉后一条
+    @State private var showOwnership = false         // 归属页（右上角）
 
     var body: some View {
         Group {
@@ -102,6 +142,15 @@ struct PluginsPage: View {
         }
         .navigationTitle("插件商店")
         .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                Button("归属") { showOwnership = true }
+            }
+        }
+        .sheet(isPresented: $showOwnership) {
+            // 关掉归属页要重拉插件列表：归属一变，哪几行变成"不归你"就跟着变。
+            OwnershipSheet(onClose: { showOwnership = false; Task { await load() } })
+        }
         .refreshable { await load() }
         .task { await load() }
         .overlay(alignment: .bottom) {
@@ -132,6 +181,21 @@ struct PluginsPage: View {
         }
     }
 
+    // 归属文案拆成纯函数：字符串三元 + 插值直接写进 ViewBuilder 里，Swift 的类型检查器
+    // 会在这个本来就很长的表达式上卡死（实测报 "unable to type-check in reasonable time"）。
+    private static func ownerBadge(_ p: PluginItem) -> String {
+        let n = p.owner_name ?? ""
+        return n.isEmpty ? "归属分散" : "归「\(n)」"
+    }
+
+    private static func ownerHint(_ p: PluginItem) -> String {
+        let n = p.owner_name ?? ""
+        if n.isEmpty {
+            return "它要的几样东西现在分属不同角色，谁都用不了——去右上角「归属」把它们归到同一个人名下。"
+        }
+        return "这东西只有一份，现在归「\(n)」。在这边开了也不会挂上——要用就去右上角「归属」转过来。"
+    }
+
     @ViewBuilder
     private func row(_ p: PluginItem) -> some View {
         VStack(spacing: 10) {
@@ -152,8 +216,20 @@ struct PluginsPage: View {
                         if p.valid == false {
                             Text("清单损坏").font(.caption2).foregroundStyle(.red)
                         }
+                        // 不归你：必须画出来。没有这条的话，开关拨得开、显示"已启用"，
+                        // 工具却根本不挂——一个从界面上完全查不出原因的谜。
+                        if p.blockedByOwner {
+                            Text(Self.ownerBadge(p))
+                                .font(.caption2)
+                                .padding(.horizontal, 5).padding(.vertical, 1)
+                                .background(Color.secondary.opacity(0.15), in: Capsule())
+                                .foregroundStyle(.secondary)
+                        }
                     }
                     Text(p.description).font(.footnote).foregroundStyle(.secondary)
+                    if p.blockedByOwner {
+                        Text(Self.ownerHint(p)).font(.caption2).foregroundStyle(.orange)
+                    }
                 }
                 Spacer()
                 if busyName == p.name {
@@ -172,13 +248,14 @@ struct PluginsPage: View {
                     ))
                     .labelsHidden()
                     .tint(Color.theme)
-                    .disabled(p.valid == false)
+                    // 不归你就别让拨——拨得动却不生效，比拨不动更难懂。
+                    .disabled(p.valid == false || p.blockedByOwner)
                 }
             }
             // 「醒来能用」：只有宿主标了 wake_toggleable 的插件（browser）才有，且要装了并
             // 开着才画——关掉插件时开关跟着藏（醒来那条路本来就要求 enabled，藏了不骗人）。
             // 默认关：要不要让一次没人看着的自发醒来摸到这个插件，是机主自己的决定。
-            if p.state == "enabled", p.wake_toggleable == true {
+            if p.state == "enabled", p.wake_toggleable == true, !p.blockedByOwner {
                 HStack(spacing: 12) {
                     VStack(alignment: .leading, spacing: 2) {
                         Text(p.wake_toggle_title ?? "醒来能用").font(.footnote)
@@ -264,5 +341,120 @@ struct PluginsPage: View {
             try? await Task.sleep(for: .seconds(2.5))
             if noteSeq == mine { noteText = nil }
         }
+    }
+}
+
+// MARK: - 归属页（插件商店右上角）
+
+/// 独占资源的归属：**这东西只有一份，所以同一时刻只能给一个人用。**
+///
+/// 管的是资源不是插件——一个插件可能吃好几样（游戏剧情既要游戏账号又要会话），
+/// 几个插件可能吃同一样（两个游戏插件共用一个账号）。所以这页按资源列，转一次
+/// 账号归属，吃它的插件一起跟着走，不会出现两个角色同时上手同一个号。
+struct OwnershipSheet: View {
+    let onClose: () -> Void
+    private let service = ChatService()
+
+    @State private var items: [ResourceItem] = []
+    @State private var chars: [CharacterInfo] = []
+    @State private var loading = true
+    @State private var busy: String? = nil
+    @State private var errorText: String? = nil
+
+    var body: some View {
+        NavigationStack {
+            Group {
+                if loading {
+                    ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else if items.isEmpty {
+                    ContentUnavailableView("没有需要分归属的东西", systemImage: "key")
+                } else {
+                    List {
+                        Section {
+                            ForEach(items) { r in row(r) }
+                        } footer: {
+                            Text("这些东西每样只有一份，同一时刻只能给一个角色用。转走之后，"
+                                 + "原来那个角色即使把插件开关拨开也不会挂上。改完下一轮聊天／醒来生效。")
+                        }
+                    }
+                }
+            }
+            .navigationTitle("归属")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) { Button("完成") { onClose() } }
+            }
+            .task { await load() }
+            .alert("转不了", isPresented: Binding(
+                get: { errorText != nil }, set: { if !$0 { errorText = nil } }
+            )) { Button("好", role: .cancel) { } } message: { Text(errorText ?? "") }
+        }
+    }
+
+    @ViewBuilder
+    private func row(_ r: ResourceItem) -> some View {
+        HStack(spacing: 12) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text(r.label).font(.body.weight(.medium))
+                if !r.plugins.isEmpty {
+                    Text("用到它的：" + r.plugins.joined(separator: "、"))
+                        .font(.caption2).foregroundStyle(.secondary)
+                }
+            }
+            Spacer()
+            if busy == r.resource {
+                ProgressView()
+            } else {
+                // Menu 而不是 Picker：角色可能只有一个（那就只有一项，点开一看就明白
+                // 现在没得选），也可能以后有好几个，同一套 UI 都撑得住。
+                Menu {
+                    ForEach(chars) { c in
+                        Button {
+                            Task { await transfer(r, to: c.id) }
+                        } label: {
+                            if c.id == r.owner {
+                                Label(name(c), systemImage: "checkmark")
+                            } else {
+                                Text(name(c))
+                            }
+                        }
+                    }
+                } label: {
+                    HStack(spacing: 3) {
+                        Text(r.owner_name.isEmpty ? r.owner : r.owner_name)
+                        Image(systemName: "chevron.up.chevron.down").font(.caption2)
+                    }
+                    .font(.footnote)
+                    .foregroundStyle(Color.theme)
+                }
+            }
+        }
+        .padding(.vertical, 2)
+    }
+
+    private func name(_ c: CharacterInfo) -> String {
+        c.display_name.isEmpty ? c.id : c.display_name
+    }
+
+    private func load() async {
+        do {
+            let r = try await service.getResources()
+            items = r.items
+            chars = r.characters
+        } catch {
+            errorText = (error as? ChatServiceError)?.errorDescription ?? "连不上后端"
+        }
+        loading = false
+    }
+
+    /// 转让：同一个人就别白跑一趟后端。失败把后端那句话原样弹出来——
+    /// 「会话正开着」这类拒绝是有具体去处的，含糊成"操作失败"就没人知道该干嘛。
+    private func transfer(_ r: ResourceItem, to charID: String) async {
+        guard charID != r.owner else { return }
+        busy = r.resource
+        do { try await service.setResourceOwner(resource: r.resource, charID: charID) }
+        catch { errorText = (error as? ChatServiceError)?.errorDescription ?? "转不了" }
+        busy = nil
+        await load()
     }
 }

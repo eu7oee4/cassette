@@ -54,10 +54,12 @@ def _resolve_char(char_id: Optional[str]) -> str:
 
 
 def _session_char() -> str:
-    """当前 code/game 会话话语归谁：按活跃档案的独占插件归属走（M1 会话全局唯一，
-    只是把归属记对，M2 app 按 char_id 路由消息时直接可用）。"""
-    prof = code_bridge.active_profile() or "code"
-    return plugins.owner_of("game-story" if prof == "game" else "codemode")
+    """当前 code/game 会话话语归谁。
+
+    优先读 session.json 里这次会话起的时候记下的角色——**会话开着期间归属不能变**：
+    中途改了 tmux 资源的归属，剩下半截话会掉进另一个人的会话里，一轮对话被劈成两半。
+    记录缺席（旧会话 / 手动开的会话）才退回当前的资源归属。"""
+    return code_bridge.session_char() or plugins.owner_of("tmux")
 
 
 def _browser_keeper_watchdog() -> None:
@@ -82,7 +84,7 @@ def _mail_watcher() -> None:
         on = False
         try:
             # 邮箱是独占资源：开关看**归属角色**的启用表（plugins.owner_of）。
-            on = bool(plugins._read_enabled(plugins.owner_of("mail")).get("mail"))
+            on = bool(plugins._read_enabled(plugins.owner_of("mailbox")).get("mail"))
         except Exception:
             pass
         if on and mail_bridge.configured():
@@ -830,41 +832,59 @@ def code_status(busy: int = 0, x_auth: Optional[str] = Header(default=None, alia
     verify_auth(x_auth)
     if not (config.CODE_MODE_ENABLED or config.GAME_MODE_ENABLED):
         return {"enabled": False, "alive": False, "tmux": False, "cwd": "", "busy": False,
-                "profile": "code"}
+                "profile": "code", "owner": "", "owner_name": "", "session_char": ""}
     # enabled 维持「code 模式开没开」的老语义（app 靠它显示 Code 入口）；
     # game 会话复用同一排路由，靠 profile 字段区分（app 的 game 页用）。
+    # owner＝「电脑上的会话」这样资源现在归谁：app 据此在别人的会话里禁掉 Code 按钮
+    # （不禁的话按下去只会吃一个 409，还得看得懂那句话才知道为什么）。
+    # session_char＝正开着这个会话的是谁（起会话时钉死的，可能和 owner 不同：
+    # 会话开着期间归属被转走过）。
+    owner = plugins.owner_of("tmux")
     return {"enabled": config.CODE_MODE_ENABLED, "alive": code_bridge.session_alive(),
             "tmux": code_bridge.tmux_available(), "cwd": config.CODE_CWD,
             "busy": bool(busy) and code_bridge.is_busy(),
-            "profile": code_bridge.active_profile()}
+            "profile": code_bridge.active_profile(),
+            "owner": owner, "owner_name": characters.display_name(owner),
+            "session_char": code_bridge.session_char()}
 
 
 @app.post("/code/start")
-def code_start(inp: CodeStartIn, x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
-    """切进 code 模式：杀旧起新（每次都是干净会话，无漂移）+ 注入最近历史。"""
+def code_start(inp: CodeStartIn, char: Optional[str] = None,
+               x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
+    """切进 code 模式：杀旧起新（每次都是干净会话，无漂移）+ 注入最近历史。
+
+    char＝你正在跟谁聊（app 的 authedRequest 给所有请求都带了 ?char=）。会话吃的是 tmux
+    这样独占资源，**不归他就拒**：放行的话，注入的是这个角色的历史、挂的却是资源归属者
+    的记忆，会话里说的话也会掉进对方的聊天里——一次静默的串台，比当场拒绝难查得多。"""
     verify_auth(x_auth)
     _require_code()
+    cid = _resolve_char(char)
+    owner = plugins.owner_of("tmux")
+    if cid != owner:
+        raise HTTPException(
+            status_code=409,
+            detail=f"电脑上的会话现在归「{characters.display_name(owner)}」——"
+                   f"要给「{characters.display_name(cid)}」用的话，"
+                   "去插件商店右上角把「电脑上的会话」转过来")
     conv = [{"ts": m.ts, "role": m.role, "text": m.text} for m in inp.messages][-CODE_HISTORY_CAP:]
     scene = (f"【场景】你刚从 {config.user_name()} 的手机聊天切到 code 模式：还是你，"
              "只是这个会话里你手上有整台电脑的工具（读写文件、跑命令都行）。"
              f"{config.user_name()} 多半是有活要你干，也可能只是继续聊。")
     tail = ("\n【说明】活干到关键节点或者干完了，正常跟 TA 说话就行——你说的话会回到 TA 的"
             "聊天气泡里。先打个招呼说你切过来了。")
-    # 会话归属＝codemode 的 owner（M1 口径：会话全局唯一）。时间线里的内心和挂的 Ombre
-    # 取同一个角色，别一个记忆是他的、一份内心是别人的。
-    r = code_bridge.start(_code_context(conv, scene, tail, char_id=plugins.owner_of("codemode")),
+    # 上面校验过 cid 就是资源归属者，所以时间线的内心、挂的 Ombre、会话归属三者同一个人。
+    r = code_bridge.start(_code_context(conv, scene, tail, char_id=cid),
                           config.AUTH_KEY, cwd=inp.cwd,
-                          mcp_configs=_code_mcp_configs())
+                          mcp_configs=_code_mcp_configs(cid), char_id=cid)
     if not r.get("ok"):
         raise HTTPException(status_code=409, detail=r.get("error", "起会话失败"))
     return r
 
 
-def _code_mcp_configs() -> list:
+def _code_mcp_configs(char_id: Optional[str] = None) -> list:
     """给 code 会话挂的 MCP：长期记忆跟着走（不然切过去就失忆了）——挂的是**会话归属
-    角色**的那份记忆（codemode 的 owner）。插件不挂——那些工具是给聊天用的，
-    code 会话手上有真家伙，不需要。"""
-    cid = plugins.owner_of("codemode")
+    角色**的那份记忆。插件不挂——那些工具是给聊天用的，code 会话手上有真家伙，不需要。"""
+    cid = char_id or code_bridge.session_char() or plugins.owner_of("tmux")
     if not pipeline.ombre_alive(cid):
         return []
     return [str(pipeline._ombre_mcp_config(cid))]
@@ -986,7 +1006,11 @@ def code_append(inp: CodeAppendIn, x_auth: Optional[str] = Header(default=None, 
         now = time.time()
         if now - _code_bark_state.get("last", 0) > CODE_BARK_GAP_SEC:
             _code_bark_state["last"] = now
-            threading.Thread(target=bark_push, args=(text,), daemon=True).start()
+            # 标题＝会话归属角色（不传的话 notify 兜底成默认角色的名字，别人说的话会
+            # 顶着默认角色的名字弹出来）。名字在这儿先算好——线程里再算要多读一次文件。
+            title = characters.display_name(_session_char())
+            threading.Thread(target=bark_push, args=(text,),
+                             kwargs={"title": title}, daemon=True).start()
     return {"ok": True}
 
 
@@ -1009,7 +1033,9 @@ def codemode_start(inp: CodemodeStartIn, x_auth: Optional[str] = Header(default=
         raise HTTPException(status_code=400, detail="task 不能为空")
     if code_bridge.session_alive():
         return {"ok": False, "error": "会话占用中：已经有一个 code 会话在跑，别杀掉正在干的活"}
-    cid = plugins.owner_of("codemode")
+    # TA 自己调 code_start 才走这儿——插件只挂给资源归属者（plugin_owned_by），
+    # 能调到这个工具的本来就只有他，所以直接取会话资源的归属。
+    cid = plugins.owner_of("tmux")
     window = state_store.read_recent_window(cid)
     conv = [{"ts": w.get("ts"), "role": w.get("role"), "text": w.get("text", "")}
             for w in window][-CODE_HISTORY_CAP:]
@@ -1030,7 +1056,7 @@ def codemode_start(inp: CodemodeStartIn, x_auth: Optional[str] = Header(default=
             "【说明】活干到关键节点或者干完了，正常跟 TA 说话就行——你说的话会回到 TA 的聊天气泡里。")
     r = code_bridge.start(_code_context(conv, scene, tail, char_id=cid),
                           config.AUTH_KEY, cwd=inp.cwd,
-                          mcp_configs=_code_mcp_configs())
+                          mcp_configs=_code_mcp_configs(cid), char_id=cid)
     if r.get("ok"):
         logerr(f"自切 code 模式：{task[:80]}")
         # task 是 TA 自己写的、直接进了会话，用户在手机上看不见 → 原样回显进聊天，
@@ -1155,6 +1181,35 @@ def plugins_list(char: Optional[str] = None,
                  x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
     verify_auth(x_auth)
     return {"items": plugins.list_status(_resolve_char(char))}
+
+
+@app.get("/plugins/resources")
+def plugins_resources(x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
+    """独占资源清单 + 现在归谁 + 谁在吃它（app 的归属页数据源）。
+    归属是全局事实，不吃 ?char=——它回答的是「这样东西归谁」，不是「我看到什么」。"""
+    verify_auth(x_auth)
+    return {"items": plugins.resources_status(),
+            "characters": [{"id": cid, "display_name": characters.display_name(cid)}
+                           for cid in characters.ids()]}
+
+
+class OwnerIn(BaseModel):
+    resource: str
+    char_id: str
+
+
+@app.post("/plugins/owner")
+def plugins_set_owner(body: OwnerIn, x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
+    """把一样独占资源转给某个角色。
+
+    会话开着的时候不许转 tmux：正跑着的那轮话会掉进另一个人的会话里，一轮对话被劈成
+    两半。（session.json 钉死了归属，转了也不影响当前会话——但下一条消息的路由、
+    终端页看的是谁，全都会错位，不如直接拦住说清楚。）"""
+    verify_auth(x_auth)
+    if body.resource == "tmux" and code_bridge.session_alive():
+        raise HTTPException(status_code=409,
+                            detail="会话正开着，先在终端页退出 Code/游戏模式再转归属")
+    return plugins.set_owner(body.resource, body.char_id)
 
 
 @app.post("/plugins/install")
@@ -1351,7 +1406,9 @@ def game_story_start(inp: GameStoryStartIn,
     if holder:
         return {"ok": False, "error": "任务引擎正在用模拟器跑日常，等它跑完再玩（task_status 可看进度）"}
     task = (inp.task or "").strip()
-    cid = plugins.owner_of("game-story")
+    # 会话归属取 tmux 的（game-story 还吃《如鸢》账号，但"这次会话是谁的"由会话资源定；
+    # 两样归属不同的话这个插件根本挂不上，能调到这儿就说明两样都是他的）。
+    cid = plugins.owner_of("tmux")
     window = state_store.read_recent_window(cid)
     conv = [{"ts": w.get("ts"), "role": w.get("role"), "text": w.get("text", "")}
             for w in window][-CODE_HISTORY_CAP:]
@@ -1374,7 +1431,7 @@ def game_story_start(inp: GameStoryStartIn,
     mcp = ([str(pipeline._ombre_mcp_config(cid))] if pipeline.ombre_alive(cid) else []) + [str(cfg)]
     tools = (pipeline.OMBRE_TOOLS if pipeline.ombre_alive(cid) else []) + GAME_SESSION_TOOLS
     r = code_bridge.start(context, config.AUTH_KEY, mcp_configs=mcp,
-                          profile="game", tools=tools)
+                          profile="game", tools=tools, char_id=cid)
     if not r.get("ok"):
         game_bridge.release_lock("story")
         return r
@@ -1429,7 +1486,10 @@ async def _game_watchdog() -> None:
                         busy = True   # 探不出来就当在忙，别瞎推
                     if not busy:
                         st["nudged"] = True
-                        bark_push(f"{config.agent_name()} 在游戏会话里停着等你回话")
+                        # 名字按**会话归属角色**取：config.agent_name() 读的是默认角色，
+                        # 玩游戏的要是别人，通知就顶着错的名字发出去。
+                        bark_push(f"{characters.display_name(_session_char())} "
+                                  "在游戏会话里停着等你回话")
             started = code_bridge.session_started_at()
             base = max(started, st["reminded"] or started)
             if started and now - base > GAME_SOFT_REMIND_SEC:

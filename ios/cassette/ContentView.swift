@@ -72,6 +72,8 @@ struct ContentView: View {
     @AppStorage("codeMode") private var codeMode = false
     @State private var codeAvailable = false          // 后端开了 Code 模式吗（没开就完全不露入口）
     @State private var codeSwitching = false          // 正在切换中：按钮转圈、挡住连点
+    @State private var codeOwner = ""                 // 「电脑上的会话」归哪个角色（空=旧后端，不设限）
+    @State private var codeOwnerName = ""             // 同上，显示用的名字
     @State private var terminalExpanded = false       // 内联终端面板展开着吗
     @State private var confirmStopBusy = false        // 退出时那边正干着活 → 先问一句
     // 游戏（game_bridge）：剧情会话复用 code 那套终端面板和消息改道；急停/引擎状态给顶栏 ⏸。
@@ -566,6 +568,13 @@ struct ContentView: View {
 
     /// 会话开关（code/游戏共用）：切入=起 code 会话；亮着时点击=关掉当前会话。
     /// 游戏会话是 TA 自己切进去的（game_start），这颗按钮对它只有「关」这半边。
+    /// 「电脑上的会话」这样东西全机只有一个，此刻归不归我这边的角色。
+    /// 后端没下发归属（旧版）→ 空串 → 不设限。已经开着的会话不受这个管：
+    /// 会话是我的时候得能点它退出，哪怕归属在会话开着之后被转走了。
+    private var codeOwnedByMe: Bool {
+        codeOwner.isEmpty || codeOwner == currentCharID || codeMode || gameSessionActive
+    }
+
     private var codeToggle: some View {
         Button(action: toggleCodeMode) {
             Group {
@@ -580,10 +589,13 @@ struct ContentView: View {
             }
             .frame(width: 40, height: 30)
             .background(Capsule().fill(sessionMode ? Color.theme : Color.clear))
+            .opacity(codeOwnedByMe ? 1 : 0.35)
         }
-        .disabled(codeSwitching)
+        .disabled(codeSwitching || !codeOwnedByMe)
         .accessibilityLabel(gameSessionActive ? "游戏会话：开（点这里收摊）"
-                            : codeMode ? "Code 模式：开（点这里退出）" : "切进 Code 模式")
+                            : codeMode ? "Code 模式：开（点这里退出）"
+                            : codeOwnedByMe ? "切进 Code 模式"
+                            : "电脑上的会话归\(codeOwnerName)，这边用不了")
     }
 
     // MARK: - 发送 / 流式接收
@@ -663,16 +675,25 @@ struct ContentView: View {
     private func syncCodeMode() async {
         guard let st = try? await chatService.codeStatus() else { return }
         codeAvailable = st.enabled && st.tmux
+        // 会话是独占资源（全机就一个）：记下归谁，按钮据此禁用 + 说明为什么。
+        // 旧后端不下发这俩字段 → 空串 = 不设限，老行为。
+        codeOwner = st.owner ?? ""
+        codeOwnerName = st.owner_name ?? ""
         // 活着的会话可能是游戏档案（TA 自己 game_start 切的）——那不是 Code 模式，
         // 别翻 codeMode、也别报「已切进 Code 模式」。终端面板走 gameSessionActive 亮起。
         let isGame = (st.profile ?? "code") == "game"
-        let gameAlive = st.alive && isGame
+        // 别人的会话不该在我这边的聊天里翻开关：会话全机唯一，但它属于起它的那个角色，
+        // 在别人的会话里亮起「已切进 Code 模式」等于把对方的活当成自己的。
+        // 后端没给 session_char（旧版/手动开的会话）就不设限，保持老行为。
+        let sc = st.session_char ?? ""
+        let sessionMine = sc.isEmpty || sc == currentCharID
+        let gameAlive = st.alive && isGame && sessionMine
         if gameAlive != gameSessionActive {
             gameSessionActive = gameAlive
             if gameAlive { chatStore.appendSystemMessage("去玩游戏了") }
             else { terminalExpanded = false }
         }
-        let codeAlive = st.alive && !isGame
+        let codeAlive = st.alive && !isGame && sessionMine
         guard st.enabled else {
             if codeMode { codeMode = false; terminalExpanded = false }
             return

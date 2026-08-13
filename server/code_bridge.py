@@ -103,6 +103,14 @@ def active_profile() -> str:
     return p if p in PROFILES else "code"
 
 
+def session_char() -> str:
+    """这次会话起的时候记下的归属角色（没记过返回空串，调用方自己退回资源归属）。
+
+    落盘而不是现算：会话开着的时候把 tmux 资源转给别人，剩下半截话就会掉进另一个人的
+    会话里——一轮对话被劈成两半，两边都看不懂。起会话那一刻钉死，收摊为止都不变。"""
+    return (_read_session_state().get("char_id") or "").strip()
+
+
 def _session() -> str:
     """当前档案的 tmux 会话名。所有会话操作（send/capture/keys/杀）都打到它头上——
     /code/* 那排路由因此对两个档案通用，终端页和弹窗按钮不用写第二份。"""
@@ -181,7 +189,7 @@ def _write_atomic(path: Path, text: str) -> None:
     tmp.replace(path)
 
 
-def _build_system(profile: str = "code") -> str:
+def _build_system(profile: str = "code", char_id: Optional[str] = None) -> str:
     """人设 + 守则，拼成本次会话的 --append-system-prompt。
     顺序有意：守则在后——它要压得住人设里"说话简短"之类的调子（简短是说话风格，
     不是干活深度）。人设里的 {{AGENT_NAME}}/{{USER_NAME}} 占位符照聊天那边一起渲染。
@@ -189,11 +197,12 @@ def _build_system(profile: str = "code") -> str:
     game 档案再往后接插件带的出厂纪律（story_discipline.md）：主仓 addendum 管通用守则，
     游戏专属的机制事实/坐标小抄跟着插件发版走，改纪律不用动主仓。
 
-    多角色：人设取**会话归属角色**的（codemode/game-story 的 owner）——
-    会话是独占资源，谁的资源谁的人设。"""
+    多角色：人设取**这次会话的归属角色**——会话吃的是 tmux 那样独占资源，谁的资源
+    谁的人设。char_id 由 start() 传进来，不在这儿现算：session.json 要等命令拼完才写，
+    这时候读它拿到的是**上一次**会话的归属（换角色起会话就会顶着前一个人的人设）。"""
     import characters
     import plugins
-    cid = plugins.owner_of("game-story" if profile == "game" else "codemode")
+    cid = char_id or session_char() or plugins.owner_of("tmux")
     files = [characters.persona_path(cid)]
     if profile == "game":
         files.append(config.game_addendum_path())
@@ -253,8 +262,11 @@ def _wait_mcp_ready(hint: str = "game_session_mcp", timeout: int = 30) -> bool:
 
 def start(context_text: str, auth_key: str, cwd: Optional[str] = None,
           mcp_configs: Optional[list] = None, profile: str = "code",
-          tools: Optional[list] = None) -> dict:
+          tools: Optional[list] = None, char_id: Optional[str] = None) -> dict:
     """杀旧起新 + 注入上下文（每次切入都是干净会话，无漂移、确定性）。
+
+    char_id＝这次会话归谁（人设取他的、会话里说的话也算他说的）。写进 session.json 钉死，
+    收摊为止不变——见 session_char()。不传就退回 tmux 资源当前的归属。
 
     退出模式时会话会被杀掉（app 那边调 /code/stop）——这样「会话活着 = 模式开着」是条
     干净的不变量，app 回前台就靠它对齐、也靠它发现 TA 自己切了进来。代价是正在跑的活会
@@ -282,12 +294,17 @@ def start(context_text: str, auth_key: str, cwd: Optional[str] = None,
         if not os.path.isdir(workdir):
             return {"ok": False, "error": f"工作目录不存在：{workdir}"}
 
+    # 这次会话归谁：算在杀旧会话**之前**没关系，但必须算在写 session.json 之前——
+    # 下面 _build_system 要用它，而那时状态文件里还躺着上一次会话的归属。
+    import plugins as _plugins
+    cid = (char_id or "").strip() or _plugins.owner_of("tmux")
+
     for p in PROFILES.values():
         _tmux("kill-session", "-t", p["session"])
     session = prof["session"]
     # context / system 写文件再由 shell 展开：几万字的历史用 send-keys 直塞必然撕裂。
     _write_atomic(CONTEXT_PATH, context_text)
-    _write_atomic(SYSTEM_PATH, _build_system(profile))
+    _write_atomic(SYSTEM_PATH, _build_system(profile, char_id=cid))
     UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
     # 上报地址/密钥用 new-session -e 传（hook 由 claude 起，env 一路继承下来）。
@@ -323,7 +340,7 @@ def start(context_text: str, auth_key: str, cwd: Optional[str] = None,
         cmd += f' "$(cat {_shq(CONTEXT_PATH)})"'
     _tmux("send-keys", "-t", session, cmd, "Enter")
     _write_session_state({"profile": profile, "session": session,
-                          "started_at": int(time.time())})
+                          "started_at": int(time.time()), "char_id": cid})
     if profile == "game":
         ready = _wait_mcp_ready()
         r2 = send(context_text)

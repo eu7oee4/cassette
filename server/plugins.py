@@ -45,6 +45,7 @@ from fastapi import HTTPException
 
 import config
 import state_store
+from notify import logerr
 
 PLUGINS_DIR = config.BASE_DIR / "plugins"          # 安装目录（gitignore，装的都是外部仓）
 
@@ -68,20 +69,147 @@ def _mcp_config_path(context: str, char_id=None):
     return state_store.char_state_dir(char_id) / name
 
 
-# 独占资源插件：背后是一份物理上只有一个的东西——MuMu 模拟器、邮箱账号、Beacon 卡、
-# tmux code 会话、带登录态的那只 Chrome。同一时刻只能归一个角色（plugin_owners.json，
-# 缺省全归默认角色）；别的角色即便拨开了启用开关也不挂载。一期不做共享/转让 UI，
-# 改归属手编 state/plugin_owners.json。
-EXCLUSIVE = {"game-maayuan", "game-story", "mail", "beacon", "codemode", "browser"}
+# ---------- 独占资源与归属 ----------
+# 归属的核心是一句话：**这东西只有一份，所以同一时刻只能给一个人用。**
+#
+# 归属记在**资源**上，不记在插件上。原因是这两者根本不是一一对应的：
+#   · 一个插件可能吃好几样（game-story 既要游戏账号、又要会话）；
+#   · 几个插件可能吃同一样（两个 game 插件共用同一个游戏账号——所以它们的归属
+#     必须一起走，按插件分开记的话，两个角色会同时上手同一个账号）。
+#
+# ⚠️ 这里列的"只有一份"分两种，别混（旧注释把它们混成一谈，是错的）：
+#
+# 【真的只有一份】——账号/装置事实，做不了第二份
+#   maayuan  机主的《如鸢》账号只有一个。注意不是"MuMu 模拟器只有一台"——模拟器可以
+#            开好几个实例，卡住的是账号（同一个号不能两处同时登）。
+#   beacon   一装置一卡。
+#
+# 【暂时只有一份】——是我们自己限成一份的，将来可以每人一份。归属只是过渡期的办法，
+# 真做成每人一份之后，对应的条目就该从 EXCLUSIVE 里删掉（它不再是独占资源）。
+#   mailbox  **这个最该做，优先级排在下面两个前面**：邮箱是身份不是设备——每个角色
+#            该有自己的信箱，共用一个意味着 A 会读到写给 B 的信。现状：账号从 .env 的
+#            CASSETTE_MAIL_* 读，state/mail/（游标 watch.json、待醒 flag、草稿、
+#            发件日志、附件）整个是全局单例，mail_bridge 全线没有角色维度。
+#            要做：接线挪进 char.json（照 characters.ombre_conf 那套「.env 兜底 +
+#            char.json 逐键覆盖」的现成模式）、state 挪进角色目录、mail_bridge 收
+#            char_id、_mail_watcher 从「看 owner 的开关」改成遍历角色各查各的。
+#            不碰常驻服务，是三个里最干净的一个。
+#   chrome   带登录态的浏览器。playwright-mcp 的端口和 --user-data-dir 本来就是
+#            参数，Chrome 多实例原生支持；卡住的是宿主侧——mounted() 现在不给插件
+#            传 env（没法按角色下发 CASSETTE_BROWSER_MCP_URL），且 browser_keeper
+#            是单例（MCP_URL 和 pgrep 特征都钉死一份）。工作量中等，不是做不到。
+#   tmux     code/game 会话。code_bridge.start() 起会话前杀光所有档案，同一时刻
+#            全机只有一个会话（当初为"意识体唯一连续"有意这么设计）。每人一台
+#            "自己的 MacBook"是能做的，留到三期工作群：会话名带角色、session.json
+#            per-char、/code/* 整排路由带角色。
+#
+# 缺省全归默认角色；不归属的角色即便拨开了启用开关也不挂载（见 mounted）。
+EXCLUSIVE: dict[str, list[str]] = {
+    "game-maayuan": ["maayuan"],
+    "game-story":   ["maayuan", "tmux"],
+    "codemode":     ["tmux"],
+    "mail":         ["mailbox"],
+    "browser":      ["chrome"],
+    "beacon":       ["beacon"],
+}
+
+# 资源的人话名（app 的归属选择器 / 报错文案用；后端下发，别让 app 猜）。
+RESOURCE_LABEL: dict[str, str] = {
+    "maayuan": "《如鸢》游戏账号",
+    "tmux": "电脑上的会话",
+    "mailbox": "邮箱账号",
+    "chrome": "带登录态的浏览器",
+    "beacon": "Beacon 卡",
+}
+
 OWNERS_PATH = state_store.STATE_DIR / "plugin_owners.json"
 
+_owner_warned: dict[str, str] = {}   # 每样资源的坏归属只喊一次，别每次挂载都刷屏
 
-def owner_of(name: str) -> str:
+
+def _read_owners() -> dict:
     try:
-        owners = json.loads(OWNERS_PATH.read_text("utf-8"))
+        return json.loads(OWNERS_PATH.read_text("utf-8"))
     except Exception:
-        owners = {}
-    return owners.get(name) or state_store.DEFAULT_CHAR_ID
+        return {}
+
+
+def resources_of(plugin: str) -> list[str]:
+    """这个插件要吃哪几样独占资源（不是独占插件则空表）。"""
+    return EXCLUSIVE.get(plugin, [])
+
+
+def owner_of(resource: str) -> str:
+    """这样资源现在归谁。文件缺席/没写这一项 = 默认角色（一期口径）。
+
+    ⚠️ 指向一个**没注册的角色**时退回默认角色并喊一条日志：这文件可以手编
+    （POST /plugins/owner 之外还留着手改的路），手一抖打错一个字，后果是吃这样
+    资源的插件对**所有**角色都不挂载（owner 谁都不等于它）——工具就那么静默消失，
+    从 app 上完全看不出原因。宁可退回默认角色（至少有人用得上），也别整个悬空。"""
+    cid = (_read_owners().get(resource) or "").strip()
+    if not cid:
+        return state_store.DEFAULT_CHAR_ID
+    import characters   # 函数内 import：characters → state_store/config，避免模块级环
+    try:
+        return characters.resolve(cid)
+    except KeyError:
+        if _owner_warned.get(resource) != cid:
+            _owner_warned[resource] = cid
+            logerr(f"plugin_owners.json 里资源「{resource}」归属写的是「{cid}」，没有这个"
+                   f"角色——已退回默认角色。改 state/plugin_owners.json 或走 POST /plugins/owner")
+        return state_store.DEFAULT_CHAR_ID
+
+
+def plugin_owned_by(plugin: str, char_id=None) -> bool:
+    """这个角色能不能用这个插件（它吃的**每一样**资源都得归他）。非独占插件恒 True。"""
+    me = char_id or state_store.DEFAULT_CHAR_ID
+    return all(owner_of(r) == me for r in resources_of(plugin))
+
+
+def plugin_owner(plugin: str) -> str:
+    """这个插件整体归谁：所有资源归同一人 → 那个人；**分属不同人 → 空串**（谁都用不了）。
+    空串是有意的——game-story 的账号归 A、会话归 B 时，真实答案就是"没人能用"，
+    随便报一个名字会让人以为它还能用。非独占插件同样返回空串（它不需要归属）。"""
+    rs = resources_of(plugin)
+    if not rs:
+        return ""
+    owners = {owner_of(r) for r in rs}
+    return owners.pop() if len(owners) == 1 else ""
+
+
+def set_owner(resource: str, char_id: str) -> dict:
+    """把一样独占资源转给某个角色（写 plugin_owners.json，原子替换）。
+    校验都在这儿：资源得是认识的、角色得真存在，别写进去一个谁都对不上的归属。"""
+    if resource not in RESOURCE_LABEL:
+        raise HTTPException(status_code=400,
+                            detail=f"没有「{resource}」这样资源（认识的：{'、'.join(RESOURCE_LABEL)}）")
+    import characters
+    try:
+        cid = characters.resolve(char_id)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    with _LOCK:
+        owners = _read_owners()
+        owners[resource] = cid
+        _atomic_write(OWNERS_PATH, owners)
+    _owner_warned.pop(resource, None)
+    return {"ok": True, "resource": resource, "owner": cid}
+
+
+def resources_status() -> list[dict]:
+    """全部独占资源 + 现在归谁 + 谁在吃它（app 的归属页数据源）。"""
+    import characters
+    out = []
+    for res, label in RESOURCE_LABEL.items():
+        cid = owner_of(res)
+        out.append({
+            "resource": res,
+            "label": label,
+            "owner": cid,
+            "owner_name": _display_name(cid),
+            "plugins": sorted(p for p, rs in EXCLUSIVE.items() if res in rs),
+        })
+    return out
 
 # 醒来那条路不挂的插件。
 #
@@ -210,7 +338,9 @@ REGISTRY: dict[str, dict] = {
     #   派完就返回、结果之后自己去查。醒来开关关着的时候整族不挂（WAKE_TOGGLEABLE）。
     # game-story 是「TA 自己去玩」——常驻会话里本人盲操，是消遣不是干活。起初随 codemode
     #   硬禁，08-13 机主改成开关制（看守/急停/消耗护栏兜底齐了）。
-    # 两个都独占同一台模拟器（EXCLUSIVE），同一时刻只归一个角色。
+    # 两个都吃同一个《如鸢》账号（EXCLUSIVE 的 maayuan 资源），所以归属绑在一起走：
+    # 改一次账号归属，两个插件一起跟着走，不会出现两个角色同时上手同一个号。
+    # game-story 还额外吃 tmux 会话——两样都归你才挂得上。
     #
     # ⚠️ 两个都有**宿主侧前提**，装完不配好是跑不起来的（同 browser 要先起服务）：
     # MuMu 模拟器装好、游戏登录过、分辨率切 720×1280@320、`.env` 里 GAME_MODE_ENABLED=1
@@ -297,6 +427,15 @@ def _installed_commit(name: str) -> str:
     return raw[:7] if len(raw) >= 7 and all(c in "0123456789abcdef" for c in raw) else ""
 
 
+def _display_name(cid: str) -> str:
+    """角色显示名，取不到就退回 id（列表宁可显示 id，也别显示空白）。"""
+    try:
+        import characters
+        return characters.display_name(cid) or cid
+    except Exception:
+        return cid
+
+
 def list_status(char_id=None) -> list[dict]:
     """registry ∪ 已安装 → 三态清单（not_installed / disabled / enabled）。
     开关状态按角色读；独占插件额外带 exclusive/owned 字段（不归这个角色 = 商店里可见
@@ -333,8 +472,14 @@ def list_status(char_id=None) -> list[dict]:
             "wake_toggle_title": WAKE_TOGGLE_TEXT.get(name, _WAKE_TOGGLE_DEFAULT)[0],
             "wake_toggle_desc": WAKE_TOGGLE_TEXT.get(name, _WAKE_TOGGLE_DEFAULT)[1],
             # 独占资源插件的归属（见 EXCLUSIVE）：owned=False 时开了也不挂载。
+            # owner/owner_name/resources 一并下发——app 光知道「不归你」没法说清归谁、
+            # 也没法告诉人该去改哪样资源，而「开关拨开了却没有这个工具」不给归属
+            # 就是个查不出原因的谜。owner 为空串＝它吃的几样资源分属不同人，谁都用不了。
             "exclusive": name in EXCLUSIVE,
-            "owned": name not in EXCLUSIVE or owner_of(name) == me,
+            "owned": plugin_owned_by(name, me),
+            "owner": plugin_owner(name),
+            "owner_name": _display_name(plugin_owner(name)) if plugin_owner(name) else "",
+            "resources": resources_of(name),
         }
         out.append(item)
     return out
@@ -453,7 +598,7 @@ def shadowed_tools(context: str = "chat", char_id=None) -> list[str]:
     for name, excl in WAKE_TOOL_EXCLUDE.items():
         if not enabled.get(name) or wake_on.get(name):
             continue                                  # 没启用 / 开关开着 → 没有被摘的
-        if name in EXCLUSIVE and owner_of(name) != me:
+        if not plugin_owned_by(name, me):
             continue                                  # 不归这个角色 → 整插件都没挂
         m = _read_manifest(name)
         if m is None:
@@ -468,7 +613,8 @@ def mounted(context: str = "chat", char_id=None) -> tuple[Optional[str], list[st
 
     context＝这次是给谁挂：'chat'（聊天，全挂）或 'wake'（醒来，摘掉 NO_WAKE_PLUGINS）。
     认不出的 context 一律按 chat 处理——多挂比少挂容易被发现，静默少挂会让人以为工具坏了。
-    独占插件（EXCLUSIVE）只挂给归属角色：别的角色开关开着也跳过——那份物理资源不是它的。"""
+    独占插件只挂给归属角色：别的角色开关开着也跳过——那份资源不是它的。判据是
+    plugin_owned_by（它吃的**每一样**资源都得归你），不是单看插件名。"""
     cfg_path = _mcp_config_path(context, char_id)
     me = char_id or state_store.DEFAULT_CHAR_ID
     wake_on: dict = {}
@@ -486,7 +632,7 @@ def mounted(context: str = "chat", char_id=None) -> tuple[Optional[str], list[st
     for name, on in sorted(enabled.items()):
         if not on or name in blocked:
             continue
-        if name in EXCLUSIVE and owner_of(name) != me:
+        if not plugin_owned_by(name, me):
             continue
         m = _read_manifest(name)
         if m is None:
