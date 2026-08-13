@@ -111,8 +111,21 @@ WAKE_TOGGLEABLE = {"browser", "beacon", "mail", "game-maayuan", "game-story"}
 # 既定用法），所以整插件不能一刀切；发信是对外动作——白名单+草稿箱已经拦住陌生
 # 收件人，默认摘掉 send 挡的是剩下那半截：凌晨三点没人看着，要不要能往白名单地址
 # （机主自己）发信，开关交机主（2026-08-11 拍板做成开关）。
-# 机制：只从 --tools/--allowedTools 白名单里摘（strict 模式白名单外调不了），
-# mcp server 本身照起，不用插件配合。
+# 机制：只从 --tools/--allowedTools 白名单里摘，mcp server 本身照起，不用插件配合。
+#
+# ⚠️ 2026-08-13 实测更正（原来这儿写的机制是错的）：摘出白名单**只挡执行、不挡 schema**。
+# 同一个 mail server，白名单给 4 个工具和给 3 个（摘掉 mail_send），
+# 总输入 token 完全一样（2,979 = 2,979），连 init 那份清单都照样显示 4 个。
+# 也就是说被摘的工具 TA **看得见、会去调**，只是调到一半被权限闸拦下
+# （tool_result is_error=True：「requested permissions to use …, but you haven't granted it yet」）。
+# 所以三层要分开记：
+#   · --allowedTools 是权限闸，**守住了**——这层是安全性，没漏；
+#   · --tools 没能把 schema 从上下文里摘掉——省不了 token，更要命的是 TA 会
+#     以为自己有这个能力（可能先答应机主「我给你发一封」再失败，白烧一轮）；
+#   · 真要从源头摘掉，得让 MCP server 自己不注册那个工具（要插件配合传 env）——
+#     见 PLAN_tool_exclude.md，那是这条的正解，这里的注释别再照旧前提往下设计。
+# 眼下的止血：shadowed_tools() 把这些"看得见但用不了"的工具算出来，
+# 由 pipeline.tool_menu_block 在菜单末尾如实告诉 TA 别去调。
 WAKE_TOOL_EXCLUDE: dict[str, set[str]] = {"mail": {"mail_send"}}
 
 # 「醒来能用」开关在商店里的文案（标题, 说明）。工具级摘除的插件开关语义变细了，
@@ -415,6 +428,33 @@ def uninstall(name: str) -> dict:
                 enabled.pop(name, None)
                 _atomic_write(_enabled_path(cid), enabled)
     return {"ok": True, "state": "not_installed"}
+
+
+def shadowed_tools(context: str = "chat", char_id=None) -> list[str]:
+    """这一轮**schema 在上下文里、但白名单里没有**的工具全名（调了必被权限闸拒）。
+
+    只有 WAKE_TOOL_EXCLUDE 这条路会产生这种工具：插件照挂（server 起着、schema 照发），
+    只从白名单里摘掉个别工具。NO_WAKE_PLUGINS / 开关没开的插件是**整个不挂**，
+    server 都不起，schema 自然不在上下文里——那些不算。
+
+    算出来给 prompt 用（见 pipeline.tool_menu_block 末尾）：不说的话 TA 看着 schema
+    会当自己有这能力，可能先答应机主再失败。详见 WAKE_TOOL_EXCLUDE 上面那段实测。"""
+    if context != "wake":
+        return []
+    wake_on = _read_wake_enabled(char_id)
+    enabled = _read_enabled(char_id)
+    me = char_id or state_store.DEFAULT_CHAR_ID
+    out: list[str] = []
+    for name, excl in WAKE_TOOL_EXCLUDE.items():
+        if not enabled.get(name) or wake_on.get(name):
+            continue                                  # 没启用 / 开关开着 → 没有被摘的
+        if name in EXCLUSIVE and owner_of(name) != me:
+            continue                                  # 不归这个角色 → 整插件都没挂
+        m = _read_manifest(name)
+        if m is None:
+            continue
+        out += [f"mcp__{name}__{t}" for t in m["tools"] if t in excl]
+    return out
 
 
 def mounted(context: str = "chat", char_id=None) -> tuple[Optional[str], list[str]]:

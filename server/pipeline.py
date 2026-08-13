@@ -526,7 +526,23 @@ def tool_menu_block(context: str = "chat", char_id: Optional[str] = None) -> str
         head = (f"【你手上有这些能力。这些工具的**用法**默认没加载，想用哪个先用 "
                 f"{TOOL_SEARCH_TOOL} 取：query 写 \"select:工具全名\"，逗号分隔可以一次取好几个。"
                 f"没取用法就直接调一定失败。别因为只看见名字就以为自己没这能力。】")
-    return head + "\n" + "\n".join(lines)
+
+    # 「看得见但用不了」的工具：schema 还在上下文里（--tools 摘不掉，实测见
+    # plugins.WAKE_TOOL_EXCLUDE 上面那段），但白名单里没有，调了必被权限闸拒。
+    # 不说的话 TA 会当自己有这能力——可能先答应机主"我给你发一封"再失败，白烧一轮。
+    # 这是止血；正解是让 server 别注册那个工具（PLAN_tool_exclude.md）。
+    try:
+        import plugins
+        shadowed = plugins.shadowed_tools(context, char_id)
+    except Exception as e:
+        logerr(f"算 shadowed_tools 失败（不影响菜单）: {e}")
+        shadowed = []
+    tail = ""
+    if shadowed:
+        tail = ("\n【这几个这轮**用不了**（机主关掉了）：" + "、".join(shadowed) +
+                "。你可能会看到它们的用法，但调用会被拒——别去调，也别跟"
+                f"{config.user_name()}说你能做这件事。】")
+    return head + "\n" + "\n".join(lines) + tail
 
 
 # ---------- 子进程 ----------
