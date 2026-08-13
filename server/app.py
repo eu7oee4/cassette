@@ -1298,7 +1298,12 @@ def game_tasks_stop(x_auth: Optional[str] = Header(default=None, alias="X-Auth")
 GAME_SESSION_TOOLS = [f"mcp__game__{t}" for t in (
     "game_look", "game_watch", "game_tap", "game_swipe", "game_back",
     "game_launch", "game_close", "game_quit", "game_end",
-    "game_notes_read", "game_notes_write")]
+    "game_notes_read", "game_notes_write")] + [
+    # 内置 Read 只为一件事：看机主随消息发来的图（/code/send 落到 uploads/，路径写在
+    # 消息里）。路径规则限定到上传目录——读别处会弹权限，不是静默放行（code_bridge
+    # 会把这条剥成裸名进 --tools、完整规则进 --allowedTools）。
+    f"Read(/{code_bridge.UPLOAD_DIR}/**)",
+]
 
 _GAME_CTX_CAVEAT = (
     "\n【关于上面这些对话】里面凡是关于游戏进度/剧情/界面的具体说法，都是你在聊天里"
@@ -1349,7 +1354,7 @@ def game_story_start(inp: GameStoryStartIn,
     u = config.user_name()
     scene = (f"【场景】刚才在聊天里说好了你去玩游戏，你自己调 game_start 切过来了——还是你，"
              "现在这个会话里你手上有模拟器里的游戏（game_* 工具 + 你的记忆；没有电脑，"
-             f"读不了文件也跑不了命令）。这个会话是常驻的：{u}随时会插话，"
+             f"跑不了命令，Read 只用来看 {u} 发来的图）。这个会话是常驻的：{u}随时会插话，"
              "你说的每段话都实时回到 TA 的聊天气泡里。")
     timeline = pipeline.build_context_timeline(conv, reflect_limit=5) if conv else "（还没聊过什么）"
     tail = (f"\n【这次去干什么】\n〔现在是 {pipeline.now_str()}〕\n{task}\n"

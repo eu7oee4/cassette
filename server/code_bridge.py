@@ -307,12 +307,16 @@ def start(context_text: str, auth_key: str, cwd: Optional[str] = None,
     settings = _hook_settings()
     if settings:
         cmd += f" --settings {_shq(settings)}"
-    if profile == "code":
-        # 图片落在 state/code_uploads/，工作目录多半不包含它 → 显式给访问权。
-        cmd += f" --add-dir {_shq(UPLOAD_DIR)}"
+    # 图片落在 state/code_mode/uploads/，工作目录多半不包含它 → 显式给访问权。
+    # game 档案也要：机主随消息发图，TA 靠 Read 看（见 tools 里的路径限定规则）。
+    cmd += f" --add-dir {_shq(UPLOAD_DIR)}"
     if tools:
-        tl = ",".join(tools)
-        cmd += f" --strict-mcp-config --tools {_shq(tl)} --allowedTools {_shq(tl)}"
+        # --tools 收的是工具名（带路径规则的条目剥成裸名）；--allowedTools 收完整规则。
+        # 这样 app.py 可以传 "Read(//…/uploads/**)"：工具可用，但只有上传目录免弹窗，
+        # 读别处照弹权限（机主在终端页看得见、按不按 TA 说了不算）。
+        tl_avail = ",".join(t.split("(", 1)[0] for t in tools)
+        tl_allow = ",".join(tools)
+        cmd += f" --strict-mcp-config --tools {_shq(tl_avail)} --allowedTools {_shq(tl_allow)}"
     # ⚠️ 结尾必须是只吃一个值的 --append-system-prompt，位置参数（context）才落得对位。
     cmd += f' --append-system-prompt "$(cat {_shq(SYSTEM_PATH)})"'
     if profile == "code":
