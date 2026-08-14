@@ -12,6 +12,7 @@ cassette 后端（无状态版）。
 import asyncio
 import base64
 import json
+import os
 import re
 import secrets
 import subprocess
@@ -21,6 +22,22 @@ import time
 import uuid
 from contextlib import asynccontextmanager
 from typing import Optional
+
+# ⚠️ 进程级消毒：把**别的项目的** Claude Code hook 门闩和回报地址从环境里摘掉。
+#
+# 为什么：这个后端常被 `nohup ... &` 起成孤儿进程，于是它继承了启动它的那个 shell 的
+# 整套环境。而同一台机器上可能装着别的项目的**全局** Stop/PostToolUse hook——挂在
+# `~/.claude/settings.json` 上的 hook 对这台机器的每一个 claude 进程都触发，而那类 hook
+# 往往只拿一个环境变量当门闩。变量一旦被继承下来，我们起的每一个 `claude -p` 都会被
+# 判成"是那个项目的会话"，于是它说的每一段话都被 POST 到别人的后端去。
+#
+# 这不是假想：只要在那种项目的终端里重启过一次本后端，此后每一次醒来的输出都会漏过去，
+# 而且两边都不会报错——它看起来一切正常，只是内容出现在了不该出现的地方。
+#
+# 放在这里（所有子进程路径的上游）而不是 pipeline._subprocess_env()：走子进程的不只
+# claude -p，还有 tmux 会话、MCP stdio、browser keeper。在进程级摘一次，全都干净。
+for _k in ("MM_CODE_SEGMENTS", "CCC_HOOK_ENABLE", "CCC_SERVER_URL", "CCC_AUTH_TOKEN"):
+    os.environ.pop(_k, None)
 
 from fastapi import FastAPI, Header, HTTPException
 from fastapi.encoders import jsonable_encoder
