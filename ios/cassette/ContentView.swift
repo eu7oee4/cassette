@@ -168,13 +168,16 @@ struct ContentView: View {
         .environmentObject(profileStore)
         // 手机悬浮层（houseAsRoot）：聊天整体装进全屏 cover——所有聊天状态仍在本 View，
         // 掏出/收起只是换个地方渲染，流式生成、轮询循环都不中断。
-        // 挂在 environmentObject 之后：cover 内容继承挂载点的环境，ChatView 要 profileStore。
+        // ⚠️ cover 的内容是另一棵呈现树，**继承不到**下面 ZStack 上挂的 environmentObject
+        // （.environmentObject 只罩自己的子树，cover 挂在它外层）——必须显式再挂一份，
+        // 不然 ChatView 的 @EnvironmentObject 一渲染就 fatal（实锤：点手机钮闪退）。
         .fullScreenCover(isPresented: $phoneOpen) {
             VStack(spacing: 0) {
                 header
                 chatBody
             }
             .background(Color(.systemBackground))
+            .environmentObject(profileStore)
         }
         // 页面返回（栈清空）不重开抽屉——直接回聊天界面。
         // （原先按"聊天 → 抽屉 → 页面"逐层退设计，实际用起来是：从记忆页返回还得再关
