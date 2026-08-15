@@ -16,8 +16,15 @@
     owner 字段才是权威链接，展示名在注册表 `name` 里可手编。
   - 地点状态的编辑（用户和 AI 一样）**要求在场**；偷看是纯只读。
   - 世界观三条（有位置 / 认知边界 / 别人是真的）落在 C1 醒来提示词模板，不碰任何 persona。
-- **C1 醒来统一模型 + ACTION 协议**：注入组装、act/phone/move 解析与组合规则、
-  move 补醒链、世界观三条进提示词。
+- **C1 醒来统一模型 + ACTION 协议** ✅（2026-08-16）：`server/cohabit.py`（注入组装 /
+  协议解析 / 动作落地 / move 结果补醒链）+ 单测 `tests/test_cohabit.py`（18 个，模型用
+  罐头替身）。协议 = THOUGHTS / ACTION(none·act·phone) / MOTION / SAY / STATE / PHONE /
+  MOVE / NEXT 八段；组合规则**在解析处结构性执行**（act/phone 互斥字段直接丢弃、STATE
+  超 3 条截断、MOVE 目的地必须是注册房间）。世界观三条落在 `_WORLDVIEW` 模板；
+  认知边界从注入源头执行（可去清单不带在场者）。phone 复用 wake.try_push 全套
+  （表情/打扰控制/outbox/Bark）；NEXT 落调度口径同 do_wake_sync。补醒链在模块内直接
+  递归，深度硬停 N_CHAIN=4（C2 队列化连发上限落地后取代它）。**尚未接任何触发**，
+  现有 wake.py 一字未动，两条路并存到 C4 切换。
 - **C2 触发与闸**：事件醒来（作者排除）、自主醒来（独处即可）、手机醒来附加 move；
   执行锁并发=1、注入执行时组装、单 pending 原因合并、连发上限 N=4 入队拦。
   **C2 完成前不把事件流接到真角色上。**
