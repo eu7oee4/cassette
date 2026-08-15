@@ -22,6 +22,13 @@ struct ConversationsPage: View {
                         Text(displayName(c))
                             .font(.body.weight(.medium))
                             .foregroundStyle(.primary)
+                        // 在场状态优先于消息预览：正在电脑前的人，先说清「可能无法及时回复」
+                        if let line = c.statusLine {
+                            Text(line)
+                                .font(.footnote)
+                                .foregroundStyle(Color.theme)
+                                .lineLimit(1)
+                        }
                         let preview = chatStore.preview(for: c.id)
                         if !preview.isEmpty {
                             Text(preview)

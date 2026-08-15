@@ -13,6 +13,18 @@ enum CurrentCharacter {
 struct CharacterInfo: Decodable, Identifiable, Equatable {
     let id: String
     let display_name: String
+    /// 在场状态："code"/"game"（正在电脑前）/ nil。旧缓存没这个键 → 合成 Decodable
+    /// 对可选走 decodeIfPresent，照解。
+    var status: String?
+
+    /// 手机侧的状态一行字（会话列表 / 聊天头显示；nil = 不显示）。
+    var statusLine: String? {
+        switch status {
+        case "code": return "正在敲代码，可能无法及时回复"
+        case "game": return "正在玩游戏，可能无法及时回复"
+        default:     return nil
+        }
+    }
 }
 
 /// 角色清单：从后端拉，本地缓存一份（离线/冷启动时会话列表照样能画）。

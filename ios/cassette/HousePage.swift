@@ -1,0 +1,294 @@
+import SwiftUI
+
+/// 小屋（房子视图，PLAN_cohabit C3）：三层平面、谁在哪、出门/回家开关。
+/// 点房间 → 三选一：去这里（真实移动，过门禁）/ 偷看一眼（上帝视角）/ 取消。
+/// 配色走 Color.house（Theme.swift，一键换肤），不随系统深浅色走——小屋是独立的暖色世界。
+struct HousePage: View {
+    @EnvironmentObject private var profileStore: ProfileStore
+    @Environment(\.scenePhase) private var scenePhase
+
+    @State private var world: WorldSnapshot?
+    @State private var floor = 2
+    @State private var pendingRoom: WorldRoom?    // 点了哪个房间（弹三选一）
+    @State private var nav: RoomNav?
+    @State private var lockedText: String?        // 门锁着的提示
+    @State private var loadError = false
+
+    private let service = ChatService()
+    private let floors: [(Int, String)] = [(2, "2楼"), (1, "1楼"), (0, "地下室")]
+
+    var body: some View {
+        ZStack {
+            Color.house.bg.ignoresSafeArea()
+            VStack(spacing: 0) {
+                header
+                floorTabs
+                ScrollView {
+                    VStack(spacing: 14) {
+                        floorContent
+                        hallwayRow
+                        awayRow
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 14)
+                }
+            }
+        }
+        .toolbar(.hidden, for: .navigationBar)
+        .navigationDestination(item: $nav) { n in
+            RoomPage(roomID: n.roomID, title: n.title, peek: n.peek)
+        }
+        .confirmationDialog(pendingRoom?.name ?? "", isPresented: Binding(
+            get: { pendingRoom != nil }, set: { if !$0 { pendingRoom = nil } }),
+            titleVisibility: .visible) {
+            if let room = pendingRoom {
+                Button(userLocation == room.id ? "进去（你在这里）" : "去这里") { goTo(room) }
+                Button("偷看一眼") { nav = RoomNav(roomID: room.id, title: room.name, peek: true) }
+                Button("取消", role: .cancel) {}
+            }
+        }
+        .alert("门锁着", isPresented: Binding(
+            get: { lockedText != nil }, set: { if !$0 { lockedText = nil } })) {
+            Button("好吧", role: .cancel) {}
+        } message: { Text(lockedText ?? "") }
+        .task(id: scenePhase) {
+            guard scenePhase == .active else { return }
+            await refresh()
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(3))
+                await refresh()
+            }
+        }
+    }
+
+    // MARK: - 数据
+
+    private var userLocation: String { world?.entities["user"]?.location ?? "" }
+
+    private func refresh() async {
+        do {
+            world = try await service.getWorld()
+            loadError = false
+        } catch { loadError = world == nil }
+    }
+
+    private func goTo(_ room: WorldRoom) {
+        Task {
+            do {
+                let mv = try await service.worldMove(to: room.id)
+                if mv.ok {
+                    await refresh()
+                    nav = RoomNav(roomID: room.id, title: room.name, peek: false)
+                } else {
+                    lockedText = mv.text ?? "门锁着，没进去"
+                }
+            } catch { lockedText = "没走成：\(error.localizedDescription)" }
+        }
+    }
+
+    private func toggleAway() {
+        Task {
+            // 出门 = away；回家 = 先落走廊（回到楼里，想进哪个房间再点）。
+            _ = try? await service.worldMove(to: userLocation == "away" ? "hallway" : "away")
+            await refresh()
+        }
+    }
+
+    // MARK: - 头部 / 楼层
+
+    private var header: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "house.fill")
+                .font(.system(size: 17))
+                .foregroundStyle(Color.house.accent)
+                .frame(width: 38, height: 38)
+                .background(Circle().fill(Color.house.surface))
+            VStack(alignment: .leading, spacing: 2) {
+                Text("小屋").font(.title3.bold()).foregroundStyle(Color.house.textPrimary)
+                Text(subtitle).font(.caption).foregroundStyle(Color.house.textSecondary)
+            }
+            Spacer()
+            Button(action: toggleAway) {
+                Label(userLocation == "away" ? "回家" : "出门",
+                      systemImage: userLocation == "away" ? "figure.walk.arrival" : "figure.walk.departure")
+                    .font(.footnote.bold())
+                    .foregroundStyle(Color.house.accent)
+                    .padding(.horizontal, 12).padding(.vertical, 7)
+                    .background(Capsule().fill(Color.house.surface))
+            }
+        }
+        .padding(.horizontal, 16).padding(.top, 8).padding(.bottom, 10)
+    }
+
+    private var subtitle: String {
+        guard let w = world else { return loadError ? "连不上小屋" : "加载中…" }
+        let total = w.entities.count
+        let home = w.entities.values.filter { $0.location != "away" }.count
+        return "共 \(total) 位住户 · \(home) 人在家"
+    }
+
+    private var floorTabs: some View {
+        HStack(spacing: 6) {
+            ForEach(floors, id: \.0) { f, name in
+                let opened = openedFloors.contains(f)
+                Button {
+                    if opened { floor = f }
+                } label: {
+                    HStack(spacing: 4) {
+                        if !opened { Image(systemName: "lock").font(.caption2) }
+                        Text(name).font(.footnote.bold())
+                    }
+                    .foregroundStyle(floor == f ? Color.house.onAccent
+                                     : opened ? Color.house.textPrimary : Color.house.textSecondary)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 10)
+                    .background(Capsule().fill(floor == f ? Color.house.accent : Color.house.surfaceHi))
+                }
+            }
+        }
+        .padding(.horizontal, 16).padding(.bottom, 4)
+    }
+
+    private var openedFloors: Set<Int> { Set((world?.rooms ?? []).map(\.floor)) }
+
+    // MARK: - 房间卡片
+
+    @ViewBuilder
+    private var floorContent: some View {
+        let rooms = (world?.rooms ?? []).filter { $0.floor == floor }
+        if rooms.isEmpty {
+            VStack(spacing: 10) {
+                Image(systemName: "lock.fill")
+                    .font(.system(size: 30)).foregroundStyle(Color.house.textSecondary)
+                Text("这层还没开放").font(.footnote).foregroundStyle(Color.house.textSecondary)
+            }
+            .frame(maxWidth: .infinity).padding(.vertical, 60)
+        } else {
+            ForEach(rooms) { room in
+                Button { pendingRoom = room } label: { roomCard(room) }
+                    .buttonStyle(.plain)
+            }
+        }
+    }
+
+    private func roomCard(_ room: WorldRoom) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack {
+                Text(room.name).font(.headline).foregroundStyle(Color.house.textPrimary)
+                if room.lock == 1 {
+                    Image(systemName: "lock.fill")
+                        .font(.caption).foregroundStyle(Color.house.textSecondary)
+                }
+                Spacer()
+                if room.occupants.contains("user") {
+                    Text("你在这里").font(.caption2.bold())
+                        .foregroundStyle(Color.house.onAccent)
+                        .padding(.horizontal, 8).padding(.vertical, 3)
+                        .background(Capsule().fill(Color.house.accent))
+                }
+            }
+            Spacer(minLength: 34)
+            if room.occupants.isEmpty {
+                Text("空房").font(.caption).foregroundStyle(Color.house.textSecondary)
+            } else {
+                HStack(spacing: -8) {
+                    ForEach(room.occupants, id: \.self) { eid in
+                        HouseAvatarChip(entityID: eid, entity: world?.entities[eid], size: 40)
+                    }
+                }
+            }
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, minHeight: 128, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 20).fill(Color.house.surface))
+        .overlay(RoundedRectangle(cornerRadius: 20).stroke(Color.house.line, lineWidth: 1))
+    }
+
+    // MARK: - 走廊 / 出门
+
+    @ViewBuilder
+    private var hallwayRow: some View {
+        if let w = world {
+            let ids = w.ids(at: "hallway")
+            if !ids.isEmpty {
+                HStack(spacing: 10) {
+                    Image(systemName: "door.left.hand.open")
+                        .foregroundStyle(Color.house.textSecondary)
+                    Text("走廊").font(.footnote).foregroundStyle(Color.house.textSecondary)
+                    Spacer()
+                    HStack(spacing: -8) {
+                        ForEach(ids, id: \.self) { eid in
+                            HouseAvatarChip(entityID: eid, entity: w.entities[eid], size: 30)
+                        }
+                    }
+                }
+                .padding(.horizontal, 14).padding(.vertical, 10)
+                .background(RoundedRectangle(cornerRadius: 14).fill(Color.house.surfaceHi.opacity(0.6)))
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var awayRow: some View {
+        if let w = world {
+            let names = w.ids(at: "away").compactMap { w.entities[$0]?.name }
+            if !names.isEmpty {
+                Text("出门在外：\(names.joined(separator: "、"))")
+                    .font(.caption).foregroundStyle(Color.house.textSecondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 4)
+            }
+        }
+    }
+}
+
+/// 房间视图的跳转参数。
+struct RoomNav: Identifiable, Hashable {
+    let roomID: String
+    let title: String
+    let peek: Bool
+    var id: String { "\(roomID)-\(peek)" }
+}
+
+/// 实体头像小圆片：有头像图用图（user=me.png，角色=char_<id>.png），没有就名字首字。
+/// 正在电脑前的角色右下角带个小键盘/手柄角标。
+struct HouseAvatarChip: View {
+    @EnvironmentObject private var profileStore: ProfileStore
+    let entityID: String
+    let entity: WorldEntity?
+    var size: CGFloat = 40
+
+    var body: some View {
+        ZStack(alignment: .bottomTrailing) {
+            avatarCircle
+            if let s = entity?.status {
+                Image(systemName: s == "game" ? "gamecontroller.fill" : "keyboard.fill")
+                    .font(.system(size: size * 0.28))
+                    .foregroundStyle(Color.house.onAccent)
+                    .padding(3)
+                    .background(Circle().fill(Color.house.accent))
+                    .offset(x: 3, y: 3)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var avatarCircle: some View {
+        let image = entityID == "user" ? profileStore.meAvatar
+                                       : profileStore.avatarImage(forCharacter: entityID)
+        Group {
+            if let image {
+                Image(uiImage: image).resizable().scaledToFill()
+            } else {
+                Text(String((entity?.name ?? entityID).prefix(1)))
+                    .font(.system(size: size * 0.42, weight: .bold))
+                    .foregroundStyle(Color.house.textPrimary)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .background(Color.house.surfaceHi)
+            }
+        }
+        .frame(width: size, height: size)
+        .clipShape(Circle())
+        .overlay(Circle().stroke(Color.house.accent.opacity(0.7), lineWidth: 2))
+    }
+}

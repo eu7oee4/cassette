@@ -187,6 +187,8 @@ struct ContentView: View {
                 switchCharacter(to: c.id)
                 navPath.removeAll()
             }
+        case .house:
+            HousePage()
         case .memory:
             MemoryPage()
         case .mind:

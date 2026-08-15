@@ -15,9 +15,40 @@ extension ThemePalette {
     )
 }
 
+/// 小屋（同居世界）的整套配色：房子/房间视图是一个独立的暖色深色世界，不随系统深浅色走。
+/// 换主题 = 换 `Color.house` 指向的 palette（一处改，整个小屋换肤）——token 齐全，
+/// 新主题只要填满这几个字段。
+struct HousePalette {
+    let bg: Color            // 页面背景（最深）
+    let surface: Color       // 房间卡片 / 面板底
+    let surfaceHi: Color     // 抬高一层的面板（未选 tab、输入框底）
+    let accent: Color        // 强调色（选中 tab、按钮、你在这里）
+    let onAccent: Color      // 强调色上的文字
+    let textPrimary: Color   // 主文字
+    let textSecondary: Color // 次要文字（空房、时间戳、系统灰线）
+    let line: Color          // 描边 / 分隔线
+}
+
+extension HousePalette {
+    /// 蜂蜜焦糖（2026-08-16 从 v0 稿采样；机主给精确色值后在此替换）。
+    static let honeyCaramel = HousePalette(
+        bg: Color(hex: 0x150A06),
+        surface: Color(hex: 0x241710),
+        surfaceHi: Color(hex: 0x2D1E18),
+        accent: Color(hex: 0xE29858),
+        onAccent: Color(hex: 0x2D1E18),
+        textPrimary: Color(hex: 0xCDC2B9),
+        textSecondary: Color(hex: 0xA69489),
+        line: Color(hex: 0x3A281D)
+    )
+}
+
 extension Color {
     /// 当前生效的主题（以后做换主题时，改成从 UserDefaults 读用户选中的那套）。
     static let current = ThemePalette.violet
+
+    /// 小屋当前主题：换主题改这一行。
+    static let house = HousePalette.honeyCaramel
 
     static var theme: Color { current.accent }
     static var bubbleMe: Color { current.bubbleMe }
