@@ -117,7 +117,7 @@ struct HousePage: View {
                             .foregroundStyle(Color.house.onAccent)
                             .frame(width: 56, height: 56)
                             .background(Circle().fill(Color.house.accent))
-                            .shadow(color: .black.opacity(0.4), radius: 8, y: 3)
+                            .shadow(color: .black.opacity(0.18), radius: 8, y: 3)
                         if unreadCount > 0 {
                             Text("\(unreadCount)")
                                 .font(.caption2.bold())
@@ -335,6 +335,6 @@ struct HouseAvatarChip: View {
         }
         .frame(width: size, height: size)
         .clipShape(Circle())
-        .overlay(Circle().stroke(Color.house.accent.opacity(0.7), lineWidth: 2))
+        .overlay(Circle().stroke(Color.house.accentLight, lineWidth: 2))
     }
 }
