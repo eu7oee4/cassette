@@ -138,6 +138,9 @@ def main() -> None:
 
     settings = json.loads(src_settings.read_text("utf-8"))
     settings["agent_name"] = DISPLAY_NAME
+    # 落地即休眠：mianmian 侧退役前两边不能同时让 Cass 醒来（plan 第一条：不双活）。
+    # 切换日 unload mianmian 后端之后，再在 app 设置页（或手编本文件）把 enabled 打开。
+    settings["enabled"] = False
 
     char_json = {
         "display_name": DISPLAY_NAME,
