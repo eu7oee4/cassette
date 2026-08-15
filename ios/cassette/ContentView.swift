@@ -77,6 +77,10 @@ struct ContentView: View {
     @State private var codeSwitching = false          // 正在切换中：按钮转圈、挡住连点
     @State private var codeOwner = ""                 // 「电脑上的会话」归哪个角色（空=旧后端，不设限）
     @State private var codeOwnerName = ""             // 同上，显示用的名字
+    /// 正开着的那个会话是**谁**起的（/code/status 的 session_char，起会话时就钉死了）。
+    /// 空 = 旧后端/手动开的会话，不设限。codeMode/gameSessionActive 只说"会话活着、是什么档案"，
+    /// 归谁全靠这个字段——两件事拆开，切会话才能当场断路由、不用等一次网络往返。
+    @State private var sessionChar = ""
     @State private var terminalExpanded = false       // 内联终端面板展开着吗
     @State private var confirmStopBusy = false        // 退出时那边正干着活 → 先问一句
     // 游戏（game_bridge）：剧情会话复用 code 那套终端面板和消息改道；急停/引擎状态给顶栏 ⏸。
@@ -85,9 +89,19 @@ struct ContentView: View {
     @State private var gameEngineRunning = false      // 任务引擎正在跑
     @State private var gamePauseSwitching = false     // ⏸ 切换中：转圈 + 挡连点
     /// 顶栏要不要露 ⏸：引擎在跑 / 剧情会话开着 / 已经急停着（得能解除）任一为真。
-    private var gamePauseVisible: Bool { gameEngineRunning || gameSessionActive || gamePaused }
+    private var gamePauseVisible: Bool { gameEngineRunning || gameMine || gamePaused }
+    /// 活着的那个会话归不归我这边的角色。空 session_char（旧后端/手动开的会话）= 不设限。
+    /// ⚠️ 这是个**派生值**，不是同步来的状态：切会话那一瞬间它就变了，不等 /code/status。
+    private var sessionMine: Bool { sessionChar.isEmpty || sessionChar == currentCharID }
+    /// 「会话活着」和「会话是我的」是两件事，UI 和路由要的一律是后者——
+    /// 别直接读 codeMode / gameSessionActive，读这三个。
+    /// 病根：codeMode 是全局开关，而它只在回前台的 syncCodeMode 里校准（轮询循环里没有它，
+    /// switchCharacter 里也没有）。所以「在 A 的会话开着 code → 切到 B → 给 B 打字」
+    /// 走的还是 sessionMode=true 那条路，整句话被塞进 A 的 tmux，B 从没收到过。
+    private var codeMine: Bool { codeMode && sessionMine }
+    private var gameMine: Bool { gameSessionActive && sessionMine }
     /// 消息该改道 tmux 会话吗（code 和游戏剧情共用同一条管道）。
-    private var sessionMode: Bool { codeMode || gameSessionActive }
+    private var sessionMode: Bool { codeMine || gameMine }
     /// 气泡区此刻有多高。终端面板是**盖在**气泡区上的 overlay，高度以它为唯一上限——
     /// 所以面板绝不可能越过顶栏，键盘/附件条/输入框长高也都不用单独算：那些一动，
     /// 气泡区就变矮，这个值自己跟上。
@@ -343,14 +357,14 @@ struct ContentView: View {
                 Button("取消", role: .cancel) { }
             }
             // 关会话（code/游戏共用）时那边正在干活：说清楚代价再让人按。
-            .confirmationDialog(gameSessionActive ? "TA 正在游戏会话里" : "TA 正在电脑上干活",
+            .confirmationDialog(gameMine ? "TA 正在游戏会话里" : "TA 正在电脑上干活",
                                 isPresented: $confirmStopBusy, titleVisibility: .visible) {
-                Button(gameSessionActive ? "收摊并关掉" : "停掉并退出", role: .destructive) {
+                Button(gameMine ? "收摊并关掉" : "停掉并退出", role: .destructive) {
                     Task { @MainActor in await exitSession() }
                 }
                 Button("先不关", role: .cancel) { }
             } message: {
-                Text(gameSessionActive
+                Text(gameMine
                      ? "关掉会结束 TA 的游戏会话（模拟器不会自动关，TA 玩到一半的进度以游戏自己的存档为准）。"
                      : "退出会停掉那边正在跑的活，做到一半的东西不会有结果。")
             }
@@ -483,6 +497,9 @@ struct ContentView: View {
         profileStore.switchCharacter(id)
         sessionId = nil
         Task { await proactiveStore.reloadForCurrentCharacter() }
+        // 会话入口/归属说明是按角色变的，切完顺手对齐一次（路由本身不等它——
+        // sessionMine 是派生的，currentCharID 一变就生效）。
+        Task { await syncCodeMode() }
     }
 
     // 顶部导航栏：左猫爪开抽屉，居中标题；右侧空占位配平保持标题居中
@@ -528,7 +545,7 @@ struct ContentView: View {
             if gamePauseVisible {
                 gamePauseToggle
             }
-            if codeAvailable || gameSessionActive {
+            if codeAvailable || gameMine {
                 codeToggle
             } else {
                 Color.clear.frame(width: 40, height: 40)
@@ -588,7 +605,7 @@ struct ContentView: View {
     /// 后端没下发归属（旧版）→ 空串 → 不设限。已经开着的会话不受这个管：
     /// 会话是我的时候得能点它退出，哪怕归属在会话开着之后被转走了。
     private var codeOwnedByMe: Bool {
-        codeOwner.isEmpty || codeOwner == currentCharID || codeMode || gameSessionActive
+        codeOwner.isEmpty || codeOwner == currentCharID || sessionMode
     }
 
     private var codeToggle: some View {
@@ -597,7 +614,7 @@ struct ContentView: View {
                 if codeSwitching {
                     ProgressView().tint(sessionMode ? .white : Color.theme)
                 } else {
-                    Image(systemName: gameSessionActive ? "gamecontroller.fill"
+                    Image(systemName: gameMine ? "gamecontroller.fill"
                           : "chevron.left.forwardslash.chevron.right")
                         .font(.system(size: 15, weight: .semibold))
                         .foregroundStyle(sessionMode ? Color.white : Color.theme)
@@ -608,8 +625,8 @@ struct ContentView: View {
             .opacity(codeOwnedByMe ? 1 : 0.35)
         }
         .disabled(codeSwitching || !codeOwnedByMe)
-        .accessibilityLabel(gameSessionActive ? "游戏会话：开（点这里收摊）"
-                            : codeMode ? "Code 模式：开（点这里退出）"
+        .accessibilityLabel(gameMine ? "游戏会话：开（点这里收摊）"
+                            : codeMine ? "Code 模式：开（点这里退出）"
                             : codeOwnedByMe ? "切进 Code 模式"
                             : "电脑上的会话归\(codeOwnerName)，这边用不了")
     }
@@ -633,7 +650,7 @@ struct ContentView: View {
     private func toggleCodeMode() {
         dismissKeyboard()
         // 游戏会话活着：这一下是「收摊」。正玩着先问一句（和退 code 同款确认）。
-        if gameSessionActive {
+        if gameMine {
             codeSwitching = true
             Task { @MainActor in
                 defer { codeSwitching = false }
@@ -648,7 +665,7 @@ struct ContentView: View {
         codeSwitching = true
         Task { @MainActor in
             defer { codeSwitching = false }
-            if codeMode {
+            if codeMine {
                 // 退出 = 杀掉 Mac 上那个会话。它要是正干着活，先问一句——不问的话
                 // 一个跑了十分钟的活就这么没了。
                 if let st = try? await chatService.codeStatus(probeBusy: true), st.busy == true {
@@ -660,6 +677,9 @@ struct ContentView: View {
                 do {
                     try await chatService.codeStart(history: chatStore.messages)
                     codeMode = true
+                    // 会话归属当场钉在自己身上：不写的话 sessionChar 还是上一个会话留下的
+                    // 陈值，sessionMine 判假 → 刚起的会话自己反而发不进去。
+                    sessionChar = currentCharID
                     chatStore.appendSystemMessage("已切进 Code 模式")
                 } catch {
                     errorText = "切 Code 模式失败：\((error as? ChatServiceError)?.errorDescription ?? error.localizedDescription)"
@@ -671,11 +691,12 @@ struct ContentView: View {
     /// 真的关掉当前会话（code/游戏共用）：停掉 Mac 上那个 tmux 会话。
     @MainActor
     private func exitSession() async {
-        let wasGame = gameSessionActive
+        let wasGame = gameMine
         do {
             try await chatService.codeStop()
             codeMode = false
             gameSessionActive = false
+            sessionChar = ""          // 会话没了，归属跟着清，别留陈值
             terminalExpanded = false
             chatStore.appendSystemMessage(wasGame ? "游戏会话关掉了" : "已退出 Code 模式")
         } catch {
@@ -696,20 +717,22 @@ struct ContentView: View {
         codeOwner = st.owner ?? ""
         codeOwnerName = st.owner_name ?? ""
         // 活着的会话可能是游戏档案（TA 自己 game_start 切的）——那不是 Code 模式，
-        // 别翻 codeMode、也别报「已切进 Code 模式」。终端面板走 gameSessionActive 亮起。
+        // 别翻 codeMode、也别报「已切进 Code 模式」。终端面板走 gameMine 亮起。
         let isGame = (st.profile ?? "code") == "game"
-        // 别人的会话不该在我这边的聊天里翻开关：会话全机唯一，但它属于起它的那个角色，
-        // 在别人的会话里亮起「已切进 Code 模式」等于把对方的活当成自己的。
-        // 后端没给 session_char（旧版/手动开的会话）就不设限，保持老行为。
-        let sc = st.session_char ?? ""
-        let sessionMine = sc.isEmpty || sc == currentCharID
-        let gameAlive = st.alive && isGame && sessionMine
+        // 会话归谁**不进** codeMode/gameSessionActive 的算式——那两个只管"会话活着、什么档案"。
+        // 归属单独存进 sessionChar，由派生的 sessionMine/codeMine/gameMine 当场判。
+        // 从前是把归属揉进这里的：切走一次、回前台一次，codeMode 就翻一次，
+        // 切回来再翻回来，每翻一次往聊天里塞一条"已切进 Code 模式"灰字。
+        // 更要命的是它只在回前台才算，切会话当下根本不重算 → 消息照旧改道进别人的 tmux。
+        sessionChar = st.session_char ?? ""
+        let gameAlive = st.alive && isGame
         if gameAlive != gameSessionActive {
             gameSessionActive = gameAlive
-            if gameAlive { chatStore.appendSystemMessage("去玩游戏了") }
+            // 灰字只在会话是我这边的时候报：别人的活报在我的聊天里 = 把对方的活当成自己的。
+            if gameAlive { if sessionMine { chatStore.appendSystemMessage("去玩游戏了") } }
             else { terminalExpanded = false }
         }
-        let codeAlive = st.alive && !isGame && sessionMine
+        let codeAlive = st.alive && !isGame
         guard st.enabled else {
             if codeMode { codeMode = false; terminalExpanded = false }
             return
@@ -717,7 +740,7 @@ struct ContentView: View {
         guard codeAlive != codeMode else { return }
         codeMode = codeAlive
         if !codeAlive { terminalExpanded = false }
-        if codeAlive { chatStore.appendSystemMessage("已切进 Code 模式") }
+        if codeAlive, sessionMine { chatStore.appendSystemMessage("已切进 Code 模式") }
     }
 
     /// Code 模式的发送：文字 + 图片进会话，回复走待送达盒子回来。
@@ -1020,11 +1043,13 @@ struct ContentView: View {
         if resp.code_started == true, !codeMode {
             codeMode = true
             codeAvailable = true
+            sessionChar = currentCharID   // 这轮是跟我说话时切的，会话就归我（同 toggleCodeMode）
             chatStore.appendSystemMessage("已切进 Code 模式")
         }
         // 他这轮自己切去玩游戏了（调了 game_start）→ 终端面板亮起，后续消息改道会话。
         if resp.game_started == true, !gameSessionActive {
             gameSessionActive = true
+            sessionChar = currentCharID
             chatStore.appendSystemMessage("去玩游戏了")
         }
         // 他这轮做/改的网页 → 网页卡片消息（stored 只有标题，从后端反查 id）。

@@ -79,6 +79,27 @@ def _session_char() -> str:
     return code_bridge.session_char() or plugins.owner_of("tmux")
 
 
+def _require_session_owner(char: Optional[str]) -> None:
+    """往活着的会话里塞东西（发消息 / 按键 / 看画面）之前：你是不是起它的那个人。
+
+    /code/start 早就有这道门了（不归他就拒），/code/send 和 /code/keys、/code/capture 漏了——
+    它们连 char 参数都没声明，app 带上来的 ?char= 被 FastAPI 直接丢掉，于是谁发都往那个
+    唯一活着的 tmux 里塞。实锤过的事故：会话归 A，人在 B 的聊天框里打字，整句话进了 A 的
+    tmux，回复又按会话归属打回 A 的聊天里——B 从头到尾没收到过，也没回过，一次静默的串台。
+
+    session_char 缺席（旧会话 / 手动开的会话）= 不设限，和 app 端 sessionMine 同一个口径。"""
+    sc = code_bridge.session_char()
+    if not sc:
+        return
+    cid = _resolve_char(char)
+    if cid != sc:
+        raise HTTPException(
+            status_code=409,
+            detail=f"电脑上这个会话是「{characters.display_name(sc)}」开的——"
+                   f"这条话进不去「{characters.display_name(cid)}」的聊天，"
+                   "回那边的聊天框再发")
+
+
 def _browser_keeper_watchdog() -> None:
     """浏览器幽灵看门狗：Chrome（cassette profile 那只）一在跑就搭伙占会话，轮末按
     [[browser:keep/close]] 标记结算去留（browser_keeper.py）。wake/非流式是 subprocess
@@ -918,10 +939,12 @@ def _code_mcp_configs(char_id: Optional[str] = None) -> list:
 
 
 @app.post("/code/send")
-def code_send(inp: CodeSendIn, x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
+def code_send(inp: CodeSendIn, char: Optional[str] = None,
+              x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
     verify_auth(x_auth)
     _require_code()
     # 先过护栏再落图，别白存文件
+    _require_session_owner(char)   # 会话是别人的 → 409，别静默串台（见该函数的注释）
     if not code_bridge.session_alive():
         raise HTTPException(status_code=409, detail="会话不在（先切一次 Code 模式）")
     if code_bridge.dialog_pending():
@@ -976,18 +999,24 @@ def code_stop(x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
 
 
 @app.get("/code/capture")
-def code_capture(lines: int = 200, x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
-    """终端面板轮询：会话画面（带 scrollback）+ 当前弹窗的选项。画面可能含敏感输出，要鉴权。"""
+def code_capture(lines: int = 200, char: Optional[str] = None,
+                 x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
+    """终端面板轮询：会话画面（带 scrollback）+ 当前弹窗的选项。画面可能含敏感输出，要鉴权。
+    还要认人：别人的会话画面里可能有 TA 的私事，不该在这边的终端面板里看得见。"""
     verify_auth(x_auth)
     _require_code()
+    _require_session_owner(char)
     return code_bridge.capture(lines=lines)
 
 
 @app.post("/code/keys")
-def code_keys(inp: CodeKeysIn, x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
-    """终端面板的按键透传（弹窗选项、回车、Esc、Ctrl-C 都走这儿）。"""
+def code_keys(inp: CodeKeysIn, char: Optional[str] = None,
+              x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
+    """终端面板的按键透传（弹窗选项、回车、Esc、Ctrl-C 都走这儿）。
+    和 send 同一道门：Ctrl-C 能把别人正跑着的活当场掐了。"""
     verify_auth(x_auth)
     _require_code()
+    _require_session_owner(char)
     return code_bridge.send_keys(inp.keys)
 
 
