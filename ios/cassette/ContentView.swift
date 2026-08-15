@@ -20,6 +20,9 @@ struct ContentView: View {
     @State private var navPath: [DrawerPage] = []
     @State private var draftCount = 0    // 草稿信箱待寄数（抽屉角标；挂在前台轮询里刷新）    // 抽屉 push 的页面栈
     @State private var chatScrollTarget: UUID? = nil // 聊天记录页点行 → 聊天跳到那条气泡
+    /// 气泡区身份的第二个维度（见 chatBody 的 .id）：每次点会话行都 +1，
+    /// 点中的是当前会话时也算——那一下就是"把气泡区整份重建"的手动复位。
+    @State private var chatViewNonce = 0
     @AppStorage("hasOnboarded") private var hasOnboarded = false   // 首启起名引导
 
     // 点头像 → 底部弹按钮（改昵称 / 换头像）
@@ -239,6 +242,15 @@ struct ContentView: View {
                  bottomOverlayHeight: sessionMode ? terminalHeight : 0,
                  scrollTarget: chatScrollTarget,
                  onScrollTargetHandled: { chatScrollTarget = nil })
+            // ⚠️ 换会话 = 换一份列表身份，别继承上一份的任何滚动状态。
+            // ChatView 自己不知道会话是什么（它只收一个 messages 数组），而它的冻结快照
+            // （frozenMessages / awayFrozen）、followBottom、未读角标、ScrollPosition 全是
+            // 它私有的 @State——切会话时这些一个都不会自己复位。实锤过的后果：在 A 会话里
+            // 滑离底部（awayFrozen 就地拍下 A 的整份记录）→ 切到 B → 顶栏和头像都是 B，
+            // 气泡区画的还是那份快照＝B 的聊天框里显示 A 的完整聊天记录。
+            // 逐个手动清那 10 个 @State 是跟漏清赛跑，换 id 让 SwiftUI 整份重建才是根治。
+            // nonce 让「点当前这一行」也能重建：显示错乱时那是唯一的手动复位口。
+            .id("\(currentCharID)#\(chatViewNonce)")
             .background(Color(.systemGroupedBackground))
             .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { chatAreaHeight = $0 }
             // Code 模式的终端：**盖在**气泡区上，不压缩它。压缩那版的代价见
@@ -460,8 +472,12 @@ struct ContentView: View {
     }
 
     /// 切到另一个角色的会话。流式生成中不切（NoSave 气泡没落盘）；调用方按钮已禁用，这里双保险。
+    /// 点中的就是当前会话时不空转：照样换一次气泡区身份（见 chatBody 的 .id）——
+    /// 那是显示层错乱时唯一能手动复位的动作，卡死了还能自己点回来。
     private func switchCharacter(to id: String) {
-        guard id != currentCharID, !isGenerating else { return }
+        guard !isGenerating else { return }
+        chatViewNonce &+= 1
+        guard id != currentCharID else { return }
         chatStore.switchConversation(id)
         currentCharID = id
         profileStore.switchCharacter(id)
