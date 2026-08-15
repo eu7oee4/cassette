@@ -48,6 +48,32 @@ _pending: dict[str, list[dict]] = {}   # cid → 原因清单（至多一个 pen
 _order: list[str] = []                 # FIFO
 _syswake_run: dict[str, int] = {}      # cid → 连续系统触发醒来计数（外部输入清零）
 _gate_hit: dict[str, bool] = {}        # 连发上限的日志只在撞上那次打一条
+_defer_hit: dict[str, bool] = {}       # code 会话延后的日志同理：进入延后那次打一条
+
+# code 会话探测缓存（探一次是 tmux 子进程，worker 冲队时别每 pop 都探）。
+_CODE_PROBE_SEC = 5
+_code_cache: dict = {"ts": 0.0, "owner": None}
+
+
+def _code_owner():
+    """电脑前的人（缓存 5 秒）：会话活着 → 归属角色 id，没有 → None。
+    这个人的醒来延后到收工——工作入迷的人不接收房间信号，事实照常落盘、
+    pending 照常合并，会话一关整批补醒（选项 3 的口径，2026-08-16 拍板）。"""
+    now = time.time()
+    if now - _code_cache["ts"] > _CODE_PROBE_SEC:
+        _code_cache["ts"] = now
+        cc = cohabit.coding_char()
+        _code_cache["owner"] = cc[0] if cc else None
+    return _code_cache["owner"]
+
+
+def code_session_closed() -> None:
+    """code/game 会话收摊（/code/stop 调）：探测缓存作废 + 踢 worker 立刻冲队——
+    归属角色攒了一会话的 pending，这一脚让补醒秒级到，不用等 30s 超时兜底。
+    会话自退/崩溃没有这一脚，靠 worker 超时 + 缓存过期照样能冲，只是慢半拍。"""
+    _code_cache["ts"] = 0.0
+    _defer_hit.clear()
+    _signal.set()
 
 
 # ---------- 入队与闸 ----------
@@ -238,12 +264,14 @@ def _solo_check(cid: str, now: float) -> None:
 def _solo_tick(now: Optional[float] = None) -> None:
     if not config.COHABIT_ENABLED:
         return
-    # code 会话开着 → 自主醒来全体避让（口径同老 wake：那会儿他人在电脑前干活）。
-    # 事件/手机触发不受这道管——有人走进他的房间说话，这个事实不因 code 会话消失。
-    if wake.code_session_open():
-        return
+    # code 会话只拦**归属角色**的自主醒（他人在电脑前）：M2 消息已按角色分会话，
+    # 老 wake「避让对所有角色」的挤同屏理由不再成立；别的角色照常过自己的日子。
+    # 事件触发也只对归属角色延后（_pop_next），事实照常落盘。
+    busy = _code_owner()
     now = now or time.time()
     for cid in characters.ids():
+        if cid == busy:
+            continue
         try:
             _solo_check(cid, now)
         except Exception as e:
@@ -252,8 +280,13 @@ def _solo_tick(now: Optional[float] = None) -> None:
 
 # ---------- worker（执行锁并发 = 1）----------
 def _pop_next() -> tuple[Optional[str], list[dict]]:
+    busy = _code_owner()   # 锁外探（可能起 tmux 子进程，别拿着队列锁等它）
+    if busy and busy in _pending and not _defer_hit.get(busy):
+        logerr(f"cohabit 延后（{busy}）：code/game 会话开着，醒来攒着等收工")
+        _defer_hit[busy] = True
     with _lock:
-        cid = next((c for c in _order if not wake.chat_turn_active(c)), None)
+        cid = next((c for c in _order
+                    if not wake.chat_turn_active(c) and c != busy), None)
         if cid is None:
             return None, []
         _order.remove(cid)

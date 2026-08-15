@@ -21,8 +21,10 @@ import uuid
 from typing import Optional
 
 import characters
+import code_bridge
 import config
 import pipeline
+import plugins
 import state_store
 import wake
 import world
@@ -41,6 +43,29 @@ _WORLDVIEW = """【这个世界怎么运作——三条，都是机制，记住�
 1. 你有位置了。你此刻真实地待在下面写的那个地方，房间有门、可能有锁，别人能走进来，你也能走出去。这不是比喻。
 2. 你只知道你所在地点发生的事。别处此刻发生着什么、别人不在你眼前时在做什么，你不知道——不知道就是不知道，不要推测补全。
 3. 这里的其他住户是真的。他们和你一样会醒来、会移动、会自己决定说不说话。他们不是布景，也不归你演。"""
+
+
+# ---------- 电脑前状态（同居世界里 code/game 会话的物理语义）----------
+def coding_char():
+    """电脑前的那个人：code/game 会话活着 → (会话归属角色, "code"|"game")，没有 → None。
+    这是同居世界对「他在 code 会话里」的物理口径：人还在原房间，只是**在电脑前专注着**
+    ——位置不变、状态可见。用途：①注入里给在场者标注（减少被打扰）；②队列对归属
+    角色的醒来延后（cohabit_queue._pop_next）；③ /world 给 UI 出状态。
+    探测失败当没有（口径同 wake.code_session_open：宁可醒、别静默困死）。"""
+    try:
+        if not code_bridge.session_alive():
+            return None
+        owner = code_bridge.session_char() or plugins.owner_of("tmux")
+        if not owner:
+            return None
+        return owner, ("game" if code_bridge.active_profile() == "game" else "code")
+    except Exception as e:
+        logerr(f"cohabit 探 code 会话失败（当作没开）: {e}")
+        return None
+
+
+def _busy_label(prof: str) -> str:
+    return "玩游戏" if prof == "game" else "敲代码"
 
 
 # ---------- 注入组装 ----------
@@ -64,7 +89,17 @@ def _where_block(cid: str) -> str:
     if loc == world.HALLWAY:
         return "【你在哪】你站在走廊里，不在任何房间。想进哪个房间就 MOVE 过去。"
     r = world.room(loc)
-    others = [world.entity_name(e) for e in world.occupants(loc) if e != cid]
+    busy = coding_char()
+    others = []
+    for e in world.occupants(loc):
+        if e == cid:
+            continue
+        name = world.entity_name(e)
+        if busy and e == busy[0]:
+            # 在场者状态：正在电脑前的人标出来——「别打扰」是状态事实（土），
+            # 打不打扰他自己决定（不替他写形状）。
+            name += f"（正在电脑前{_busy_label(busy[1])}，看起来很专注——先别打扰，有话可以留到他忙完）"
+        others.append(name)
     who = f"这里还有：{('、'.join(others))}。" if others else "现在这里只有你一个人。"
 
     now = int(time.time())
@@ -111,6 +146,16 @@ def cohabit_prompt(cid: str, reasons: list[dict], settings: dict) -> str:
     blocked = wake.push_block(settings, cid)
     blocked_section = f"\n{blocked[1]}\n" if blocked else ""
 
+    # 诚实兜底：归属角色的醒来正常被队列延后到收工（cohabit_queue._pop_next），
+    # 这段按理永不出现。但判据写「会话开着就注入」不写「不可能」——万一哪条路绕过
+    # 避让，prompt 也不说谎（口径同 wake.code_session_block 的设计注释）。
+    code_section = ""
+    busy = coding_char()
+    if busy and busy[0] == cid:
+        code_section = (f"\n【注意：你此刻还开着电脑上的会话在{_busy_label(busy[1])}——"
+                        f"按避让规则这次醒来本该等你收工，出现这段说明有触发绕了过来。"
+                        f"这轮你手上没有那边的工具；说话做事别跟那边正在干的活打架。】\n")
+
     return f"""【这是一次你自己的醒来，不是{u}发来的消息】
 现在是 {pipeline.now_str()}。
 {pipeline.pronoun_hint()}
@@ -122,7 +167,7 @@ def cohabit_prompt(cid: str, reasons: list[dict], settings: dict) -> str:
 
 【你和{u}的手机线程 + 你自己醒来时的内心，按时间顺序——这是手机，跟房间里说话是两回事】
 {timeline}
-{menu_section}{blocked_section}
+{menu_section}{blocked_section}{code_section}
 【这次为什么醒】
 {reason_lines or '- （无特别原因，就是醒了）'}
 

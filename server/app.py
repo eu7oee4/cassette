@@ -510,9 +510,16 @@ def health():
 
 @app.get("/characters")
 def characters_list(x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
-    """角色清单（app 会话列表的数据源）。默认角色永远在第一位。"""
+    """角色清单（app 会话列表的数据源）。默认角色永远在第一位。
+    status＝手机侧的在场状态（"code"/"game"/None）：会话列表/聊天头可以显示
+    「正在敲代码，可能无法及时回复」。一期没有 AI↔AI 手机，这条只给用户看。"""
     verify_auth(x_auth)
-    return {"items": [{"id": cid, "display_name": characters.display_name(cid)}
+    busy = None
+    if config.COHABIT_ENABLED:
+        import cohabit
+        busy = cohabit.coding_char()
+    return {"items": [{"id": cid, "display_name": characters.display_name(cid),
+                       "status": (busy[1] if busy and busy[0] == cid else None)}
                       for cid in characters.ids()]}
 
 
@@ -843,8 +850,15 @@ def get_world(x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
         rooms.append({"id": rid, **{k: v for k, v in r.items() if k != "state"},
                       "state_count": len(r.get("state") or []),
                       "occupants": [e for e in snap if snap[e]["location"] == rid]})
+    # 在场状态：code/game 会话开着的角色标出来（UI 显示「正在敲代码，先别打扰」）。
+    busy = None
+    if config.COHABIT_ENABLED:
+        import cohabit
+        busy = cohabit.coding_char()
     return {"rooms": rooms,
-            "entities": {e: {**v, "name": world.entity_name(e)} for e, v in snap.items()}}
+            "entities": {e: {**v, "name": world.entity_name(e),
+                             "status": (busy[1] if busy and busy[0] == e else None)}
+                         for e, v in snap.items()}}
 
 
 @app.get("/rooms/{room_id}")
@@ -1118,6 +1132,8 @@ def code_stop(x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
     # 剧情会话收摊要把模拟器使用权还回去，不然任务引擎永远派不了单。
     # code 档案下这是个空操作（锁本来就不是 story 的）。
     game_bridge.release_lock("story")
+    # 同居世界：会话归属角色攒着的醒来（延后的房间事件等）现在可以补了。
+    cohabit_queue.code_session_closed()
     return r
 
 

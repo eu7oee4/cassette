@@ -55,7 +55,10 @@ class QueueBase(CohabitBase):
             cq._order.clear()
             cq._syswake_run.clear()
             cq._gate_hit.clear()
+            cq._defer_hit.clear()
         cq._signal.clear()
+        # 探测缓存必须一并清：5 秒 TTL 会把上一个测试的 owner 带进下一个测试
+        cq._code_cache.update(ts=0.0, owner=None)
 
     def set_char_settings(self, cid, **kw):
         state_store._write_json(state_store._char_path("settings.json", cid), kw)
@@ -203,11 +206,81 @@ class TestSolo(QueueBase):
         cq._solo_tick(time.time())
         self.assertNotIn(self.cid, cq._pending)
 
-    def test_code_session_stops_solo_only(self):
-        wake.code_session_open = lambda: True
+    def test_code_session_defers_owner_only(self):
+        # 归属角色在电脑前：他的自主醒跳过，别的角色照常（M2 后不再全体避让）
+        cohabit.coding_char = lambda: (self.cid, "code")
+        cq._code_cache["ts"] = 0.0              # 探测缓存作废，立刻认新桩
         cq._solo_tick(time.time())
-        self.assertEqual(cq._pending, {})       # 自主全避让
-        self.assertTrue(cq.enqueue(self.cid, {"kind": "event", "text": "x"}))  # 事件不受管
+        self.assertNotIn(self.cid, cq._pending)
+        if len(self.chars) > 1:
+            self.assertIn(self.chars[1], cq._pending)
+
+
+class TestCodeSessionDefer(QueueBase):
+    """选项 3（2026-08-16 拍板）：归属角色在 code/game 会话里 → 醒来延后、原因照攒，
+    收工那一刻整批补醒；在场者的注入里能看到他「正在敲代码，先别打扰」。"""
+
+    def _busy(self, cid, prof="code"):
+        cohabit.coding_char = lambda: (cid, prof)
+        cq._code_cache["ts"] = 0.0              # 缓存作废：测试里换桩要立刻生效
+
+    def _idle(self):
+        cohabit.coding_char = lambda: None
+        cq._code_cache["ts"] = 0.0
+
+    def test_event_wake_deferred_until_close(self):
+        self._busy(self.cid)
+        self.replies = [out("none")]
+        cq.enqueue(self.cid, {"kind": "event", "text": "有人说话"})
+        cq.enqueue(self.cid, {"kind": "event", "text": "又有人说话"})
+        cq._drain()
+        self.assertEqual(self.prompts, [])                       # 干活期间不醒
+        self.assertEqual(len(cq._pending[self.cid]), 2)          # 原因照攒
+        self._idle()
+        cq.code_session_closed()                                 # 收工踢一脚
+        cq._drain()
+        self.assertEqual(len(self.prompts), 1)                   # 一次醒补上全部
+        self.assertIn("有人说话", self.prompts[0])
+        self.assertIn("又有人说话", self.prompts[0])
+
+    def test_other_char_not_deferred(self):
+        if len(self.chars) < 2:
+            self.skipTest("单角色环境")
+        other = self.chars[1]
+        self._busy(self.cid)
+        self.replies = [out("none")]
+        cq.enqueue(other, {"kind": "event", "text": "别人的动静"})
+        cq._drain()
+        self.assertEqual(len(self.prompts), 1)                   # 不在电脑前的照常醒
+
+    def test_occupants_annotation_and_honest_note(self):
+        if len(self.chars) < 2:
+            self.skipTest("单角色环境")
+        other = self.chars[1]
+        world.move(other, self.home)                             # 俩人同屋
+        self._busy(other)
+        p = cohabit.cohabit_prompt(self.cid, [{"kind": "event", "text": "x"}],
+                                   state_store.load_settings(self.cid))
+        self.assertIn("正在电脑前敲代码", p)                       # 在场者看得到状态
+        self.assertIn("先别打扰", p)
+        self.assertNotIn("按避让规则这次醒来本该等你收工", p)       # 自己没在干活，无兜底段
+        self._busy(self.cid)                                     # 换成自己在干活（兜底路径）
+        p = cohabit.cohabit_prompt(self.cid, [{"kind": "event", "text": "x"}],
+                                   state_store.load_settings(self.cid))
+        self.assertIn("本该等你收工", p)
+
+    def test_world_route_reports_status(self):
+        from fastapi.testclient import TestClient
+        import app as app_module
+        self._busy(self.cid)
+        h = {"X-Auth": config.AUTH_KEY}
+        client = TestClient(app_module.app)
+        r = client.get("/world", headers=h).json()
+        self.assertEqual(r["entities"][self.cid]["status"], "code")
+        self.assertIsNone(r["entities"]["user"]["status"])
+        # 手机侧同一份事实：会话列表也带 status（UI 显示「正在敲代码，可能无法及时回复」）
+        items = {x["id"]: x for x in client.get("/characters", headers=h).json()["items"]}
+        self.assertEqual(items[self.cid]["status"], "code")
 
 
 class TestChatMove(QueueBase):
