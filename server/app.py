@@ -729,6 +729,7 @@ def describe_sticker(req: DescribeRequest, x_auth: Optional[str] = Header(defaul
     try:
         proc = subprocess.run(args, input=json.dumps(user_msg) + "\n", capture_output=True,
                               text=True, env=pipeline._subprocess_env(),
+                              cwd=pipeline.neutral_cwd(),
                               timeout=config.CLAUDE_TIMEOUT_SEC)
     except subprocess.TimeoutExpired:
         raise HTTPException(status_code=504, detail="claude 超时未返回")

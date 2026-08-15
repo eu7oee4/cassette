@@ -292,6 +292,7 @@ def run_claude_wake(prompt: str, char_id: Optional[str] = None) -> tuple[Optiona
     try:
         proc = subprocess.run(args, input=prompt, capture_output=True, text=True,
                               env=pipeline._subprocess_env("wake"),
+                              cwd=pipeline.neutral_cwd(),
                               timeout=config.CLAUDE_TIMEOUT_SEC)
     except subprocess.TimeoutExpired:
         logerr("醒来调用超时")

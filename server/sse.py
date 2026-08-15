@@ -191,6 +191,7 @@ async def stream_claude(prompt: str, translate, images: list | None = None,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         env=pipeline._subprocess_env(),
+        cwd=pipeline.neutral_cwd(),
         # stream-json 一个事件一整行：大 tool_result 会撑爆 StreamReader 默认 64KB 行限。
         limit=64 * 1024 * 1024,
     )

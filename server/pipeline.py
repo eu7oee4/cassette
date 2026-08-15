@@ -650,6 +650,18 @@ def base_claude_args(persona_file: Optional[Path] = None,
     return args
 
 
+def neutral_cwd() -> str:
+    """一次性 claude 子进程的工作目录：一个恒空目录（state/claude_cwd）。
+    聊天/醒来的模型没有文件工具，本不需要真实 cwd；而 CLI 会把 prompt 里的 @词
+    当文件引用、命中 cwd 下的路径就自动把内容附进上下文——实锤：历史里 SwiftUI
+    代码的 `@State` 命中了 server/state（macOS 不分大小写），从此每一轮都附一份
+    state 目录清单，TA 看到的就是"用户消息里带了段 ls"。空目录让相对 @-mention
+    永远落空。MCP 子进程会继承这个 cwd：插件文件 IO 必须锚 __file__ 或走绝对路径。"""
+    d = state_store.STATE_DIR / "claude_cwd"
+    d.mkdir(exist_ok=True)
+    return str(d)
+
+
 def _subprocess_env(context: str = "chat") -> dict:
     env = os.environ.copy()
     env.pop("ANTHROPIC_API_KEY", None)   # 强制走 CLI 登录态，不走 API 计费
@@ -973,7 +985,7 @@ def call_claude_multimodal(prompt: str, images: list,
     try:
         proc = subprocess.run(
             args, input=multimodal_stdin(prompt, images, file_blocks),
-            capture_output=True, text=True,
+            capture_output=True, text=True, cwd=neutral_cwd(),
             env=_subprocess_env(), timeout=config.CLAUDE_TIMEOUT_SEC,
         )
     except subprocess.TimeoutExpired:
@@ -992,6 +1004,7 @@ def call_claude(prompt: str, char_id: Optional[str] = None) -> tuple[str, list[d
     try:
         proc = subprocess.run(
             args, input=prompt, capture_output=True, text=True,
+            cwd=neutral_cwd(),
             env=_subprocess_env(), timeout=config.CLAUDE_TIMEOUT_SEC,
         )
     except subprocess.TimeoutExpired:
