@@ -159,3 +159,25 @@ def mail_conf(char_id: Optional[str] = None) -> dict:
         v = "" if v is None else str(v).strip()
         out[k] = v or (os.environ.get(f"CASSETTE_MAIL_{k}") or "").strip()
     return out
+
+
+# char.json 的 galatea 段（键名 = .env 里 GALATEA_MCP_* 去掉前缀再小写）：
+#     {"endpoint": "https://galatea.abysslumina.com/mcp", "token": "gg_..."}
+_GALATEA_KEYS = ("ENDPOINT", "TOKEN")
+
+
+def galatea_conf(char_id: Optional[str] = None) -> dict:
+    """角色的 Galatea 花园接线：{ENDPOINT, TOKEN}。口径同 mail_conf——
+    **花园账号是身份不是设备，一机一号**：几个角色共用一个 token，站那边看到的就是
+    同一只机，B 会以 A 的身份发帖。所以接线写进各自的 char.json，
+    `.env` 的 `GALATEA_MCP_*` 只作全局兜底（建议留空，见插件 README）。
+
+    值原样字符串返回，取不到就是空串——**空 token 不是错误**，插件拿到空串会让所有
+    工具有声报错（"这个角色没有花园账号"），比静默连不上强。"""
+    g = meta(char_id).get("galatea") or {}
+    out = {}
+    for k in _GALATEA_KEYS:
+        v = g.get(k.lower())
+        v = "" if v is None else str(v).strip()
+        out[k] = v or (os.environ.get(f"GALATEA_MCP_{k}") or "").strip()
+    return out

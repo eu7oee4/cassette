@@ -232,7 +232,10 @@ NO_WAKE_PLUGINS = {"codemode"}
 # game-story：起初随 codemode 硬禁（起常驻会话），08-13 机主改成开关制——「醒来想读
 # 会儿剧情」本来就是这份消遣的自然形态，且会话有整套兜底（20min 看守收摊、60min
 # 提醒、急停锁、消耗硬护栏），风险面和 browser 同级：给不给凌晨三点的自己，交机主。
-WAKE_TOGGLEABLE = {"browser", "beacon", "mail", "game-maayuan", "game-story"}
+# galatea：花园是**公开**站点，发帖/回帖/私聊/点赞发出去收不回，别的小机和人类当场读得到。
+#   但整插件一刀切会连"逛"都关掉，而"醒来自己去逛逛论坛"正是机主装它的原因——所以它落
+#   在工具级那一档（见下面 WAKE_TOOL_EXCLUDE）：读的随时挂，写的默认摘、开关放行。
+WAKE_TOGGLEABLE = {"browser", "beacon", "mail", "game-maayuan", "game-story", "galatea"}
 
 # 醒来那条路**插件照挂、但默认摘掉个别工具**——比上面两档更细的第四档（工具级）。
 # 同时也在 WAKE_TOGGLEABLE 里的插件，「醒来能用」开关的语义随之变细：**开关关的时候
@@ -256,7 +259,26 @@ WAKE_TOGGLEABLE = {"browser", "beacon", "mail", "game-maayuan", "game-story"}
 #     见 PLAN_tool_exclude.md，那是这条的正解，这里的注释别再照旧前提往下设计。
 # 眼下的止血：shadowed_tools() 把这些"看得见但用不了"的工具算出来，
 # 由 pipeline.tool_menu_block 在菜单末尾如实告诉 TA 别去调。
-WAKE_TOOL_EXCLUDE: dict[str, set[str]] = {"mail": {"mail_send"}}
+#
+# galatea 同理、只是名单长：**读的一直挂，对外写的默认摘**。
+# 摘掉的这批的共同点是「发出去收不回、别人当场看得见」——发帖回帖删帖、点赞关注、
+# 私聊、改资料换头像、以及进局/开局/出招/局内发言（开一局是把别的小机叫来陪你玩，
+# 一轮结束你就不在了，把人晾着比不玩更差）。
+# 两个**故意留在读那一侧**的，别当漏网：
+#   review_drift_bottles —— 不传 decisions 就是纯拾瓶读信，那是这工具的主要用法；
+#     传了 decisions 才是投票（且要加入满 5 天+活跃分 100，眼下根本不够格）。
+#     一个工具两种模式，为了留住"醒来读读别人的信"把它整个留下，投票那半靠 DOC_EXTRA
+#     的纪律管——这是个知情的取舍，不是没想到。
+#   get_tool_schema —— 只回 schema，不产生任何对外动作。
+WAKE_TOOL_EXCLUDE: dict[str, set[str]] = {
+    "mail": {"mail_send"},
+    "galatea": {
+        "create_thread", "create_reply", "delete_thread", "delete_reply",
+        "interact", "send_chat_message", "withdraw_chat_message",
+        "update_profile", "decorate_avatar",
+        "join_game", "start_game", "leave_waiting_game", "submit_action", "send_game_chat",
+    },
+}
 
 # 「醒来能用」开关在商店里的文案（标题, 说明）。工具级摘除的插件开关语义变细了，
 # 通用文案会骗人——mail 的开关只管发信，读信醒来一直能用（机主 2026-08-11 指出：
@@ -265,6 +287,8 @@ WAKE_TOOL_EXCLUDE: dict[str, set[str]] = {"mail": {"mail_send"}}
 WAKE_TOGGLE_TEXT: dict[str, tuple[str, str]] = {
     "mail": ("醒来能发信", "只决定自发醒来时能不能发邮件；读信不受影响，醒来一直能看收件箱"),
     "game-story": ("醒来能去玩", "打开后 TA 自发醒来时可以自己切去游戏会话看剧情（默认关；看守和急停照常兜底）"),
+    "galatea": ("醒来能发帖/开玩", "只决定自发醒来时能不能发帖、回帖、点赞、私聊、改资料、参与桌游；"
+                "逛帖子、看通知、拾漂流瓶不受影响，醒来一直能逛"),
 }
 _WAKE_TOGGLE_DEFAULT = ("醒来能用", "打开后 TA 自发醒来时也能用它（默认关）")
 
@@ -356,6 +380,10 @@ REGISTRY: dict[str, dict] = {
         "display_name": "游戏剧情-通用版",
         "description": "TA 自己切去玩游戏看剧情：常驻会话里本人盲操（截图→坐标→点按），边玩边把见闻转播进聊天。默认为《如鸢》调校，换别的二游要自己改守则——装前先看 README 的风险须知（含反自动化处罚）。需 MuMu 模拟器 + 后端开 GAME_MODE_ENABLED",
     },
+    # ⚠️ galatea（Galatea 花园）**故意还不在这儿**：2026-08-15 先以本地开发副本跑
+    # （server/plugins/galatea/，手放的目录商店里照样列出、开关和挂载都正常，只是
+    # 装不了也更新不了）。跑稳了再开仓、进 registry 钉 commit 发版。
+    # 宿主侧该配的都配好了：WAKE_TOGGLEABLE / WAKE_TOOL_EXCLUDE / PLUGIN_ENV / 能力菜单。
 }
 
 _NAME_RE = re.compile(r"^[a-z0-9_-]{1,40}$")
@@ -604,6 +632,24 @@ def shadowed_tools(context: str = "chat", char_id=None) -> list[str]:
     return out
 
 
+def _galatea_env(cid: str) -> dict:
+    import characters
+    g = characters.galatea_conf(cid)
+    return {"GALATEA_MCP_ENDPOINT": g["ENDPOINT"], "GALATEA_MCP_TOKEN": g["TOKEN"]}
+
+
+# 插件专属接线：按角色下发给它的 stdio 子进程（插件名 → 一个 cid ↦ env 的函数）。
+#
+# 什么该进这儿：**账号/身份类的接线**——同一个插件替不同角色干活时，用的是不同的号。
+# 花园就是这个形状（一机一号，共用 token = B 以 A 的身份发帖），信箱同理（那份走的是
+# mail_bridge 自己读 CASSETTE_CHAR_ID，没走这条路，因为真身在宿主侧不在插件里）。
+#
+# ⚠️ **值为空也要照发**：config 里的 env 是**合并且盖得过**继承值（2026-08-15 实测两轮），
+# 而 .env 会被 dotenv 灌进后端进程环境、一路继承给每个插件子进程。不发空串的话，
+# 一个没配花园的角色会**静默继承 .env 里别人的 token** —— 那正是这个钩子要防的事。
+PLUGIN_ENV: dict = {"galatea": _galatea_env}
+
+
 def mounted(context: str = "chat", char_id=None) -> tuple[Optional[str], list[str]]:
     """这个角色启用中的合法插件 → (mcp-config 文件路径, 工具白名单)。没有则 (None, [])。
     config 文件现渲染进该角色的 state 目录（stdio：本仓 venv 的 python 起清单里的 entry）。
@@ -639,9 +685,16 @@ def mounted(context: str = "chat", char_id=None) -> tuple[Optional[str], list[st
         # HOME 这些照样在，插件不会因为缺环境炸），且**盖得过**从 claude 进程继承来的
         # 同名值。所以插件本体一行不用改——宿主侧的 bridge 自己读 CASSETTE_CHAR_ID 认人
         # （见 mail_bridge._cid）。要按角色下发别的接线（chrome 的 MCP_URL 之类）也走这儿。
+        env = {"CASSETTE_CHAR_ID": me}
+        hook = PLUGIN_ENV.get(name)
+        if hook:
+            try:
+                env.update(hook(me))   # 插件专属接线（账号/token 按角色走，见 PLUGIN_ENV）
+            except Exception as e:
+                logerr(f"插件 {name} 的按角色接线算不出来（照挂，插件会自己有声报错）: {e}")
         servers[name] = {"type": "stdio", "command": sys.executable,
                          "args": [str(PLUGINS_DIR / name / m["entry"])],
-                         "env": {"CASSETTE_CHAR_ID": me}}
+                         "env": env}
         tools += [f"mcp__{name}__{t}" for t in m["tools"]
                   if context != "wake" or wake_on.get(name)
                   or t not in WAKE_TOOL_EXCLUDE.get(name, ())]
