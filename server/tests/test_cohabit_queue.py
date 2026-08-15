@@ -1,0 +1,241 @@
+"""cohabit_queue.py（同居触发与闸 C2）单测。
+
+基座沿用 test_cohabit.CohabitBase（world/角色状态/outbox 全在临时目录，模型是罐头替身），
+再加四样：开关强制打开、事件钩子 install/uninstall、队列内存态清零、
+code 会话探测和随机数打桩（不碰真 tmux、判定可复现）。worker 线程不起，
+_drain / _solo_tick 直接同步调——测的就是它们的逻辑，线程壳没有逻辑。
+
+跑法（cwd = server/）：
+    .venv/bin/python -m unittest tests.test_cohabit_queue -v
+"""
+import sys
+import time
+import types
+import unittest
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+import cohabit
+import cohabit_queue as cq
+import config
+import pipeline
+import state_store
+import wake
+import world
+from tests.test_cohabit import CohabitBase, out
+
+
+class QueueBase(CohabitBase):
+    def setUp(self):
+        super().setUp()
+        self._enabled_orig = config.COHABIT_ENABLED
+        config.COHABIT_ENABLED = True
+        self._code_open_orig = wake.code_session_open
+        wake.code_session_open = lambda: False
+        self._random_orig = cq.random
+        cq.random = types.SimpleNamespace(random=lambda: 0.0)   # 概率必中，判定可复现
+        cq.install()
+        self._reset_queue()
+        import characters
+        self.chars = characters.ids()
+
+    def tearDown(self):
+        cq.uninstall()
+        self._reset_queue()
+        config.COHABIT_ENABLED = self._enabled_orig
+        wake.code_session_open = self._code_open_orig
+        cq.random = self._random_orig
+        super().tearDown()
+
+    @staticmethod
+    def _reset_queue():
+        with cq._lock:
+            cq._pending.clear()
+            cq._order.clear()
+            cq._syswake_run.clear()
+            cq._gate_hit.clear()
+        cq._signal.clear()
+
+    def set_char_settings(self, cid, **kw):
+        state_store._write_json(state_store._char_path("settings.json", cid), kw)
+
+
+class TestGates(QueueBase):
+    def test_disabled_is_inert(self):
+        config.COHABIT_ENABLED = False
+        self.assertFalse(cq.enqueue(self.cid, {"kind": "event", "text": "x"}))
+        self.assertIsNone(cq.chat_move(self.cid, "living_room"))
+        self.assertEqual(cq.chat_move_hint(self.cid), "")
+        world.act("user", "mm_room", speech="没人醒")   # 钩子挂着但开关关着
+        self.assertEqual(cq._pending, {})
+
+    def test_single_pending_merges_and_dedupes(self):
+        cq.enqueue(self.cid, {"kind": "event", "text": "甲"})
+        cq.enqueue(self.cid, {"kind": "event", "text": "乙"})
+        cq.enqueue(self.cid, {"kind": "event", "text": "甲"})   # 同文去重
+        self.assertEqual(len(cq._pending[self.cid]), 2)
+        self.assertEqual(cq._order, [self.cid])                 # 还是一个 pending
+
+    def test_chain_cap_blocks_system_not_solo(self):
+        cq._syswake_run[self.cid] = config.COHABIT_CHAIN_N
+        self.assertFalse(cq.enqueue(self.cid, {"kind": "event", "text": "x"}))
+        self.assertTrue(cq.enqueue(self.cid, {"kind": "solo", "text": "y"}, system=False))
+        self._reset_queue()
+        cq._syswake_run[self.cid] = config.COHABIT_CHAIN_N
+        cq.external_input()                                     # 外部输入 → 计数清零
+        self.assertTrue(cq.enqueue(self.cid, {"kind": "event", "text": "x"}))
+
+
+class TestEventWake(QueueBase):
+    def test_author_exclusion_and_user_never_woken(self):
+        for cid in self.chars:
+            world.move(cid, "living_room")
+        world.move("user", "living_room")
+        self._reset_queue()                     # 清掉 enter 事件引发的入队，只看 act
+        world.act("user", "living_room", speech="我回来啦")
+        self.assertEqual(set(cq._pending), set(self.chars))     # 在场 AI 全醒，用户不算
+        world.act(self.chars[0], "living_room", speech="欢迎回家")
+        self.assertNotIn("user", cq._pending)
+        # 作者排除：自己的发言没有给自己再加原因
+        self.assertEqual(len([r for r in cq._pending[self.chars[0]]
+                              if "欢迎回家" in r["text"]]), 0)
+
+    def test_reason_text_carries_room_and_speaker(self):
+        world.move("user", self.home)
+        self._reset_queue()
+        world.act("user", self.home, action="敲了敲门框", speech="在忙吗")
+        texts = "".join(r["text"] for r in cq._pending[self.cid])
+        self.assertIn("敲了敲门框", texts)
+        self.assertIn("在忙吗", texts)
+        self.assertIn("的房间", texts)          # 房间名进原因
+
+    def test_move_events_wake_both_rooms(self):
+        # c1 和 cass 各在自己房间；c1 去 cass 的房间 → enter 事件唤 cass；
+        # 留在原房的没人 → leave 无人可唤。
+        if len(self.chars) < 2:
+            self.skipTest("单角色环境")
+        c1, c2 = self.chars[0], self.chars[1]
+        self._reset_queue()
+        world.move(c1, f"{c2}_room")
+        self.assertIn(c2, cq._pending)
+        self.assertNotIn(c1, cq._pending)       # 移动者不被自己的进出事件唤醒
+
+
+class TestDrain(QueueBase):
+    def test_drain_executes_counts_and_logs(self):
+        self.replies = [out("none")]
+        cq.enqueue(self.cid, {"kind": "event", "text": "有动静"})
+        cq._drain()
+        self.assertEqual(cq._syswake_run[self.cid], 1)
+        self.assertEqual(cq._pending, {})
+        self.assertIn("有动静", self.prompts[0])
+        self.assertEqual(self.log_entries()[-1]["action"], "none")
+        self.assertTrue(self.log_entries()[-1]["trigger"].startswith("cohabit:event"))
+
+    def test_move_chain_goes_through_queue(self):
+        self.replies = [out("none", move="living_room"), out("act", say="有人吗")]
+        cq.enqueue(self.cid, {"kind": "event", "text": "x"})
+        cq._drain()
+        self.assertEqual(len(self.prompts), 2)
+        self.assertIn("你刚到「客厅」", self.prompts[1])
+        self.assertEqual(cq._syswake_run[self.cid], 2)          # 补醒也计连发
+        kinds = [e.get("kind", e["type"]) for e in world.read_events("living_room")]
+        self.assertEqual(kinds, ["enter", "speech"])
+
+    def test_chain_cap_stops_move_before_teleport(self):
+        targets = ["living_room", self.home] * 3
+        self.replies = [out("none", move=t) for t in targets]
+        cq.enqueue(self.cid, {"kind": "event", "text": "x"})
+        cq._drain()
+        self.assertEqual(len(self.prompts), config.COHABIT_CHAIN_N)   # 只醒了 N 轮
+        self.assertEqual(cq._syswake_run[self.cid], config.COHABIT_CHAIN_N)
+        # 第 N 轮的 move 在瞬移前被拦：位置停在第 N-1 轮的目的地
+        self.assertEqual(world.location_of(self.cid), targets[config.COHABIT_CHAIN_N - 2])
+        self.assertFalse(cq.enqueue(self.cid, {"kind": "event", "text": "again"}))
+
+    def test_chat_turn_defers_execution(self):
+        self.replies = [out("none")]
+        cq.enqueue(self.cid, {"kind": "event", "text": "x"})
+        wake.chat_turn_begin(self.cid)
+        try:
+            cq._drain()
+            self.assertIn(self.cid, cq._pending)                # 避让：pending 保留
+            self.assertEqual(self.prompts, [])
+        finally:
+            wake.chat_turn_end(self.cid)
+        cq._drain()
+        self.assertEqual(len(self.prompts), 1)
+
+    def test_error_sets_cooldown_and_blocks_enqueue(self):
+        cohabit._run = lambda prompt, cid: (None, [])
+        cq.enqueue(self.cid, {"kind": "event", "text": "x"})
+        cq._drain()
+        sched = state_store.read_schedule(self.cid)
+        self.assertGreater(sched["cooldown_until"], time.time())
+        self.assertFalse(cq.enqueue(self.cid, {"kind": "event", "text": "y"}))
+
+
+class TestSolo(QueueBase):
+    def test_alone_probability_wake(self):
+        cq._solo_tick(time.time())
+        self.assertIn(self.cid, cq._pending)    # 各自在自己房间 = 独处，概率必中
+        self.assertEqual(cq._pending[self.cid][0]["kind"], "solo")
+
+    def test_not_alone_no_probability_wake(self):
+        world.move("user", self.home)
+        self._reset_queue()
+        cq._solo_tick(time.time())
+        self.assertNotIn(self.cid, cq._pending)
+
+    def test_scheduled_next_fires_even_with_company(self):
+        world.move("user", self.home)
+        self._reset_queue()
+        state_store.write_schedule({"next_wake_at": time.time() - 5}, self.cid)
+        cq._solo_tick(time.time())
+        self.assertEqual(cq._pending[self.cid][0]["kind"], "scheduled")
+
+    def test_budget_blocks_solo(self):
+        self.set_char_settings(self.cid, wake_daily_budget=1)
+        state_store.append_wake_log({"ts": int(time.time()), "source": "wake",
+                                     "trigger": "cohabit:solo", "action": "none"},
+                                    char_id=self.cid)
+        cq._solo_tick(time.time())
+        self.assertNotIn(self.cid, cq._pending)
+
+    def test_code_session_stops_solo_only(self):
+        wake.code_session_open = lambda: True
+        cq._solo_tick(time.time())
+        self.assertEqual(cq._pending, {})       # 自主全避让
+        self.assertTrue(cq.enqueue(self.cid, {"kind": "event", "text": "x"}))  # 事件不受管
+
+
+class TestChatMove(QueueBase):
+    def test_parse_chat_move(self):
+        cleaned, target = pipeline.parse_chat_move("好嘞，这就过去[[move:living_room]]")
+        self.assertEqual((cleaned, target), ("好嘞，这就过去", "living_room"))
+        cleaned, target = pipeline.parse_chat_move("不挪了")
+        self.assertEqual((cleaned, target), ("不挪了", None))
+
+    def test_chat_move_executes_and_enqueues_result(self):
+        mv = cq.chat_move(self.cid, "living_room")
+        self.assertTrue(mv["ok"])
+        self.assertEqual(world.location_of(self.cid), "living_room")
+        self.assertEqual(cq._pending[self.cid][0]["kind"], "move_result")
+
+    def test_chat_move_unknown_target_is_noop(self):
+        self.assertIsNone(cq.chat_move(self.cid, "basement_lab"))
+        self.assertEqual(world.location_of(self.cid), self.home)
+
+    def test_chat_move_hint_lists_rooms_not_people(self):
+        world.move("user", "living_room")
+        hint = cq.chat_move_hint(self.cid)
+        self.assertIn("[[move:", hint)
+        self.assertIn("living_room", hint)
+        self.assertNotIn(f"{self.cid}_room", hint.split("可选：")[1])  # 不含自己所在房
+        # 认知边界：清单里绝不出现谁在哪
+        self.assertNotIn("客厅（", hint)
+
+
+if __name__ == "__main__":
+    unittest.main()

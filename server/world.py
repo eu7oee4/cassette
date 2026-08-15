@@ -55,6 +55,12 @@ MAX_STATE_OPS_PER_ACT = 3
 
 _LOCK = threading.RLock()
 
+# 事件钩子（C2 接线口）：append_event 落盘后调它一次，签名 (room_id, event)。
+# 默认 None = 世界不惊动任何人（C0 口径不变）；cohabit_queue.install() 才挂上。
+# 钩子在世界锁**内**被调（act/move 是组合动作，锁内保证事件序完整）——
+# 挂进来的实现只准做入队这类快操作，绝不准回头调 world 的写函数。
+event_hook = None
+
 
 class NotPresent(Exception):
     """发言者不在这个房间——物理引擎拒绝写入（API 层转 409）。"""
@@ -180,6 +186,12 @@ def append_event(room_id: str, etype: str, actor: str, text: str,
         d.mkdir(parents=True, exist_ok=True)
         with (d / "events.jsonl").open("a", encoding="utf-8") as f:
             f.write(json.dumps(ev, ensure_ascii=False) + "\n")
+        if event_hook:
+            try:
+                event_hook(room_id, ev)
+            except Exception as e:
+                # 唤醒失败不能反噬物理引擎：事件已落盘就是发生了，钩子的事钩子自己扛。
+                print(f"[world] event_hook 出错（忽略）: {e}", flush=True)
     return ev
 
 

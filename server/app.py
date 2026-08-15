@@ -49,6 +49,7 @@ import urllib.parse
 import browser_keeper
 import characters
 import code_bridge
+import cohabit_queue
 import config
 import game_bridge
 import mail_bridge
@@ -152,6 +153,11 @@ async def _lifespan(_app: FastAPI):
     """启动 wake 调度器（on_event 已被 FastAPI 弃用，用 lifespan）。"""
     characters.ensure_layout()   # 默认角色目录补齐（state 侧旧布局迁移在 state_store import 时已做）
     world.ensure_world()         # 大房子：注册表 + world.json 补齐（幂等，存在不覆盖）
+    if config.COHABIT_ENABLED:
+        # 同居世界上电（C4 之前默认关）：事件钩子 + 单 worker（醒来并发=1 的执行锁）。
+        cohabit_queue.install()
+        threading.Thread(target=cohabit_queue.worker_loop, daemon=True,
+                         name="cohabit-worker").start()
     tasks = []
     if config.PROACTIVE_ENABLED:
         tasks.append(asyncio.create_task(wake.scheduler_loop()))
@@ -325,7 +331,11 @@ def _prepare_chat(req: ChatRequest, char_id: Optional[str] = None) -> tuple[str,
             state_store.write_sticker_catalog(catalog)
         except Exception as e:
             logerr(f"写 sticker_catalog 失败: {e}")
-    return (pipeline.build_prompt(req.messages, catalog, char_id=char_id),
+    # 手机消息 = 新外部输入：连发计数清零（开关关着时是空转，便宜）。
+    cohabit_queue.external_input()
+    move_hint = cohabit_queue.chat_move_hint(char_id)
+    return (pipeline.build_prompt(req.messages, catalog, char_id=char_id,
+                                  extra_hints=[move_hint] if move_hint else None),
             pipeline.sticker_handle_map(catalog))
 
 
@@ -380,6 +390,14 @@ def finalize_chat_reply(reply: str, stored: list[dict], req: ChatRequest,
             state_store.write_schedule(sched, char_id)
         next_wake_hint = pipeline.next_wake_note(next_raw, at)
         logerr(f"聊天里定了下次醒来：{next_raw} → {pipeline.fmt_ts(at)}")
+
+    # 同居世界：回复附带的 [[move:X]]（轮末执行，结果补醒入队；开关关着 = 剥掉当没写）。
+    reply, move_target = pipeline.parse_chat_move(reply)
+    if move_target:
+        try:
+            cohabit_queue.chat_move(char_id, move_target)
+        except Exception as e:
+            logerr(f"聊天附带 move 执行失败: {e}")
 
     # 浏览器去留标记：在下面的通用剥标记之前截下来；结算放在算出 browsed 之后（见下）。
     reply, browser_choice = pipeline.parse_browser_markers(reply)
@@ -859,6 +877,7 @@ def get_room_events(room_id: str, scope: str = "visible", limit: int = 200,
 def post_room_act(room_id: str, body: RoomActIn,
                   x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
     verify_auth(x_auth)
+    cohabit_queue.external_input()   # 用户动作 = 新外部输入，连发计数清零（在写事件之前）
     try:
         return world.act(world.USER_ID, room_id, action=body.action, speech=body.speech)
     except KeyError as e:
@@ -873,6 +892,7 @@ def post_room_act(room_id: str, body: RoomActIn,
 def post_room_state(room_id: str, body: RoomStateIn,
                     x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
     verify_auth(x_auth)
+    cohabit_queue.external_input()
     try:
         return world.state_change(world.USER_ID, room_id, body.op,
                                   entry_id=body.id, text=body.text)
@@ -889,6 +909,7 @@ def post_world_move(body: MoveIn,
                     x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
     """用户移动（含出门 away / 回房子）。门锁着返回 ok:false + 提示，不是 HTTP 错误。"""
     verify_auth(x_auth)
+    cohabit_queue.external_input()
     try:
         return world.move(world.USER_ID, body.to)
     except KeyError as e:

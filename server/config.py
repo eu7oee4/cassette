@@ -105,6 +105,12 @@ BARK_ICON = os.environ.get("BARK_ICON", "").strip()   # 通知图标（公网可
 PROACTIVE_ENABLED = os.environ.get("PROACTIVE_ENABLED", "1") != "0"
 WAKE_TICK_SEC = int(os.environ.get("WAKE_TICK_SEC", "300"))
 
+# 同居世界（大房子，PLAN_cohabit）总开关：默认关——C2 把触发/队列全部接好但不上电，
+# 事件流接到真角色上是 C4 的事（开 = 事件/独处醒来生效 + 聊天可附带 [[move:]]）。
+COHABIT_ENABLED = os.environ.get("CASSETTE_COHABIT_ENABLED", "0") == "1"
+# 连发上限 N（泛化定义见 PLAN）：无新外部输入时连续系统触发醒来的上限，入队处拦。
+COHABIT_CHAIN_N = int(os.environ.get("CASSETTE_COHABIT_CHAIN_N", "4"))
+
 # 可选：长期记忆 Ombre-Brain（P0luz 的开源项目 https://github.com/P0luz/Ombre-Brain ，
 # 自部署服务，只对接不 vendor）。没跑 Ombre / 中途挂了 → 自动退回纯聊天，永不因记忆层断掉。
 OMBRE_ENABLED = os.environ.get("OMBRE_ENABLED", "1") != "0"

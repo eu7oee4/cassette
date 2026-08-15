@@ -222,10 +222,27 @@ def _run(prompt: str, cid: str):
     return wake.run_claude_wake(prompt, char_id=cid)
 
 
-def do_cohabit_wake(cid: str, reasons: list[dict],
-                    _chain_no: int = 1) -> dict:
+def move_result_reason(mv: dict) -> dict:
+    """move 结果 → 补醒原因（成功/失败同一条路，只有文本不同）。
+    队列（C2）和模块内递归共用，聊天附带的 move 也走它。"""
+    if mv["ok"]:
+        return {"kind": "move_result",
+                "text": f"你刚到「{world.room(mv['to'])['name']}」——下面【你在哪】"
+                        f"就是这里现在的样子。想打个招呼、做点什么，这轮就是给你的。"}
+    return {"kind": "move_result",
+            "text": f"{mv.get('text', '门锁着，没进去')}——你还在原地。"
+                    f"改道去别处、掏手机、或者就算了，都行。"}
+
+
+def do_cohabit_wake(cid: str, reasons: list[dict], _chain_no: int = 1,
+                    chain_allowed=None, on_move_result=None) -> dict:
     """一次统一醒来：组注入 → 起模型 → 解析 → 落地 → （若 move）结果补醒。
-    返回最后一轮的结果 dict（含 chain 长度，方便测试/日志断言）。"""
+    返回最后一轮的结果 dict（含 chain 长度，方便测试/日志断言）。
+
+    补醒链两种走法：
+    - 默认（两个回调都 None）：模块内直接递归，深度硬停 N_CHAIN——C1 独跑的安全绳；
+    - 队列驱动（C2）：chain_allowed(cid) 在 move 执行**前**判连发上限（拦得住就不该
+      让人先瞬移再哑掉），on_move_result(cid, reason) 把补醒入队后本轮即返回。"""
     cid = characters.resolve(cid)
     settings = state_store.load_settings(cid)
     now_ts = int(time.time())
@@ -315,23 +332,20 @@ def do_cohabit_wake(cid: str, reasons: list[dict],
 
     # ③ move（末位执行）+ 结果补醒：成功/失败同一条路，只是原因文本不同。
     if p["move"]:
-        if _chain_no >= N_CHAIN:
+        allowed = chain_allowed(cid) if chain_allowed is not None else _chain_no < N_CHAIN
+        if not allowed:
             # 表达照常落地了，只有 move 被停——写日志，别静默吞（排查"他为什么没走成"用）。
-            logerr(f"cohabit：{cid} 连锁醒来达到 {N_CHAIN} 轮上限，MOVE 不执行")
+            logerr(f"cohabit：{cid} 连锁醒来达到上限，MOVE 不执行")
             result["move_stopped"] = True
             return result
         mv = world.move(cid, p["move"])
         result["move_result"] = mv
         if mv.get("noop"):
             return result
-        if mv["ok"]:
-            reason = {"kind": "move_result",
-                      "text": f"你刚到「{world.room(mv['to'])['name']}」——下面【你在哪】"
-                              f"就是这里现在的样子。想打个招呼、做点什么，这轮就是给你的。"}
-        else:
-            reason = {"kind": "move_result",
-                      "text": f"{mv.get('text', '门锁着，没进去')}——你还在原地。"
-                              f"改道去别处、掏手机、或者就算了，都行。"}
+        reason = move_result_reason(mv)
+        if on_move_result is not None:
+            on_move_result(cid, reason)   # 队列驱动：补醒入队（同受单 pending 约束），本轮结束
+            return result
         chained = do_cohabit_wake(cid, [reason], _chain_no=_chain_no + 1)
         chained["first_move"] = mv
         return chained

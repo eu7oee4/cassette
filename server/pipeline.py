@@ -268,12 +268,32 @@ def next_wake_note(raw: str, at: int) -> str:
     return f"已定下次醒来：{raw}（{fmt_ts(at)}）"
 
 
+# 聊天回复附带的移动（同居世界 C2）：[[move:房间id]]。英文 token 为主（§4 口径），
+# 容错中文写法和全角冒号。房间 id 是注册表键（ascii），不用管中文转义。
+_CHAT_MOVE_RE = re.compile(r"\[\[\s*(?:move|移动|去)\s*[:：]\s*([A-Za-z0-9_]+)\s*\]\]", re.I)
+
+
+def parse_chat_move(reply: str) -> tuple[str, Optional[str]]:
+    """从聊天回复里解析并剥掉 [[move:X]]，返回 (清理后文本, 目的地或None)。取最后一个。
+    目的地是否真的存在这里不管——执行方（cohabit_queue.chat_move）过注册表和门禁。"""
+    found: list[str] = []
+
+    def on_match(m):
+        found.append(m.group(1).strip())
+        return ""
+
+    reply = _CHAT_MOVE_RE.sub(on_match, reply)
+    return reply.strip(), (found[-1] if found else None)
+
+
 # ---------- prompt ----------
 def build_prompt(messages: list[Message], catalog: Optional[list[dict]] = None,
-                 char_id: Optional[str] = None) -> str:
+                 char_id: Optional[str] = None,
+                 extra_hints: Optional[list[str]] = None) -> str:
     """把 app 传来的完整历史拼成一次性提示词。人设在系统提示词里，这里只有对话本身。
     时间感（当前时间+时段词、距上一条的间隔）注入在**末尾、紧贴新消息**——放顶部会被
-    长对话淹掉，prompt 末尾是 recency 权重最高的位置。恒为 1~2 行、不随历史增长。"""
+    长对话淹掉，prompt 末尾是 recency 权重最高的位置。恒为 1~2 行、不随历史增长。
+    extra_hints＝调用方按场景附加的提示段（如同居世界的 [[move:]] 提示），排进 extras。"""
     *history, last = messages
 
     time_lines = [f"【现在是 {now_str()}】"]
@@ -281,7 +301,7 @@ def build_prompt(messages: list[Message], catalog: Optional[list[dict]] = None,
     if gap:
         time_lines.append(f"【距离上一条消息，过了 {gap}】")
 
-    extras = [pronoun_hint(), _chat_next_hint()]
+    extras = [pronoun_hint(), _chat_next_hint()] + [h for h in (extra_hints or []) if h]
     # 能力菜单取代了原来写死的 memory_block（内容搬进 tool_menu.example.md）：
     # 一份可编辑的文件、按本轮实际挂载过滤，聊天和醒来共用同一份来源。
     mb = tool_menu_block("chat", char_id)
