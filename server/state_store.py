@@ -73,6 +73,13 @@ def _migrate_legacy_layout() -> None:
         if not cs.exists() or SETTINGS_PATH.stat().st_mtime > cs.stat().st_mtime:
             d.mkdir(parents=True, exist_ok=True)
             cs.write_text(SETTINGS_PATH.read_text("utf-8"), "utf-8")
+    # mail/ 整目录搬（游标 watch.json、待醒 flag、草稿、发件日志、附件）：目录 rename
+    # 是原子的，比逐文件合并简单也更安全。**两边都在就不动**——那说明已经迁过一次，
+    # 旧目录留着人工看一眼再删；「合并两份游标」这种猜不替人做（猜错的后果是漏信或重复叫醒）。
+    legacy_mail = STATE_DIR / "mail"
+    if legacy_mail.is_dir() and not (d / "mail").exists():
+        d.mkdir(parents=True, exist_ok=True)
+        os.replace(legacy_mail, d / "mail")
 
 
 _migrate_legacy_layout()

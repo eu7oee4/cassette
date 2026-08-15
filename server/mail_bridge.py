@@ -16,8 +16,13 @@
 SELECT（网易反垃圾，见 _imap()）。换别家邮箱只需改 .env 里的 host，ID 命令别家
 不认识也无害（容错发送）。
 
+**一人一个信箱**（2026-08-15）：接线走 `characters.mail_conf(char_id)`——.env 的
+`CASSETTE_MAIL_*` 是兜底（默认角色零配置即旧行为），char.json 的 mail 段逐键覆盖。
+状态（游标、待醒 flag、草稿、发件日志、附件）各自落 `state/characters/<id>/mail/`。
+所有公开函数的 `char_id` 都在**参数表末尾且有缺省**，缺省时看 `_cid()`。
+
 env（见 .env.example）：ADDRESS / AUTH_CODE 必填，其余有默认。授权码是密钥待遇：
-只活在 .env，不进对话不入库；改了要重启后端（子进程继承的是启动时那份环境）。
+只活在 .env / char.json，不进对话不入库；改了要重启后端（子进程继承的是启动时那份环境）。
 """
 import codecs
 import email
@@ -36,10 +41,7 @@ from email.utils import formataddr, getaddresses, parsedate_to_datetime
 from pathlib import Path
 
 import config
-
-MAIL_DIR = config.BASE_DIR / "state" / "mail"
-DRAFTS_DIR = MAIL_DIR / "drafts"
-SENT_LOG = MAIL_DIR / "sent_log.jsonl"
+import state_store
 
 _BODY_CAP = 20000        # 读信正文上限（字符）：防一封巨型 HTML 邮件吃光上下文
 _LIST_CAP = 30           # 列表一次最多几封
@@ -50,27 +52,58 @@ class MailError(Exception):
     """带给人看的中文说明的失败。壳/路由捕获后原样转述，不带栈。"""
 
 
+# ---------- 这一趟是谁的信箱 ----------
+def _cid(char_id=None) -> str:
+    """显式传参优先；没传就看 `CASSETTE_CHAR_ID`，再退默认角色。
+
+    那个环境变量是 `plugins.mounted()` 按角色注入进 MCP stdio 子进程的（实测：config 的
+    env 是**合并**进子进程环境、且**盖得过**继承来的同名值）。靠它，mail 插件一行都不用改
+    ——插件照旧调 `mail_bridge.inbox(10, False)`，落到谁的信箱由它自己所在的进程决定。
+    ⚠️ 宿主主进程里没有这个变量（所以后端各处调用缺省仍是默认角色）；别在启动后端的
+    shell 里 export 它，那会把整个后端的缺省信箱歪掉。"""
+    if char_id:
+        return char_id
+    return (os.environ.get("CASSETTE_CHAR_ID") or "").strip() or state_store.DEFAULT_CHAR_ID
+
+
+# ---------- 路径（每个角色一套，别再用模块级常量）----------
+def _mail_dir(char_id=None) -> Path:
+    return state_store.char_state_dir(_cid(char_id)) / "mail"
+
+
+def _drafts_dir(char_id=None) -> Path:
+    return _mail_dir(char_id) / "drafts"
+
+
+def _sent_log(char_id=None) -> Path:
+    return _mail_dir(char_id) / "sent_log.jsonl"
+
+
 # ---------- 配置 ----------
-def _env(key: str, default: str = "") -> str:
-    return (os.environ.get(f"CASSETTE_MAIL_{key}") or default).strip()
+def _raw(char_id=None) -> dict:
+    import characters      # 函数内 import：characters → state_store/config，避免模块级环
+    return characters.mail_conf(_cid(char_id))
 
 
-def configured() -> bool:
-    return bool(_env("ADDRESS") and _env("AUTH_CODE"))
+def configured(char_id=None) -> bool:
+    r = _raw(char_id)
+    return bool(r["ADDRESS"] and r["AUTH_CODE"])
 
 
-def _cfg() -> dict:
-    if not configured():
-        raise MailError("邮箱还没配置：把 CASSETTE_MAIL_ADDRESS / CASSETTE_MAIL_AUTH_CODE "
-                        "写进 server/.env 再重启后端")
+def _cfg(char_id=None) -> dict:
+    r = _raw(char_id)
+    if not (r["ADDRESS"] and r["AUTH_CODE"]):
+        raise MailError("邮箱还没配置：默认角色写 server/.env 的 CASSETTE_MAIL_ADDRESS / "
+                        "CASSETTE_MAIL_AUTH_CODE，其它角色写 characters/<id>/char.json "
+                        "的 mail 段（address / auth_code），再重启后端")
     return {
-        "address": _env("ADDRESS"),
-        "auth_code": _env("AUTH_CODE"),
-        "imap_host": _env("IMAP_HOST", "imap.163.com"),
-        "smtp_host": _env("SMTP_HOST", "smtp.163.com"),
+        "address": r["ADDRESS"],
+        "auth_code": r["AUTH_CODE"],
+        "imap_host": r["IMAP_HOST"] or "imap.163.com",
+        "smtp_host": r["SMTP_HOST"] or "smtp.163.com",
         # 分隔符把中英文逗号/分号都认了——这是机主手填的字段，别让一个全角逗号毁掉白名单
-        "allow_to": {a.lower() for a in re.split(r"[,，;；\s]+", _env("ALLOW_TO")) if a},
-        "hourly_cap": int(_env("HOURLY_CAP", "5") or "5"),
+        "allow_to": {a.lower() for a in re.split(r"[,，;；\s]+", r["ALLOW_TO"]) if a},
+        "hourly_cap": int(r["HOURLY_CAP"] or "5"),
     }
 
 
@@ -163,9 +196,9 @@ def _check_uid(uid: str) -> bytes:
     return uid.encode()
 
 
-def inbox(limit: int = 10, unread_only: bool = False) -> list[dict]:
+def inbox(limit: int = 10, unread_only: bool = False, char_id=None) -> list[dict]:
     """收件箱摘要，新的在前。只 PEEK 信头，不动已读标记——「扫一眼列表」不算读过。"""
-    cfg = _cfg()
+    cfg = _cfg(char_id)
     limit = max(1, min(int(limit or 10), _LIST_CAP))
     conn = _imap(cfg)
     try:
@@ -194,10 +227,10 @@ def inbox(limit: int = 10, unread_only: bool = False) -> list[dict]:
         _quiet_logout(conn)
 
 
-def read_mail(uid: str) -> dict:
+def read_mail(uid: str, char_id=None) -> dict:
     """取一封信的正文（顺手标已读——TA 读过了就是读过了）。text/plain 优先，
     只有 HTML 就剥标签。正文截断到 _BODY_CAP 字符。"""
-    cfg = _cfg()
+    cfg = _cfg(char_id)
     buid = _check_uid(uid)
     conn = _imap(cfg)
     try:
@@ -217,7 +250,7 @@ def read_mail(uid: str) -> dict:
             "subject": _decode_header(msg.get("Subject")) or "（无主题）",
             "date": _fmt_date(msg),
             "body": body,
-            "attachments": _extract_attachments(msg, uid),
+            "attachments": _extract_attachments(msg, uid, char_id),
         }
     finally:
         _quiet_logout(conn)
@@ -235,7 +268,7 @@ def _safe_filename(name: str) -> str:
     return name[:80] or "attachment.bin"
 
 
-def _extract_attachments(msg, uid: str) -> list[dict]:
+def _extract_attachments(msg, uid: str, char_id=None) -> list[dict]:
     """信里的附件 → [{filename, content_type, size, text? | image_b64? | saved_path?}]。
     一期连附件名字都不报，TA 根本不知道有附件（mianmian 那边寄来的信实踩）。
     能进上下文的直接带上（文本附件给全文、不太大的图给 base64）；进不了的（PDF、
@@ -263,7 +296,7 @@ def _extract_attachments(msg, uid: str) -> list[dict]:
             att["image_b64"] = base64.b64encode(payload).decode("ascii")
         elif payload:
             try:
-                d = MAIL_DIR / "attachments" / str(uid)
+                d = _mail_dir(char_id) / "attachments" / str(uid)
                 d.mkdir(parents=True, exist_ok=True)
                 p = d / _safe_filename(att["filename"])
                 p.write_bytes(payload)
@@ -274,9 +307,9 @@ def _extract_attachments(msg, uid: str) -> list[dict]:
     return out
 
 
-def mark(uid: str, action: str) -> str:
+def mark(uid: str, action: str, char_id=None) -> str:
     """read / unread 两档。"""
-    cfg = _cfg()
+    cfg = _cfg(char_id)
     buid = _check_uid(uid)
     if action not in ("read", "unread"):
         raise MailError(f"action 只有 read / unread：{action!r}")
@@ -303,32 +336,43 @@ def _quiet_logout(conn) -> None:
 # 线程里**，wake 的预闸门只读本地 flag 文件，保持纯本地（见 wake.maybe_wake 的口径）。
 # 唤醒白名单发件人（WAKE_FROM，默认 = 发信白名单 ∪ beacon@theolorne.com）来信才写
 # flag；其他信只推进游标，躺收件箱等自然醒 / 机主让看——机主 2026-08-11 拍板的规则。
-WATCH_PATH = MAIL_DIR / "watch.json"                # {"last_uid": N} 已看到哪的游标
-WAKE_PENDING_PATH = MAIL_DIR / "wake_pending.json"  # 待醒 flag：[{uid,from,subject}, ...]
+def _watch_path(char_id=None) -> Path:       # {"last_uid": N} 已看到哪的游标
+    return _mail_dir(char_id) / "watch.json"
 
 
-def poll_sec() -> int:
-    return max(60, int(_env("POLL_SEC", "300") or "300"))
+def _wake_pending_path(char_id=None) -> Path:  # 待醒 flag：[{uid,from,subject}, ...]
+    return _mail_dir(char_id) / "wake_pending.json"
 
 
-def _wake_from(cfg: dict) -> set[str]:
-    raw = _env("WAKE_FROM")
+def poll_sec(char_id=None) -> int:
+    return max(60, int(_raw(char_id)["POLL_SEC"] or "300"))
+
+
+def _wake_from(cfg: dict, char_id=None) -> set[str]:
+    raw = _raw(char_id)["WAKE_FROM"]
     if raw:
         return {a.lower() for a in re.split(r"[,，;；\s]+", raw) if a}
     return cfg["allow_to"] | {"beacon@theolorne.com"}
 
 
-def _write_watch(last_uid: int) -> None:
-    MAIL_DIR.mkdir(parents=True, exist_ok=True)
-    tmp = MAIL_DIR / f".watch.{os.getpid()}.tmp"
-    tmp.write_text(json.dumps({"last_uid": last_uid}), "utf-8")
-    tmp.replace(WATCH_PATH)
+def _atomic_write(path: Path, text: str) -> None:
+    """临时名带 pid+uuid：多角色是同一个进程里的**多次**调用，只带 pid 会撞
+    （CODING_GUIDELINES §3 那条固定 .tmp 名并发写的老坑）。"""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+    tmp.write_text(text, "utf-8")
+    tmp.replace(path)
 
 
-def watch_tick() -> None:
+def _write_watch(last_uid: int, char_id=None) -> None:
+    _atomic_write(_watch_path(char_id), json.dumps({"last_uid": last_uid}))
+
+
+def watch_tick(char_id=None) -> None:
     """看一眼有没有新信。游标之后的新 uid：唤醒白名单发件人 → 记进 flag；其余只推进
-    游标。**第一拍只立游标不回溯**——别把陈年旧信当成刚到的，一装插件就炸一次醒来。"""
-    cfg = _cfg()
+    游标。**第一拍只立游标不回溯**——别把陈年旧信当成刚到的，一装插件就炸一次醒来。
+    每个角色各查各的号、各推各的游标（watcher 线程按角色轮着调）。"""
+    cfg = _cfg(char_id)
     conn = _imap(cfg)
     try:
         typ, data = conn.uid("search", None, "ALL")
@@ -338,16 +382,16 @@ def watch_tick() -> None:
         if not uids:
             return
         try:
-            last = int(json.loads(WATCH_PATH.read_text("utf-8"))["last_uid"])
+            last = int(json.loads(_watch_path(char_id).read_text("utf-8"))["last_uid"])
         except Exception:
             last = None
         if last is None:
-            _write_watch(uids[-1])
+            _write_watch(uids[-1], char_id)
             return
         fresh = [u for u in uids if u > last]
         if not fresh:
             return
-        wake_from = _wake_from(cfg)
+        wake_from = _wake_from(cfg, char_id)
         hits = []
         for u in fresh:
             typ, parts = conn.uid("fetch", str(u).encode(),
@@ -363,34 +407,36 @@ def watch_tick() -> None:
                              "subject": _decode_header(msg.get("Subject")) or "（无主题）"})
         # 游标推进和 flag 写入都在成功扫完之后：中途抛异常就整拍作废，下拍重来，
         # 顶多重复看一遍信头，绝不会静默跳过一段 uid。
-        _write_watch(uids[-1])
+        _write_watch(uids[-1], char_id)
         if hits:
-            _merge_wake_pending(hits)
+            _merge_wake_pending(hits, char_id)
     finally:
         _quiet_logout(conn)
 
 
-def _merge_wake_pending(hits: list[dict]) -> None:
+def _merge_wake_pending(hits: list[dict], char_id=None) -> None:
+    path = _wake_pending_path(char_id)
     with _LOCK:
         try:
-            old = json.loads(WAKE_PENDING_PATH.read_text("utf-8"))
+            old = json.loads(path.read_text("utf-8"))
         except Exception:
             old = []
         seen = {h["uid"] for h in old}
         merged = old + [h for h in hits if h["uid"] not in seen]
-        tmp = MAIL_DIR / f".pending.{os.getpid()}.tmp"
-        tmp.write_text(json.dumps(merged, ensure_ascii=False), "utf-8")
-        tmp.replace(WAKE_PENDING_PATH)
+        _atomic_write(path, json.dumps(merged, ensure_ascii=False))
 
 
-def consume_wake_pending() -> list[dict]:
-    """读并清掉待醒 flag（wake 预闸门用，纯本地、不碰网络）。没有则空列表。"""
+def consume_wake_pending(char_id=None) -> list[dict]:
+    """读并清掉这个角色的待醒 flag（wake 预闸门用，纯本地、不碰网络）。没有则空列表。
+    flag 是消费式的，且**各人一份**——不会再出现「一个角色把写给另一个角色的信
+    的唤醒吞掉」。"""
+    path = _wake_pending_path(char_id)
     with _LOCK:
         try:
-            items = json.loads(WAKE_PENDING_PATH.read_text("utf-8"))
+            items = json.loads(path.read_text("utf-8"))
         except Exception:
             return []
-        WAKE_PENDING_PATH.unlink(missing_ok=True)
+        path.unlink(missing_ok=True)
     return items if isinstance(items, list) else []
 
 
@@ -429,9 +475,9 @@ def _now() -> datetime:
     return datetime.now(config.APP_TZ)
 
 
-def _sent_last_hour() -> int:
+def _sent_last_hour(char_id=None) -> int:
     try:
-        lines = SENT_LOG.read_text("utf-8").strip().splitlines()
+        lines = _sent_log(char_id).read_text("utf-8").strip().splitlines()
     except OSError:
         return 0
     cutoff = _now() - timedelta(hours=1)
@@ -447,19 +493,20 @@ def _sent_last_hour() -> int:
     return n
 
 
-def _append_sent_log(entry: dict) -> None:
-    MAIL_DIR.mkdir(parents=True, exist_ok=True)
-    with _LOCK, open(SENT_LOG, "a", encoding="utf-8") as f:
+def _append_sent_log(entry: dict, char_id=None) -> None:
+    path = _sent_log(char_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with _LOCK, open(path, "a", encoding="utf-8") as f:
         f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
 
-def _smtp_send(cfg: dict, to: str, subject: str, body: str) -> None:
-    # From 必须就是登录账号（163 硬性要求，否则 DT:SPM 退信）；显示名用 TA 的名字。
+def _smtp_send(cfg: dict, to: str, subject: str, body: str, char_id=None) -> None:
+    # From 必须就是登录账号（163 硬性要求，否则 DT:SPM 退信）；显示名用发信这位的名字。
     msg = MIMEText(body, "plain", "utf-8")
-    # From 显示名 = 邮箱归属角色的名字（mail 是独占资源，谁的邮箱署谁的名）。
+    # 从前这里是 display_name(owner_of("mailbox"))——那时候信箱是独占资源、全机只有一个。
+    # 现在一人一个号，署名当然是**这封信是谁发的**，不然 Cass 发的信落款会是 TA 的名字。
     import characters
-    import plugins
-    msg["From"] = formataddr((str(Header(characters.display_name(plugins.owner_of("mailbox")),
+    msg["From"] = formataddr((str(Header(characters.display_name(_cid(char_id)),
                                          "utf-8")), cfg["address"]))
     msg["To"] = to
     msg["Subject"] = Header(subject or "（无主题）", "utf-8")
@@ -478,49 +525,49 @@ def _check_to(to: str) -> str:
     return addrs[0]
 
 
-def send(to: str, subject: str, body: str, origin: str = "chat") -> dict:
+def send(to: str, subject: str, body: str, origin: str = "chat", char_id=None) -> dict:
     """AI 那条路的发信入口。白名单内直发；白名单外落草稿，等机主在 app 里确认。
-    返回 {"sent": True, ...} 或 {"drafted": True, "draft_id": ...}。"""
-    cfg = _cfg()
+    返回 {"sent": True, ...} 或 {"drafted": True, "draft_id": ...}。
+    白名单、频控、草稿都是**这个角色自己那份**。"""
+    cfg = _cfg(char_id)
     to_addr = _check_to(to)
     if not (body or "").strip():
         raise MailError("正文是空的")
     if to_addr.lower() not in cfg["allow_to"]:
-        d = _draft_new(to_addr, subject, body, origin)
+        d = _draft_new(to_addr, subject, body, origin, char_id)
         return {"drafted": True, "draft_id": d["id"], "to": to_addr}
-    if _sent_last_hour() >= cfg["hourly_cap"]:
+    if _sent_last_hour(char_id) >= cfg["hourly_cap"]:
         raise MailError(f"这小时发太多了（上限 {cfg['hourly_cap']} 封），缓缓再发")
-    _smtp_send(cfg, to_addr, subject, body)
+    _smtp_send(cfg, to_addr, subject, body, char_id)
     _append_sent_log({"ts": _now().isoformat(), "to": to_addr,
-                      "subject": subject or "", "origin": origin})
+                      "subject": subject or "", "origin": origin}, char_id)
     return {"sent": True, "to": to_addr}
 
 
 # ---------- 草稿信箱（白名单外的信在这排队，机主 app 里过目才发）----------
-def _draft_new(to: str, subject: str, body: str, origin: str) -> dict:
-    DRAFTS_DIR.mkdir(parents=True, exist_ok=True)
+def _draft_new(to: str, subject: str, body: str, origin: str, char_id=None) -> dict:
     d = {"id": uuid.uuid4().hex[:12], "to": to, "subject": subject or "",
          "body": body, "ts": _now().isoformat(), "origin": origin}
-    tmp = DRAFTS_DIR / f".{d['id']}.tmp"
-    tmp.write_text(json.dumps(d, ensure_ascii=False, indent=2), "utf-8")
-    tmp.replace(DRAFTS_DIR / f"{d['id']}.json")
+    _atomic_write(_drafts_dir(char_id) / f"{d['id']}.json",
+                  json.dumps(d, ensure_ascii=False, indent=2))
     return d
 
 
 _DRAFT_ID_RE = re.compile(r"^[0-9a-f]{12}$")
 
 
-def _draft_path(draft_id: str) -> Path:
+def _draft_path(draft_id: str, char_id=None) -> Path:
     if not _DRAFT_ID_RE.match(draft_id or ""):
         raise MailError(f"草稿编号不合法：{draft_id!r}")
-    return DRAFTS_DIR / f"{draft_id}.json"
+    return _drafts_dir(char_id) / f"{draft_id}.json"
 
 
-def drafts_list() -> list[dict]:
-    if not DRAFTS_DIR.is_dir():
+def drafts_list(char_id=None) -> list[dict]:
+    d = _drafts_dir(char_id)
+    if not d.is_dir():
         return []
     out = []
-    for p in DRAFTS_DIR.glob("*.json"):
+    for p in d.glob("*.json"):
         try:
             out.append(json.loads(p.read_text("utf-8")))
         except Exception:
@@ -528,26 +575,26 @@ def drafts_list() -> list[dict]:
     return sorted(out, key=lambda d: d.get("ts", ""), reverse=True)
 
 
-def draft_send(draft_id: str) -> dict:
+def draft_send(draft_id: str, char_id=None) -> dict:
     """机主确认路：这里是白名单的**唯一例外**——人当场看过、人按的键。频控照算。"""
-    cfg = _cfg()
-    path = _draft_path(draft_id)
+    cfg = _cfg(char_id)
+    path = _draft_path(draft_id, char_id)
     try:
         d = json.loads(path.read_text("utf-8"))
     except OSError:
         raise MailError("这份草稿不在了（可能已经发过或删了）")
-    if _sent_last_hour() >= cfg["hourly_cap"]:
+    if _sent_last_hour(char_id) >= cfg["hourly_cap"]:
         raise MailError(f"这小时发太多了（上限 {cfg['hourly_cap']} 封），缓缓再发")
-    _smtp_send(cfg, d["to"], d.get("subject", ""), d.get("body", ""))
+    _smtp_send(cfg, d["to"], d.get("subject", ""), d.get("body", ""), char_id)
     _append_sent_log({"ts": _now().isoformat(), "to": d["to"],
-                      "subject": d.get("subject", ""), "origin": "draft_confirm"})
+                      "subject": d.get("subject", ""), "origin": "draft_confirm"}, char_id)
     with _LOCK:
         path.unlink(missing_ok=True)
     return {"sent": True, "to": d["to"]}
 
 
-def draft_delete(draft_id: str) -> dict:
-    path = _draft_path(draft_id)
+def draft_delete(draft_id: str, char_id=None) -> dict:
+    path = _draft_path(draft_id, char_id)
     with _LOCK:
         found = path.exists()
         path.unlink(missing_ok=True)

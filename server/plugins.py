@@ -86,18 +86,17 @@ def _mcp_config_path(context: str, char_id=None):
 #
 # 【暂时只有一份】——是我们自己限成一份的，将来可以每人一份。归属只是过渡期的办法，
 # 真做成每人一份之后，对应的条目就该从 EXCLUSIVE 里删掉（它不再是独占资源）。
-#   mailbox  **这个最该做，优先级排在下面两个前面**：邮箱是身份不是设备——每个角色
-#            该有自己的信箱，共用一个意味着 A 会读到写给 B 的信。现状：账号从 .env 的
-#            CASSETTE_MAIL_* 读，state/mail/（游标 watch.json、待醒 flag、草稿、
-#            发件日志、附件）整个是全局单例，mail_bridge 全线没有角色维度。
-#            要做：接线挪进 char.json（照 characters.ombre_conf 那套「.env 兜底 +
-#            char.json 逐键覆盖」的现成模式）、state 挪进角色目录、mail_bridge 收
-#            char_id、_mail_watcher 从「看 owner 的开关」改成遍历角色各查各的。
-#            不碰常驻服务，是三个里最干净的一个。
+#   ~~mailbox~~ ✅ 2026-08-15 做掉了，已从 EXCLUSIVE 移除——**一人一个信箱**。
+#            接线走 characters.mail_conf（.env 兜底 + char.json 的 mail 段逐键覆盖），
+#            state 各落 state/characters/<id>/mail/，mail_bridge 全线收 char_id，
+#            _mail_watcher 遍历角色各查各的号。插件本体一行没改：mounted() 给 stdio
+#            server 下发 CASSETTE_CHAR_ID，mail_bridge._cid() 读它认人。
 #   chrome   带登录态的浏览器。playwright-mcp 的端口和 --user-data-dir 本来就是
-#            参数，Chrome 多实例原生支持；卡住的是宿主侧——mounted() 现在不给插件
-#            传 env（没法按角色下发 CASSETTE_BROWSER_MCP_URL），且 browser_keeper
-#            是单例（MCP_URL 和 pgrep 特征都钉死一份）。工作量中等，不是做不到。
+#            参数，Chrome 多实例原生支持；卡住的是宿主侧——browser_keeper 是单例
+#            （MCP_URL 和 pgrep 特征都钉死一份）。⚠️ 原来这里还写着"mounted() 不给
+#            插件传 env"，那一半**已经不成立**（见 mounted 里的 env 下发，2026-08-15
+#            实测 config 的 env 是合并进子进程且盖得过继承值）——按角色下发
+#            CASSETTE_BROWSER_MCP_URL 这条路现在通了，剩下的只有 keeper 单例。
 #   tmux     code/game 会话。code_bridge.start() 起会话前杀光所有档案，同一时刻
 #            全机只有一个会话（当初为"意识体唯一连续"有意这么设计）。每人一台
 #            "自己的 MacBook"是能做的，留到三期工作群：会话名带角色、session.json
@@ -108,7 +107,6 @@ EXCLUSIVE: dict[str, list[str]] = {
     "game-maayuan": ["maayuan"],
     "game-story":   ["maayuan", "tmux"],
     "codemode":     ["tmux"],
-    "mail":         ["mailbox"],
     "browser":      ["chrome"],
     "beacon":       ["beacon"],
 }
@@ -117,7 +115,6 @@ EXCLUSIVE: dict[str, list[str]] = {
 RESOURCE_LABEL: dict[str, str] = {
     "maayuan": "《如鸢》游戏账号",
     "tmux": "电脑上的会话",
-    "mailbox": "邮箱账号",
     "chrome": "带登录态的浏览器",
     "beacon": "Beacon 卡",
 }
@@ -637,8 +634,14 @@ def mounted(context: str = "chat", char_id=None) -> tuple[Optional[str], list[st
         m = _read_manifest(name)
         if m is None:
             continue
+        # env 下发角色身份：插件是 stdio 子进程，光看代码不知道自己在替谁干活。
+        # 实测（2026-08-15，两轮）：mcp-config 里的 env 是**合并**进子进程环境（PATH /
+        # HOME 这些照样在，插件不会因为缺环境炸），且**盖得过**从 claude 进程继承来的
+        # 同名值。所以插件本体一行不用改——宿主侧的 bridge 自己读 CASSETTE_CHAR_ID 认人
+        # （见 mail_bridge._cid）。要按角色下发别的接线（chrome 的 MCP_URL 之类）也走这儿。
         servers[name] = {"type": "stdio", "command": sys.executable,
-                         "args": [str(PLUGINS_DIR / name / m["entry"])]}
+                         "args": [str(PLUGINS_DIR / name / m["entry"])],
+                         "env": {"CASSETTE_CHAR_ID": me}}
         tools += [f"mcp__{name}__{t}" for t in m["tools"]
                   if context != "wake" or wake_on.get(name)
                   or t not in WAKE_TOOL_EXCLUDE.get(name, ())]

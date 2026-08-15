@@ -93,26 +93,36 @@ def _browser_keeper_watchdog() -> None:
 
 
 def _mail_watcher() -> None:
-    """邮箱 watcher：每拍看一眼有没有新信（mail_bridge.watch_tick）。网络活动只在这个
-    线程；wake 的预闸门只读它写的本地 flag（保持纯本地）。按插件开关做门——mail 没启用
-    或没配置就纯睡觉，商店里拨开关不用重启。失败只在状态翻转时报一次，别每 5 分钟刷屏。"""
-    err_logged = False
+    """邮箱 watcher：每拍**逐个角色**看一眼有没有新信（mail_bridge.watch_tick）。网络活动
+    只在这个线程；wake 的预闸门只读它写的本地 flag（保持纯本地）。按插件开关做门——某个
+    角色的 mail 没启用或没配置就跳过它，商店里拨开关不用重启。
+
+    一人一个信箱（不再是独占资源）：各查各的号、各推各的游标、各写各的待醒 flag。
+    失败按角色分别记，只在状态翻转时报一次，别每 5 分钟刷屏。"""
+    err_logged: dict[str, bool] = {}
     while True:
-        on = False
-        try:
-            # 邮箱是独占资源：开关看**归属角色**的启用表（plugins.owner_of）。
-            on = bool(plugins._read_enabled(plugins.owner_of("mailbox")).get("mail"))
-        except Exception:
-            pass
-        if on and mail_bridge.configured():
+        gaps = []
+        for cid in characters.ids():
             try:
-                mail_bridge.watch_tick()
-                err_logged = False
+                on = bool(plugins._read_enabled(cid).get("mail"))
+            except Exception:
+                on = False
+            if not (on and mail_bridge.configured(cid)):
+                continue
+            try:
+                gaps.append(mail_bridge.poll_sec(cid))
+            except Exception:
+                pass
+            try:
+                mail_bridge.watch_tick(cid)
+                err_logged[cid] = False
             except Exception as e:
-                if not err_logged:
-                    logerr(f"mail watcher 失败（恢复前不再报）: {e}")
-                    err_logged = True
-        time.sleep(mail_bridge.poll_sec())
+                if not err_logged.get(cid):
+                    logerr(f"mail watcher 失败（{cid}，恢复前不再报）: {e}")
+                    err_logged[cid] = True
+        # 节奏取所有在用角色里最短的那个：谁要求查得勤就按谁来，慢的那位无非多查几次。
+        # 一个都没开就按默认值睡，别把线程变成空转。
+        time.sleep(min(gaps) if gaps else mail_bridge.poll_sec())
 
 
 @asynccontextmanager
@@ -1274,27 +1284,33 @@ def plugins_uninstall(body: PluginIn, x_auth: Optional[str] = Header(default=Non
 
 
 @app.get("/mail/drafts")
-def mail_drafts_list(x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
+def mail_drafts_list(char: Optional[str] = None,
+                     x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
+    """草稿是**每个角色自己**那份（信箱一人一个）。app 的 authedRequest 本来就给每个
+    请求带 ?char=<当前角色>，这里接住就对了——不接的话会静默落默认角色，看到别人的草稿。"""
     verify_auth(x_auth)
-    return {"items": mail_bridge.drafts_list(),
-            "configured": mail_bridge.configured(),
+    cid = _resolve_char(char)
+    return {"items": mail_bridge.drafts_list(cid),
+            "configured": mail_bridge.configured(cid),
             "plugin_installed": (plugins.PLUGINS_DIR / "mail").is_dir()}
 
 
 @app.post("/mail/drafts/{draft_id}/send")
-def mail_draft_send(draft_id: str, x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
+def mail_draft_send(draft_id: str, char: Optional[str] = None,
+                    x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
     verify_auth(x_auth)
     try:
-        return mail_bridge.draft_send(draft_id)
+        return mail_bridge.draft_send(draft_id, _resolve_char(char))
     except mail_bridge.MailError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
 
 @app.post("/mail/drafts/{draft_id}/delete")
-def mail_draft_delete(draft_id: str, x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
+def mail_draft_delete(draft_id: str, char: Optional[str] = None,
+                      x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
     verify_auth(x_auth)
     try:
-        return mail_bridge.draft_delete(draft_id)
+        return mail_bridge.draft_delete(draft_id, _resolve_char(char))
     except mail_bridge.MailError as e:
         raise HTTPException(status_code=400, detail=str(e))
 

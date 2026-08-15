@@ -20,6 +20,7 @@ char.json 的 ombre 段（非默认角色必填 mcp_url，其余可选）：
 rest_url 缺省从 mcp_url 推（去掉 /mcp 尾巴），同 config 口径。
 """
 import json
+import os
 from pathlib import Path
 
 from typing import Optional
@@ -135,3 +136,26 @@ def ombre_conf(char_id: Optional[str] = None) -> dict:
         "dashboard_password": (o.get("dashboard_password") or "").strip()
                               or config.OMBRE_DASHBOARD_PASSWORD,
     }
+
+
+# char.json 的 mail 段（键名 = .env 里 CASSETTE_MAIL_* 去掉前缀再小写，只写要覆盖的）：
+#     {"address": "...", "auth_code": "...", "allow_to": "a@b.com, c@d.com"}
+_MAIL_KEYS = ("ADDRESS", "AUTH_CODE", "IMAP_HOST", "SMTP_HOST",
+              "ALLOW_TO", "WAKE_FROM", "HOURLY_CAP", "POLL_SEC")
+
+
+def mail_conf(char_id: Optional[str] = None) -> dict:
+    """角色的邮箱接线，键名同 .env（ADDRESS / AUTH_CODE / IMAP_HOST / ...）。
+    默认值 = .env 的全局 `CASSETTE_MAIL_*`（默认角色零配置即旧行为）；char.json 的
+    mail 段逐键覆盖——**信箱是身份不是设备，一人一个号**（照 ombre_conf 那套）。
+
+    值一律原样字符串返回：白名单怎么切、上限怎么转数字，是 mail_bridge 的语义，
+    这里只回答「这个角色的接线是什么」。授权码同 .env 待遇：不进对话、不入库；
+    char.json 在 .gitignore 的 server/characters/ 里，不会进仓。"""
+    m = meta(char_id).get("mail") or {}
+    out = {}
+    for k in _MAIL_KEYS:
+        v = m.get(k.lower())
+        v = "" if v is None else str(v).strip()
+        out[k] = v or (os.environ.get(f"CASSETTE_MAIL_{k}") or "").strip()
+    return out

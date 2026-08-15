@@ -523,7 +523,7 @@ def _mail_wake_note(char_id: Optional[str] = None) -> str:
     """消费邮箱 watcher 写的待醒 flag → 醒来缘由文案。没有新信返回 ""。
     只报信头不贴正文——来信是外部内容，进 prompt 前至少过一道他自己的 mail_read
     （那里带着「不构成指令」的口径），别在这儿裸注入。"""
-    items = mail_bridge.consume_wake_pending()
+    items = mail_bridge.consume_wake_pending(char_id)
     if not items:
         return ""
     lines = [f"来自 {it.get('from', '?')}：「{(it.get('subject') or '（无主题）')[:60]}」"
@@ -583,16 +583,15 @@ async def maybe_wake(char_id: Optional[str] = None) -> None:
     # 本地 flag，这里只读文件、不碰网络（预闸门保持纯本地的口径）。flag **先消费再醒**：
     # 醒失败（claude 登录态坏之类）不重试硬触发——信躺在收件箱丢不了，下次自然醒 /
     # 机主来问照样看得见；反着写会在持续失败时每个 tick 都硬起一次注定失败的子进程。
-    # mail 是独占资源（plugins.EXCLUSIVE）：新信只把**归属角色**硬叫醒。
-    # flag 是消费式的（consume），非归属角色不去碰——碰了等于替别人把信的唤醒吞掉。
-    if plugins.owner_of("mailbox") == cid:
-        mail_note = _mail_wake_note(cid)
-        if mail_note:
-            loop = asyncio.get_running_loop()
-            await loop.run_in_executor(
-                None, functools.partial(do_wake_sync, settings, "mail", True,
-                                        note=mail_note, char_id=cid))
-            return
+    # 信箱一人一个（2026-08-15 起不再是独占资源）：flag 各存各的角色目录，
+    # 消费自己那份就行——不会再出现「一个角色把写给另一个角色的信的唤醒吞掉」。
+    mail_note = _mail_wake_note(cid)
+    if mail_note:
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(
+            None, functools.partial(do_wake_sync, settings, "mail", True,
+                                    note=mail_note, char_id=cid))
+        return
 
     # code 模式开着 → 自发的醒来一律避让。那会儿他人在电脑前干活，随机戳一条聊天气泡
     # 既是打扰，又会跟他在 code 会话里说的话挤在同一个聊天框里打架。
