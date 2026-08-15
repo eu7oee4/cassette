@@ -13,6 +13,7 @@ struct HousePage: View {
 
     @EnvironmentObject private var profileStore: ProfileStore
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.dismiss) private var dismiss
 
     @State private var world: WorldSnapshot?
     @State private var floor = 2
@@ -140,6 +141,16 @@ struct HousePage: View {
                     Image(systemName: "pawprint")
                         .font(.system(size: 18, weight: .medium))
                         .foregroundStyle(Color.house.accent)
+                        .frame(width: 38, height: 38)
+                        .background(Circle().fill(Color.house.surface))
+                }
+            } else {
+                // 普通推入页（抽屉进来的）：系统导航栏被自定义顶栏顶掉了，返回键必须
+                // 自己画——漏了它整页就没有出口（实锤：只能划掉 app 重开）。
+                Button { dismiss() } label: {
+                    Image(systemName: "chevron.left")
+                        .font(.system(size: 16, weight: .semibold))
+                        .foregroundStyle(Color.house.textPrimary)
                         .frame(width: 38, height: 38)
                         .background(Circle().fill(Color.house.surface))
                 }
