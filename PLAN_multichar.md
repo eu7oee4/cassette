@@ -33,10 +33,10 @@
 
 | 实例 | 版本 | 备注 |
 |---|---|---|
-| Cass `ombre-brain`(18001) | ~2.7 本地镜像 + 3 自有补丁 | 247 桶，存 `~/Documents/luvclaude` |
+| Cass `ombre-brain`(18001) | 官方 `p0luz/ombre-brain:2.13.1`（2026-08-15 升级，compose 在 `~/Documents/ombre-cass-run/`） | 290 桶，存 `~/Documents/luvclaude`；回滚：`ombre-brain:rollback-20260815` + `luvclaude_backup_20260815.tar.gz` |
 | cassette `ombre-cassette`(18002) | 官方 `p0luz/ombre-brain:2.13.1` | |
 | 上游最新 | 2.17.4 | git tag 停在 v2.7.6，版本看 CHANGELOG/VERSION |
-| `ombre-upgrade-test`(18003) | 2.13.1 测试残留 | 升级日 `docker rm -f` + 清 `~/Documents/_ombre_upgrade_test` |
+| ~~`ombre-upgrade-test`(18003)~~ | 已清（2026-08-15） | 容器和 `~/Documents/_ombre_upgrade_test` 都删了 |
 
 ## M0 · 醒来预算（独立可发版，最先做）
 
@@ -121,7 +121,13 @@
 - 头像 `Profile/other.png` → `Profile/<charID>.png`；`syncPending()` 按 char_id 路由 + 未读角标。
 - ⚠️ 新增 Swift 文件注意 pbxproj 是 skip-worktree 的，提交按老规矩摘 hunk。
 
-## M3-0 · Cass 的 Ombre 升级（搬家紧前执行）
+## M3-0 · Cass 的 Ombre 升级（搬家紧前执行）—— ✅ 2026-08-15 完成
+
+> 实况：官方镜像跑在 `~/Documents/ombre-cass-run/`（容器名沿用 ombre-brain，只绑 127.0.0.1，
+> 挂进 ombre-cassette-run_default 网络借 ombre-ollama 做 bge-m3 embedding，290 桶全量索引完；
+> 顺手修掉了 2.7 时代 embedding 404）。MCP 开静态 token，mianmian 后端改为动态渲染
+> `server/state/ombre.mcp.json`（git 里的静态文件废弃）+ `_ombre_mcp_rpc` 带 Bearer 头。
+> md5 全量比对 0 丢失；首启衰减归档 6 个刚跌破 0.3 的桶（只改 type 字段，可从 archive/ 恢复）。
 
 照 `~/mianmian-app/server/PLAN_ombre_upgrade.md`，结合搬家前提有四个调整：
 
@@ -152,7 +158,7 @@
 退役切换日 checklist：
 - [ ] mianmian 后端 `launchctl unload com.mianmian.backend`（至少停 wake）
 - [ ] **Ombre 18001 容器保持常驻**（已是 cassette 的依赖）
-- [ ] Desktop ombre 挂载已摘（M3-0 做过则勾掉）
+- [x] Desktop ombre 挂载已摘（M3-0 2026-08-15 做掉，备份 `claude_desktop_config.json.bak-ombre-20260815`）
 - [ ] mianmian app 手机上留作只读或删除，随意
 
 ## 顺序与风险
