@@ -22,6 +22,7 @@ struct RoomPage: View {
     @State private var editingEntry: RoomStateEntry?   // 点了哪条地点状态（弹编辑/清掉）
     @State private var stateDraft = ""                 // add/edit 的草稿
     @State private var stateSheet: StateSheetMode?
+    @FocusState private var inputFocused: Bool         // 输入区聚焦（收键盘/自动触底用）
 
     private let service = ChatService()
 
@@ -94,13 +95,6 @@ struct RoomPage: View {
         }
     }
 
-    private func leave() {
-        Task {
-            _ = try? await service.worldMove(to: "hallway")
-            dismiss()
-        }
-    }
-
     private func stateChange(_ op: String, entry: RoomStateEntry?, text: String?) {
         Task {
             do {
@@ -127,15 +121,8 @@ struct RoomPage: View {
                     .foregroundStyle(Color.house.textSecondary)
             }
             Spacer()
-            if !peek && present {
-                Button(action: leave) {
-                    Label("离开", systemImage: "door.left.hand.open")
-                        .font(.footnote.bold())
-                        .foregroundStyle(Color.house.accent)
-                        .padding(.horizontal, 12).padding(.vertical, 7)
-                        .background(Capsule().fill(Color.house.surface))
-                }
-            }
+            // 没有「离开」按钮：返回只是收起页面，人还留在房间——移动只发生在
+            // 地图上点「去这里 / 出门 / 回家」（机主 2026-08-16 拍板，走廊概念从用户侧移除）。
         }
         .padding(.horizontal, 16).padding(.top, 8).padding(.bottom, 10)
     }
@@ -173,8 +160,6 @@ struct RoomPage: View {
         if let d = detail {
             VStack(alignment: .leading, spacing: 6) {
                 HStack {
-                    Text("这里现在有什么")
-                        .font(.caption.bold()).foregroundStyle(Color.house.textSecondary)
                     Spacer()
                     if !peek && present {
                         Button { stateDraft = ""; stateSheet = .add } label: {
@@ -226,9 +211,21 @@ struct RoomPage: View {
                     ForEach(events) { ev in eventRow(ev).id(ev.id) }
                 }
                 .padding(.horizontal, 16).padding(.vertical, 10)
+                .frame(maxWidth: .infinity, minHeight: 44)
+                // 点事件区空白 = 收键盘（simultaneous：别抢气泡将来可能有的点击）
+                .contentShape(Rectangle())
+                .onTapGesture { inputFocused = false }
             }
+            .scrollDismissesKeyboard(.interactively)
             .onChange(of: events) { _, evs in
                 if let last = evs.last { withAnimation { proxy.scrollTo(last.id, anchor: .bottom) } }
+            }
+            // 键盘弹出 → 底部自动触底（等键盘动画起来再滚，不然滚了个寂寞）
+            .onChange(of: inputFocused) { _, focused in
+                guard focused, let last = events.last else { return }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                    withAnimation { proxy.scrollTo(last.id, anchor: .bottom) }
+                }
             }
         }
     }
@@ -270,12 +267,14 @@ struct RoomPage: View {
         VStack(spacing: 6) {
             TextField("*动作*（可空，如：把外套搭在椅背上）", text: $actionText, axis: .vertical)
                 .font(.footnote.italic())
+                .focused($inputFocused)
                 .textFieldStyle(.plain)
                 .padding(.horizontal, 12).padding(.vertical, 7)
                 .background(RoundedRectangle(cornerRadius: 12).fill(Color.house.surfaceHi))
                 .foregroundStyle(Color.house.textPrimary)
             HStack(spacing: 8) {
                 TextField("说点什么…", text: $speechText, axis: .vertical)
+                    .focused($inputFocused)
                     .textFieldStyle(.plain)
                     .padding(.horizontal, 12).padding(.vertical, 8)
                     .background(RoundedRectangle(cornerRadius: 14).fill(Color.house.surfaceHi))

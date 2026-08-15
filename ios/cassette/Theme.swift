@@ -13,6 +13,12 @@ extension ThemePalette {
         accent: Color(hex: 0x673AB7),
         bubbleMe: Color(hex: 0x9575CD).opacity(0.30)
     )
+
+    /// 深梅（2026-08-16 试验）：取小屋玫瑰灰主题的 tint 色当聊天主题色。
+    static let plumTint = ThemePalette(
+        accent: Color(hex: 0x352526),
+        bubbleMe: Color(hex: 0x352526).opacity(0.30)
+    )
 }
 
 /// 小屋（同居世界）的整套配色：房子/房间视图是一个独立的暖色深色世界，不随系统深浅色走。
@@ -43,14 +49,27 @@ extension HousePalette {
         textSecondary: Color(hex: 0x917A5A),
         line: Color(hex: 0xE9DEC9)
     )
+
+    /// 玫瑰灰（机主 2026-08-16 第二套，暖黑底 + 玫瑰红强调）。
+    static let roseAsh = HousePalette(
+        bg: Color(hex: 0x181716),
+        surface: Color(hex: 0x252322),
+        surfaceHi: Color(hex: 0x352526),      // tint
+        accent: Color(hex: 0xB86166),
+        accentLight: Color(hex: 0x6E3B3E),
+        onAccent: Color(hex: 0xECE8E4),
+        textPrimary: Color(hex: 0xECE8E4),
+        textSecondary: Color(hex: 0x908A84),  // subtle
+        line: Color(hex: 0x363231)            // border
+    )
 }
 
 extension Color {
     /// 当前生效的主题（以后做换主题时，改成从 UserDefaults 读用户选中的那套）。
-    static let current = ThemePalette.violet
+    static let current = ThemePalette.plumTint
 
     /// 小屋当前主题：换主题改这一行。
-    static let house = HousePalette.honeyCaramel
+    static let house = HousePalette.roseAsh
 
     static var theme: Color { current.accent }
     static var bubbleMe: Color { current.bubbleMe }

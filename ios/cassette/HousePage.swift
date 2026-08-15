@@ -34,8 +34,6 @@ struct HousePage: View {
                 ScrollView {
                     VStack(spacing: 14) {
                         floorContent
-                        hallwayRow
-                        awayRow
                     }
                     .padding(.horizontal, 16)
                     .padding(.vertical, 14)
@@ -97,8 +95,8 @@ struct HousePage: View {
 
     private func toggleAway() {
         Task {
-            // 出门 = away；回家 = 先落走廊（回到楼里，想进哪个房间再点）。
-            _ = try? await service.worldMove(to: userLocation == "away" ? "hallway" : "away")
+            // 出门 = away（任意房间可直接出）；回家 = 默认落客厅。
+            _ = try? await service.worldMove(to: userLocation == "away" ? "living_room" : "away")
             await refresh()
         }
     }
@@ -166,11 +164,10 @@ struct HousePage: View {
             }
             Spacer()
             Button(action: toggleAway) {
-                Label(userLocation == "away" ? "回家" : "出门",
-                      systemImage: userLocation == "away" ? "figure.walk.arrival" : "figure.walk.departure")
+                Text(userLocation == "away" ? "回家" : "出门")
                     .font(.footnote.bold())
                     .foregroundStyle(Color.house.accent)
-                    .padding(.horizontal, 12).padding(.vertical, 7)
+                    .padding(.horizontal, 14).padding(.vertical, 7)
                     .background(Capsule().fill(Color.house.surface))
             }
         }
@@ -181,7 +178,10 @@ struct HousePage: View {
         guard let w = world else { return loadError ? "连不上小屋" : "加载中…" }
         let total = w.entities.count
         let home = w.entities.values.filter { $0.location != "away" }.count
-        return "共 \(total) 位住户 · \(home) 人在家"
+        var s = "共 \(total) 位住户 · \(home) 人在家"
+        let away = w.ids(at: "away").compactMap { w.entities[$0]?.name }
+        if !away.isEmpty { s += " · \(away.joined(separator: "、"))出门了" }
+        return s
     }
 
     private var floorTabs: some View {
@@ -261,42 +261,6 @@ struct HousePage: View {
         .overlay(RoundedRectangle(cornerRadius: 20).stroke(Color.house.line, lineWidth: 1))
     }
 
-    // MARK: - 走廊 / 出门
-
-    @ViewBuilder
-    private var hallwayRow: some View {
-        if let w = world {
-            let ids = w.ids(at: "hallway")
-            if !ids.isEmpty {
-                HStack(spacing: 10) {
-                    Image(systemName: "door.left.hand.open")
-                        .foregroundStyle(Color.house.textSecondary)
-                    Text("走廊").font(.footnote).foregroundStyle(Color.house.textSecondary)
-                    Spacer()
-                    HStack(spacing: -8) {
-                        ForEach(ids, id: \.self) { eid in
-                            HouseAvatarChip(entityID: eid, entity: w.entities[eid], size: 30)
-                        }
-                    }
-                }
-                .padding(.horizontal, 14).padding(.vertical, 10)
-                .background(RoundedRectangle(cornerRadius: 14).fill(Color.house.surfaceHi.opacity(0.6)))
-            }
-        }
-    }
-
-    @ViewBuilder
-    private var awayRow: some View {
-        if let w = world {
-            let names = w.ids(at: "away").compactMap { w.entities[$0]?.name }
-            if !names.isEmpty {
-                Text("出门在外：\(names.joined(separator: "、"))")
-                    .font(.caption).foregroundStyle(Color.house.textSecondary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.horizontal, 4)
-            }
-        }
-    }
 }
 
 /// 房间视图的跳转参数。
