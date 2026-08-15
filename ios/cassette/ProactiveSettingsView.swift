@@ -5,6 +5,8 @@ struct ProactiveSettingsView: View {
     @ObservedObject var store: ProactiveSettingsStore
     @State private var loading = true
     @State private var pushTask: Task<Void, Never>? = nil   // 回写防抖（昵称每敲一字都触发 onChange）
+    // 「小屋当首页」是纯本机的界面偏好，不进后端设置——直接落 AppStorage。
+    @AppStorage("houseAsRoot") private var houseAsRoot = false
 
     private let freqLabels: [(String, String)] = [("low", "低"), ("mid", "中"), ("high", "高")]
 
@@ -35,6 +37,12 @@ struct ProactiveSettingsView: View {
                     Toggle("自主醒来", isOn: field(\.enabled))
                 } footer: {
                     Text("开启后，TA 会自主醒来，自己决定要不要发消息给你。")
+                }
+
+                Section {
+                    Toggle("小屋当首页", isOn: $houseAsRoot)
+                } footer: {
+                    Text("开启后，打开 app 先看到小屋（房子视图），聊天变成右下角随时可掏出的「手机」。关掉就回到现在的聊天首页。")
                 }
 
                 // wake 内部设置只在开关打开时显示（关=完全停摆，摆着一排没用的设置反而误导）。

@@ -24,6 +24,10 @@ struct ContentView: View {
     /// 点中的是当前会话时也算——那一下就是"把气泡区整份重建"的手动复位。
     @State private var chatViewNonce = 0
     @AppStorage("hasOnboarded") private var hasOnboarded = false   // 首启起名引导
+    // 「小屋当首页」（同居世界 C3）：开着 = 根视图换成房子、聊天降格为全屏悬浮层（手机）。
+    // 默认关——日常聊天体验一字不变，真机看顺眼了再翻（设置页里有开关）。
+    @AppStorage("houseAsRoot") private var houseAsRoot = false
+    @State private var phoneOpen = false             // 手机悬浮层（仅 houseAsRoot 下有意义）
 
     // 点头像 → 底部弹按钮（改昵称 / 换头像）
     @State private var avatarActionTarget: MessageSender? = nil   // 弹选项的对象
@@ -131,11 +135,20 @@ struct ContentView: View {
     var body: some View {
         ZStack {
             NavigationStack(path: $navPath) {
-                VStack(spacing: 0) {
-                    header
-                    chatBody
+                Group {
+                    if houseAsRoot {
+                        HousePage(asRoot: true,
+                                  unreadCount: chatStore.otherUnreadTotal,
+                                  onOpenDrawer: { drawerOpen = true },
+                                  onOpenPhone: { phoneOpen = true })
+                    } else {
+                        VStack(spacing: 0) {
+                            header
+                            chatBody
+                        }
+                    }
                 }
-                .toolbar(.hidden, for: .navigationBar)   // 聊天页用自定义顶栏
+                .toolbar(.hidden, for: .navigationBar)   // 聊天页/小屋都用自定义顶栏
                 .navigationDestination(for: DrawerPage.self) { destination(for: $0) }
                 // 左缘右滑开抽屉（iOS 标准返回同方向，但只在栈空的聊天页生效，不打架）。
                 // simultaneousGesture：别抢聊天区的点击/滚动。
@@ -153,6 +166,16 @@ struct ContentView: View {
             drawerLayer
         }
         .environmentObject(profileStore)
+        // 手机悬浮层（houseAsRoot）：聊天整体装进全屏 cover——所有聊天状态仍在本 View，
+        // 掏出/收起只是换个地方渲染，流式生成、轮询循环都不中断。
+        // 挂在 environmentObject 之后：cover 内容继承挂载点的环境，ChatView 要 profileStore。
+        .fullScreenCover(isPresented: $phoneOpen) {
+            VStack(spacing: 0) {
+                header
+                chatBody
+            }
+            .background(Color(.systemBackground))
+        }
         // 页面返回（栈清空）不重开抽屉——直接回聊天界面。
         // （原先按"聊天 → 抽屉 → 页面"逐层退设计，实际用起来是：从记忆页返回还得再关
         // 一次抽屉才看得到聊天。返回想去的地方就是聊天。）
@@ -165,6 +188,7 @@ struct ContentView: View {
             await reconcileRescues()
             await refreshDraftCount()
             await refreshGameStatus()
+            await charListStore.refresh()   // 在场状态（正在敲代码…）随角色清单刷新
             while !Task.isCancelled {
                 // 会话模式（code/游戏）下他说的每句话都靠这条通道回来 → 提到 3s；平时 15s 省电。
                 try? await Task.sleep(for: .seconds(sessionMode ? 3 : 15))
@@ -172,6 +196,7 @@ struct ContentView: View {
                 await reconcileRescues()
                 await refreshDraftCount()
                 await refreshGameStatus()
+                await charListStore.refresh()
             }
         }
     }
@@ -226,6 +251,8 @@ struct ContentView: View {
                     .transition(.opacity)
                 DrawerPanel(agentName: topTitle, draftCount: draftCount) { page in
                     drawerOpen = false
+                    // 小屋当首页时抽屉里的「小屋」就是回根，别在根上再叠一层小屋
+                    if page == .house, houseAsRoot { navPath.removeAll(); return }
                     navPath.append(page)
                 }
                 .transition(.move(edge: .leading))
@@ -508,11 +535,12 @@ struct ContentView: View {
     // （原右上角设置齿轮已搬进抽屉）。
     private var header: some View {
         HStack {
+            // 悬浮层模式里这颗是「收起手机」（回小屋）；平常是猫爪开抽屉。
             Button {
                 dismissKeyboard()
-                drawerOpen = true
+                if phoneOpen { phoneOpen = false } else { drawerOpen = true }
             } label: {
-                Image(systemName: "pawprint")
+                Image(systemName: phoneOpen ? "chevron.down" : "pawprint")
                     .font(.system(size: 18, weight: .medium))
                     .foregroundStyle(Color.theme)
                     .frame(width: 40, height: 40)
@@ -525,20 +553,30 @@ struct ContentView: View {
             // 标题可点：进会话列表（多角色切换）。别的会话有未读时名字旁亮一个小圆点。
             Button {
                 dismissKeyboard()
+                if phoneOpen { phoneOpen = false }   // 会话列表在小屋那层的栈上，先收手机
                 navPath.append(DrawerPage.conversations)
             } label: {
-                HStack(spacing: 5) {
-                    Text(topTitle)
-                        .font(.headline)
-                        .foregroundStyle(.primary)
-                        .lineLimit(1)
-                        .truncationMode(.tail)
-                    if chatStore.otherUnreadTotal > 0 {
-                        Circle().fill(Color.theme).frame(width: 7, height: 7)
+                VStack(spacing: 1) {
+                    HStack(spacing: 5) {
+                        Text(topTitle)
+                            .font(.headline)
+                            .foregroundStyle(.primary)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                        if chatStore.otherUnreadTotal > 0 {
+                            Circle().fill(Color.theme).frame(width: 7, height: 7)
+                        }
+                        Image(systemName: "chevron.down")
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(.secondary)
                     }
-                    Image(systemName: "chevron.down")
-                        .font(.caption2.weight(.semibold))
-                        .foregroundStyle(.secondary)
+                    // 在场状态（同居世界）：他正在电脑前 → 名字底下一行小字说清
+                    if let line = charListStore.items.first(where: { $0.id == currentCharID })?.statusLine {
+                        Text(line)
+                            .font(.caption2)
+                            .foregroundStyle(Color.theme)
+                            .lineLimit(1)
+                    }
                 }
             }
             Spacer()

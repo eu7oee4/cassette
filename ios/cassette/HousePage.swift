@@ -4,6 +4,13 @@ import SwiftUI
 /// 点房间 → 三选一：去这里（真实移动，过门禁）/ 偷看一眼（上帝视角）/ 取消。
 /// 配色走 Color.house（Theme.swift，一键换肤），不随系统深浅色走——小屋是独立的暖色世界。
 struct HousePage: View {
+    /// 根模式（「小屋当首页」开着时由 ContentView 传入）：左上角出抽屉钮、
+    /// 右下角浮一颗手机钮（聊天降格为随时可唤出的悬浮层）。缺省全 nil = 抽屉里点进来的普通页。
+    var asRoot = false
+    var unreadCount = 0
+    var onOpenDrawer: (() -> Void)? = nil
+    var onOpenPhone: (() -> Void)? = nil
+
     @EnvironmentObject private var profileStore: ProfileStore
     @Environment(\.scenePhase) private var scenePhase
 
@@ -33,6 +40,7 @@ struct HousePage: View {
                     .padding(.vertical, 14)
                 }
             }
+            if asRoot { phoneButton }
         }
         .toolbar(.hidden, for: .navigationBar)
         .navigationDestination(item: $nav) { n in
@@ -96,8 +104,46 @@ struct HousePage: View {
 
     // MARK: - 头部 / 楼层
 
+    /// 悬浮手机钮（根模式）：聊天在这个世界里是「手机」，随时掏出来。
+    private var phoneButton: some View {
+        VStack {
+            Spacer()
+            HStack {
+                Spacer()
+                Button { onOpenPhone?() } label: {
+                    ZStack(alignment: .topTrailing) {
+                        Image(systemName: "message.fill")
+                            .font(.system(size: 22))
+                            .foregroundStyle(Color.house.onAccent)
+                            .frame(width: 56, height: 56)
+                            .background(Circle().fill(Color.house.accent))
+                            .shadow(color: .black.opacity(0.4), radius: 8, y: 3)
+                        if unreadCount > 0 {
+                            Text("\(unreadCount)")
+                                .font(.caption2.bold())
+                                .foregroundStyle(.white)
+                                .padding(.horizontal, 6).padding(.vertical, 2)
+                                .background(Capsule().fill(.red))
+                                .offset(x: 6, y: -4)
+                        }
+                    }
+                }
+                .padding(.trailing, 20).padding(.bottom, 24)
+            }
+        }
+    }
+
     private var header: some View {
         HStack(spacing: 12) {
+            if asRoot {
+                Button { onOpenDrawer?() } label: {
+                    Image(systemName: "pawprint")
+                        .font(.system(size: 18, weight: .medium))
+                        .foregroundStyle(Color.house.accent)
+                        .frame(width: 38, height: 38)
+                        .background(Circle().fill(Color.house.surface))
+                }
+            }
             Image(systemName: "house.fill")
                 .font(.system(size: 17))
                 .foregroundStyle(Color.house.accent)
