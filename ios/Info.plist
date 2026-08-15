@@ -11,5 +11,8 @@
 	</dict>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>cassette needs local network access to reach the backend running on your Mac.</string>
+	<!-- 聊天记录搬家用（PLAN_multichar M3）：Finder 里能看到 Documents，staging 整包拖进来。 -->
+	<key>UIFileSharingEnabled</key>
+	<true/>
 </dict>
 </plist>
