@@ -58,6 +58,7 @@ import pipeline
 import sse
 import state_store
 import wake
+import world
 from notify import bark_push, logerr
 from pipeline import Message
 
@@ -150,6 +151,7 @@ def _mail_watcher() -> None:
 async def _lifespan(_app: FastAPI):
     """启动 wake 调度器（on_event 已被 FastAPI 弃用，用 lifespan）。"""
     characters.ensure_layout()   # 默认角色目录补齐（state 侧旧布局迁移在 state_store import 时已做）
+    world.ensure_world()         # 大房子：注册表 + world.json 补齐（幂等，存在不覆盖）
     tasks = []
     if config.PROACTIVE_ENABLED:
         tasks.append(asyncio.create_task(wake.scheduler_loop()))
@@ -791,6 +793,106 @@ def post_pending_ack(body: AckIn, x_auth: Optional[str] = Header(default=None, a
     verify_auth(x_auth)
     state_store.outbox_ack(body.ids)
     return {"ok": True}
+
+
+# ---------- 同居世界（大房子，PLAN_cohabit C0）----------
+# 这些路由全部是**用户**的入口（实体固定 "user"）：AI 的 act/move 走 C1 的 ACTION 协议，
+# 直接调 world.* 函数，不经 HTTP。物理规则在 world.py；这里只做 HTTP 语义翻译：
+# 不认识的房间/条目 → 404，人不在场 → 409，门锁着 → 200 + ok:false（是结局不是错误）。
+
+class RoomActIn(BaseModel):
+    action: str = ""    # *斜体动作*，与 speech 可一空不可全空（和 AI 的 act 对称）
+    speech: str = ""
+
+
+class RoomStateIn(BaseModel):
+    op: str             # add | edit | remove
+    id: Optional[str] = None
+    text: Optional[str] = None
+
+
+class MoveIn(BaseModel):
+    to: str             # 房间 id | "hallway"（离开按钮）| "away"（出门开关）
+
+
+@app.get("/world")
+def get_world(x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
+    """房子视图：全部房间（含在场者）+ 全部实体的位置。"""
+    verify_auth(x_auth)
+    snap = world.world_snapshot()
+    rooms = []
+    for rid, r in world.load_registry().items():
+        rooms.append({"id": rid, **{k: v for k, v in r.items() if k != "state"},
+                      "state_count": len(r.get("state") or []),
+                      "occupants": [e for e in snap if snap[e]["location"] == rid]})
+    return {"rooms": rooms,
+            "entities": {e: {**v, "name": world.entity_name(e)} for e, v in snap.items()}}
+
+
+@app.get("/rooms/{room_id}")
+def get_room(room_id: str, x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
+    """房间视图副栏：条目 + 在场者 + 地点状态快照。"""
+    verify_auth(x_auth)
+    try:
+        r = world.room(room_id)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    return {"id": room_id, **r, "occupants": world.occupants(room_id)}
+
+
+@app.get("/rooms/{room_id}/events")
+def get_room_events(room_id: str, scope: str = "visible", limit: int = 200,
+                    x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
+    """事件流。scope=visible（默认）= 用户本次在场区间，房间视图用它；
+    scope=all = 偷看的上帝视角（全部历史，不产生事件、AI 不感知）。"""
+    verify_auth(x_auth)
+    try:
+        world.room(room_id)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    if scope == "all":
+        return {"events": world.read_events(room_id, limit=limit)}
+    return {"events": world.visible_events(room_id, world.USER_ID, limit=limit)}
+
+
+@app.post("/rooms/{room_id}/act")
+def post_room_act(room_id: str, body: RoomActIn,
+                  x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
+    verify_auth(x_auth)
+    try:
+        return world.act(world.USER_ID, room_id, action=body.action, speech=body.speech)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except world.NotPresent:
+        raise HTTPException(status_code=409, detail="你不在这个房间——先「去这里」再说话")
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
+
+@app.post("/rooms/{room_id}/state")
+def post_room_state(room_id: str, body: RoomStateIn,
+                    x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
+    verify_auth(x_auth)
+    try:
+        return world.state_change(world.USER_ID, room_id, body.op,
+                                  entry_id=body.id, text=body.text)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except world.NotPresent:
+        raise HTTPException(status_code=409, detail="你不在这个房间——先「去这里」再改")
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
+
+@app.post("/world/move")
+def post_world_move(body: MoveIn,
+                    x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
+    """用户移动（含出门 away / 回房子）。门锁着返回 ok:false + 提示，不是 HTTP 错误。"""
+    verify_auth(x_auth)
+    try:
+        return world.move(world.USER_ID, body.to)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
 
 
 # ---------- Code 模式（tmux 里一个常驻的交互式 claude）----------
