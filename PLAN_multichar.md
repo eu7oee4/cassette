@@ -155,11 +155,14 @@
 - cassette 侧导入器：解析 chat_history.json，kind 映射（forumAction 等降级为文本占位）；
   **媒体文件按文件名重挂**——`.image(URL)` 若存绝对沙盒路径，跨 App 必断，导入前先验证存储格式。
 
-退役切换日 checklist：
-- [ ] mianmian 后端 `launchctl unload com.mianmian.backend`（至少停 wake）
-- [ ] **Ombre 18001 容器保持常驻**（已是 cassette 的依赖）
+退役切换日 checklist（2026-08-15 晚执行完毕，M3 完成）：
+- [x] mianmian 后端已停（`bootout` + `disable` 防重启复活；outbox 清零后才断电，
+      com.claude.wake-mianmian 定点唤醒 agent 一并停了）
+- [x] **Ombre 18001 容器保持常驻**（已是 cassette 的依赖）
 - [x] Desktop ombre 挂载已摘（M3-0 2026-08-15 做掉，备份 `claude_desktop_config.json.bak-ombre-20260815`）
-- [ ] mianmian app 手机上留作只读或删除，随意
+- [x] mianmian app 手机上留作只读
+- 实录：聊天 5474 条 + 头像 + 媒体并入（default 1496 条无损；35 个已删贴纸灰占位）；
+  wake_log 722 条续上；⚠️ Finder 拖同名文件夹是**替换不是合并**，必须导出→Mac 合并→删→回填。
 
 ## 顺序与风险
 
