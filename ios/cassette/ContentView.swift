@@ -218,26 +218,59 @@ struct ContentView: View {
         case .house:
             HousePage()
         case .memory:
-            MemoryPage()
+            charSwitchable(MemoryPage())
         case .mind:
-            MindPage()
+            charSwitchable(MindPage())
         case .history:
-            HistoryPage(messages: chatStore.messages, settingsStore: proactiveStore) { id in
+            charSwitchable(HistoryPage(messages: chatStore.messages, settingsStore: proactiveStore) { id in
                 navPath.removeAll()
                 // 等 pop 动画完、聊天列表回到台前再跳，不然滚动请求打在看不见的列表上
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
                     chatScrollTarget = id
                 }
-            }
+            })
         case .drafts:
-            DraftsPage()
+            charSwitchable(DraftsPage())
         case .game:
             GamePage()
         case .plugins:
-            PluginsPage()
+            charSwitchable(PluginsPage())
+        case .ownership:
+            // 归属是全机一份的资源分配，不分角色 → 不挂切人按钮
+            OwnershipPage()
         case .settings:
-            ProactiveSettingsView(store: proactiveStore)
+            charSwitchable(ProactiveSettingsView(store: proactiveStore))
         }
+    }
+
+    /// 角色页通用壳：右上角挂当前角色名（点了循环切到下一个角色的同一页），
+    /// 并用 .id 让整页跟着角色重建——各页的 .task 会重新拉新角色的数据。
+    @ViewBuilder
+    private func charSwitchable<V: View>(_ page: V) -> some View {
+        page
+            .id(currentCharID)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button { cycleCharacter() } label: {
+                        HStack(spacing: 4) {
+                            Text(topTitle)
+                                .font(.subheadline.weight(.medium))
+                                .lineLimit(1)
+                            Image(systemName: "arrow.2.squarepath")
+                                .font(.caption2.weight(.semibold))
+                        }
+                    }
+                    .disabled(isGenerating)
+                }
+            }
+    }
+
+    /// 循环切到清单里的下一个角色（只有一个角色时不动）。
+    private func cycleCharacter() {
+        let items = charListStore.items
+        guard items.count > 1 else { return }
+        let idx = items.firstIndex(where: { $0.id == currentCharID }) ?? -1
+        switchCharacter(to: items[(idx + 1) % items.count].id)
     }
 
     /// 抽屉层：阴影 + 面板。点阴影/阴影区左滑关；选中项 → 关抽屉 + push。
@@ -252,7 +285,8 @@ struct ContentView: View {
                     .gesture(DragGesture(minimumDistance: 20)
                         .onEnded { v in if v.translation.width < -30 { drawerOpen = false } })
                     .transition(.opacity)
-                DrawerPanel(agentName: topTitle, draftCount: draftCount) { page in
+                DrawerPanel(agentName: topTitle, draftCount: draftCount,
+                            onTapName: charListStore.items.count > 1 ? { cycleCharacter() } : nil) { page in
                     drawerOpen = false
                     // 小屋当首页时抽屉里的「小屋」就是回根，别在根上再叠一层小屋
                     if page == .house, houseAsRoot { navPath.removeAll(); return }
@@ -532,6 +566,8 @@ struct ContentView: View {
         // 会话入口/归属说明是按角色变的，切完顺手对齐一次（路由本身不等它——
         // sessionMine 是派生的，currentCharID 一变就生效）。
         Task { await syncCodeMode() }
+        // 草稿角标也是按角色算的，别让抽屉里挂着上一位的数字等下一拍轮询。
+        Task { await refreshDraftCount() }
     }
 
     // 顶部导航栏：左猫爪开抽屉，居中标题；右侧空占位配平保持标题居中
@@ -553,34 +589,39 @@ struct ContentView: View {
                 Color.clear.frame(width: 40, height: 40)
             }
             Spacer()
-            // 标题可点：进会话列表（多角色切换）。别的会话有未读时名字旁亮一个小圆点。
-            Button {
+            // 标题可点：点一下＝循环切到下一个角色；长按＝进会话列表。
+            // 别的会话有未读时名字旁亮一个小圆点。
+            VStack(spacing: 1) {
+                HStack(spacing: 5) {
+                    Text(topTitle)
+                        .font(.headline)
+                        .foregroundStyle(.primary)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                    if chatStore.otherUnreadTotal > 0 {
+                        Circle().fill(Color.theme).frame(width: 7, height: 7)
+                    }
+                    Image(systemName: "chevron.down")
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                }
+                // 在场状态（同居世界）：他正在电脑前 → 名字底下一行小字说清
+                if let line = charListStore.items.first(where: { $0.id == currentCharID })?.statusLine {
+                    Text(line)
+                        .font(.caption2)
+                        .foregroundStyle(Color.theme)
+                        .lineLimit(1)
+                }
+            }
+            .contentShape(Rectangle())
+            .onTapGesture {
+                dismissKeyboard()
+                cycleCharacter()
+            }
+            .onLongPressGesture(minimumDuration: 0.4) {
                 dismissKeyboard()
                 if phoneOpen { phoneOpen = false }   // 会话列表在小屋那层的栈上，先收手机
                 navPath.append(DrawerPage.conversations)
-            } label: {
-                VStack(spacing: 1) {
-                    HStack(spacing: 5) {
-                        Text(topTitle)
-                            .font(.headline)
-                            .foregroundStyle(.primary)
-                            .lineLimit(1)
-                            .truncationMode(.tail)
-                        if chatStore.otherUnreadTotal > 0 {
-                            Circle().fill(Color.theme).frame(width: 7, height: 7)
-                        }
-                        Image(systemName: "chevron.down")
-                            .font(.caption2.weight(.semibold))
-                            .foregroundStyle(.secondary)
-                    }
-                    // 在场状态（同居世界）：他正在电脑前 → 名字底下一行小字说清
-                    if let line = charListStore.items.first(where: { $0.id == currentCharID })?.statusLine {
-                        Text(line)
-                            .font(.caption2)
-                            .foregroundStyle(Color.theme)
-                            .lineLimit(1)
-                    }
-                }
             }
             Spacer()
             // 右侧：游戏急停（引擎在跑/剧情会话开着/急停中才露）+ 会话开关

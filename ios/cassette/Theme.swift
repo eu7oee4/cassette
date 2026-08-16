@@ -50,6 +50,19 @@ extension HousePalette {
         line: Color(hex: 0xE9DEC9)
     )
 
+    /// 燕麦奶咖（机主 2026-08-16 第三套，浅米底 + 深棕强调）。
+    static let oatMilk = HousePalette(
+        bg: Color(hex: 0xF5EFE6),
+        surface: Color(hex: 0xFEFCF6),
+        surfaceHi: Color(hex: 0xECDDC8),      // tint
+        accent: Color(hex: 0x7D5A44),
+        accentLight: Color(hex: 0xB89B82),
+        onAccent: Color(hex: 0xFEFCF6),
+        textPrimary: Color(hex: 0x2C2013),
+        textSecondary: Color(hex: 0x8A7A65),  // subtle
+        line: Color(hex: 0xE3D8C8)            // border
+    )
+
     /// 玫瑰灰（机主 2026-08-16 第二套，暖黑底 + 玫瑰红强调）。
     static let roseAsh = HousePalette(
         bg: Color(hex: 0x181716),
@@ -85,7 +98,7 @@ extension Color {
     static let current = ThemePalette.plumTint
 
     /// 小屋当前主题：换主题改这一行。
-    static let house = HousePalette.roseAsh
+    static let house = HousePalette.oatMilk
 
     static var theme: Color { current.accent }
     static var bubbleMe: Color { current.bubbleMe }

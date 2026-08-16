@@ -121,7 +121,6 @@ struct PluginsPage: View {
     @State private var uninstallTarget: PluginItem? = nil
     @State private var noteText: String? = nil       // 操作成功的短提示（2.5s 自动消失）
     @State private var noteSeq = 0                   // 提示计时的世代号，防前一条掐掉后一条
-    @State private var showOwnership = false         // 归属页（右上角）
 
     var body: some View {
         Group {
@@ -142,15 +141,6 @@ struct PluginsPage: View {
         }
         .navigationTitle("插件商店")
         .navigationBarTitleDisplayMode(.inline)
-        .toolbar {
-            ToolbarItem(placement: .topBarTrailing) {
-                Button("归属") { showOwnership = true }
-            }
-        }
-        .sheet(isPresented: $showOwnership) {
-            // 关掉归属页要重拉插件列表：归属一变，哪几行变成"不归你"就跟着变。
-            OwnershipSheet(onClose: { showOwnership = false; Task { await load() } })
-        }
         .refreshable { await load() }
         .task { await load() }
         .overlay(alignment: .bottom) {
@@ -191,9 +181,9 @@ struct PluginsPage: View {
     private static func ownerHint(_ p: PluginItem) -> String {
         let n = p.owner_name ?? ""
         if n.isEmpty {
-            return "它要的几样东西现在分属不同角色，谁都用不了——去右上角「归属」把它们归到同一个人名下。"
+            return "它要的几样东西现在分属不同角色，谁都用不了——去菜单里的「归属」把它们归到同一个人名下。"
         }
-        return "这东西只有一份，现在归「\(n)」。在这边开了也不会挂上——要用就去右上角「归属」转过来。"
+        return "这东西只有一份，现在归「\(n)」。在这边开了也不会挂上——要用就去菜单里的「归属」转过来。"
     }
 
     @ViewBuilder
@@ -344,15 +334,15 @@ struct PluginsPage: View {
     }
 }
 
-// MARK: - 归属页（插件商店右上角）
+// MARK: - 归属页（抽屉入口）
 
 /// 独占资源的归属：**这东西只有一份，所以同一时刻只能给一个人用。**
 ///
 /// 管的是资源不是插件——一个插件可能吃好几样（游戏剧情既要游戏账号又要会话），
 /// 几个插件可能吃同一样（两个游戏插件共用一个账号）。所以这页按资源列，转一次
 /// 账号归属，吃它的插件一起跟着走，不会出现两个角色同时上手同一个号。
-struct OwnershipSheet: View {
-    let onClose: () -> Void
+/// 归属是全机一份的分配表，不分角色——右上角没有切人按钮。
+struct OwnershipPage: View {
     private let service = ChatService()
 
     @State private var items: [ResourceItem] = []
@@ -362,33 +352,28 @@ struct OwnershipSheet: View {
     @State private var errorText: String? = nil
 
     var body: some View {
-        NavigationStack {
-            Group {
-                if loading {
-                    ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
-                } else if items.isEmpty {
-                    ContentUnavailableView("没有需要分归属的东西", systemImage: "key")
-                } else {
-                    List {
-                        Section {
-                            ForEach(items) { r in row(r) }
-                        } footer: {
-                            Text("这些东西每样只有一份，同一时刻只能给一个角色用。转走之后，"
-                                 + "原来那个角色即使把插件开关拨开也不会挂上。改完下一轮聊天／醒来生效。")
-                        }
+        Group {
+            if loading {
+                ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if items.isEmpty {
+                ContentUnavailableView("没有需要分归属的东西", systemImage: "key")
+            } else {
+                List {
+                    Section {
+                        ForEach(items) { r in row(r) }
+                    } footer: {
+                        Text("这些东西每样只有一份，同一时刻只能给一个角色用。转走之后，"
+                             + "原来那个角色即使把插件开关拨开也不会挂上。改完下一轮聊天／醒来生效。")
                     }
                 }
             }
-            .navigationTitle("归属")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .topBarTrailing) { Button("完成") { onClose() } }
-            }
-            .task { await load() }
-            .alert("转不了", isPresented: Binding(
-                get: { errorText != nil }, set: { if !$0 { errorText = nil } }
-            )) { Button("好", role: .cancel) { } } message: { Text(errorText ?? "") }
         }
+        .navigationTitle("归属")
+        .navigationBarTitleDisplayMode(.inline)
+        .task { await load() }
+        .alert("转不了", isPresented: Binding(
+            get: { errorText != nil }, set: { if !$0 { errorText = nil } }
+        )) { Button("好", role: .cancel) { } } message: { Text(errorText ?? "") }
     }
 
     @ViewBuilder

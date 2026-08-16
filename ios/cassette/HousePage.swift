@@ -25,7 +25,7 @@ struct HousePage: View {
     @State private var loadError = false
 
     private let service = ChatService()
-    private let floors: [(Int, String)] = [(2, "2楼"), (1, "1楼"), (0, "地下室")]
+    private let floors: [(Int, String)] = [(0, "地下室"), (1, "1楼"), (2, "2楼")]
 
     var body: some View {
         ZStack {
