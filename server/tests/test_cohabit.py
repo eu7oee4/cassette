@@ -171,6 +171,25 @@ class TestPrompt(CohabitBase):
         # 认知边界从注入源头执行：别的房间的在场者绝不出现
         self.assertNotIn("living_room）：客厅（有", p)
 
+    def test_stored_dedup_list_injected(self):
+        # 「近 12h 已存，别重复存」清单在统一醒来路上也得在——上电初期漏过这段，
+        # cassette 把同一件事存了三遍（2026-08-16 实踩）。只列存成功的。
+        orig_alive = pipeline.ombre_alive
+        pipeline.ombre_alive = lambda *a, **kw: True
+        try:
+            state_store.append_wake_log(
+                {"ts": int(time.time()), "source": "wake", "action": "none",
+                 "stored": [{"tool": "hold", "text": "Cassius 敲门那件事", "ok": True},
+                            {"tool": "hold", "text": "存失败的这条不该出现", "ok": False}]},
+                char_id=self.cid)
+            p = cohabit.cohabit_prompt(self.cid, [{"kind": "solo", "text": "x"}],
+                                       state_store.load_settings(self.cid))
+            self.assertIn("别重复存", p)
+            self.assertIn("Cassius 敲门那件事", p)
+            self.assertNotIn("存失败的这条不该出现", p)
+        finally:
+            pipeline.ombre_alive = orig_alive
+
     def test_hallway_and_away(self):
         world.move(self.cid, world.HALLWAY)
         p = cohabit.cohabit_prompt(self.cid, [{"kind": "solo", "text": "x"}],

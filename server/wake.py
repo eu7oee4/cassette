@@ -171,6 +171,25 @@ def unsent_block(u: str, char_id: Optional[str] = None) -> str:
             f"现在还想说吗？还合适就重说一遍（措辞可以改），过时了就算了、别硬凑。】\n")
 
 
+# ---------- 近 12h 已存清单 ----------
+def stored_block(char_id: Optional[str] = None) -> str:
+    """「最近 12 小时你已经存过这些，别重复存」——原文截头 60 字 × 最近 8 条。
+    不给清单模型会把时间线里同一件事每次醒来都存一遍（mianmian 实踩；cohabit 路
+    上电初期漏注入，2026-08-16 cassette 又踩了一回，同一件事存了三遍）。
+    只算**真存下的**：没成功的（工具被拒/报错）当然要能再存一次，
+    摆进清单等于把那件事永久封杀了。两条醒来路（wake_prompt/cohabit_prompt）共用。"""
+    if not pipeline.ombre_alive(char_id):
+        return ""
+    recent_stored = [s.get("text", "")
+                     for w in state_store.read_wake_log(limit=100, char_id=char_id)
+                     if int(w.get("ts", 0)) > int(time.time()) - 12 * 3600
+                     for s in (w.get("stored") or []) if s.get("ok", True)]
+    joined = "；".join(t[:60] for t in recent_stored[-8:] if t)
+    if not joined:
+        return ""
+    return f"【最近 12 小时你已经存过这些，别重复存：{joined}】"
+
+
 # ---------- 醒来提示词 ----------
 def wake_prompt(settings: dict, forced: bool = False, note: str = "",
                 char_id: Optional[str] = None) -> str:
@@ -204,19 +223,9 @@ def wake_prompt(settings: dict, forced: bool = False, note: str = "",
     menu = pipeline.tool_menu_block("wake", char_id)
     menu_section = f"\n{menu}\n" if menu else ""
 
-    # 近 12h 已存清单：菜单里没有这东西，得单独留着——不给清单模型会把时间线里
-    # 同一件事每次醒来都存一遍（mianmian 实踩）。
-    stored_section = ""
-    if pipeline.ombre_alive(char_id):
-        # 只算**真存下的**：没成功的（工具被拒/报错）当然要能再存一次，
-        # 摆进"别重复存"清单等于把那件事永久封杀了。
-        recent_stored = [s.get("text", "")
-                         for w in state_store.read_wake_log(limit=100, char_id=char_id)
-                         if int(w.get("ts", 0)) > int(time.time()) - 12 * 3600
-                         for s in (w.get("stored") or []) if s.get("ok", True)]
-        if recent_stored:
-            stored_section = ("\n【最近 12 小时你已经存过这些，别重复存：" +
-                              "；".join(t[:60] for t in recent_stored[-8:] if t) + "】\n")
+    # 近 12h 已存清单：菜单里没有这东西，得单独留着。
+    sb_stored = stored_block(char_id)
+    stored_section = f"\n{sb_stored}\n" if sb_stored else ""
 
     # 上次憋回去的话：让他自己决定要不要重提（别白想一场）。
     unsent_section = unsent_block(u, char_id)

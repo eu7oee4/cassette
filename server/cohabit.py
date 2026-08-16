@@ -149,6 +149,11 @@ def cohabit_prompt(cid: str, reasons: list[dict], settings: dict) -> str:
     menu = pipeline.tool_menu_block("wake", cid)
     menu_section = f"\n{menu}\n" if menu else ""
 
+    # 近 12h 已存清单（与老醒来路共用一份，见 wake.stored_block 的注释——
+    # 上电初期漏了这段，cassette 同一件事存了三遍）。
+    stored = wake.stored_block(cid)
+    stored_section = f"\n{stored}\n" if stored else ""
+
     # 手机这轮会被打扰控制拦 → 先说清再让他选（闸只拦推送不拦思考，但他有权知道）。
     blocked = wake.push_block(settings, cid)
     blocked_section = f"\n{blocked[1]}\n" if blocked else ""
@@ -174,7 +179,7 @@ def cohabit_prompt(cid: str, reasons: list[dict], settings: dict) -> str:
 
 【你最近的经历，按时间顺序——手机对话 / 你醒来时的内心 / 你在屋里看见的（带（房间名）前缀）。手机和房间是两个通道，看前缀别搞混】
 {timeline}
-{menu_section}{blocked_section}{code_section}
+{menu_section}{stored_section}{blocked_section}{code_section}
 【这次为什么醒】
 {reason_lines or '- （无特别原因，就是醒了）'}
 
