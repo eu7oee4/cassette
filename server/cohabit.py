@@ -140,8 +140,11 @@ def cohabit_prompt(cid: str, reasons: list[dict], settings: dict) -> str:
     window = state_store.read_recent_window(cid)
     # 同居醒来的窗口比聊天克制（机主 2026-08-16：token 撑不住）：设置值照读，但顶到 40
     # ——热闹场里事件醒来很密，每次都拖全量窗口是大头。
+    # 经历流并入时间线（与聊天路同构，2026-08-16 拍板）：房间事件不再走现场段单列，
+    # 手机对话/内心/屋内经历按真实时序穿插成一条第一人称流。
     wake_n = min(max(int(settings.get("wake_window_n") or 50), 20), 40)
-    timeline = pipeline.build_context_timeline(window[-wake_n:], char_id=cid) or "（最近没有对话）"
+    timeline = pipeline.build_context_timeline(window[-wake_n:], char_id=cid,
+                                               experience_limit=40) or "（最近没什么经历）"
 
     menu = pipeline.tool_menu_block("wake", cid)
     menu_section = f"\n{menu}\n" if menu else ""
@@ -165,11 +168,11 @@ def cohabit_prompt(cid: str, reasons: list[dict], settings: dict) -> str:
 {pipeline.pronoun_hint()}
 {_WORLDVIEW}
 
-{_where_block(cid, ev_limit=40)}
+{_where_block(cid, ev_limit=0)}
 
 {_rooms_block(cid)}
 
-【你和{u}的手机线程 + 你自己醒来时的内心，按时间顺序——这是手机，跟房间里说话是两回事】
+【你最近的经历，按时间顺序——手机对话 / 你醒来时的内心 / 你在屋里看见的（带（房间名）前缀）。手机和房间是两个通道，看前缀别搞混】
 {timeline}
 {menu_section}{blocked_section}{code_section}
 【这次为什么醒】

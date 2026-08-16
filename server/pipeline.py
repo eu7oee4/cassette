@@ -102,8 +102,8 @@ def build_context_timeline(conv_items: list[dict], reflect_limit: int = 5,
 
     experience_limit > 0 时再并入第三路：小屋经历流（他在场看见的房间事件，跨房间、
     跨在场区间，world._append_experience 在发生那一刻定格的）——三路合出「第一人称
-    经历时间线」（PLAN_cohabit 定稿）。聊天路传 40；醒来路保持 0（现场事件由
-    cohabit._where_block 的现场段承担，两处都注会重复）。"""
+    经历时间线」（PLAN_cohabit 定稿）。聊天路和同居醒来路都传 40（2026-08-16 起
+    两路同构，现场段只留快照不再单列事件）。"""
     items: list[tuple[int, str]] = []
 
     for c in conv_items:

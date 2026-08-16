@@ -148,6 +148,17 @@ class TestPrompt(CohabitBase):
         self.assertIn("mm_room", p)                  # 可去清单
         self.assertNotIn(f"- {self.home}（", p)      # 清单不含自己所在的房间
 
+    def test_room_events_come_through_timeline(self):
+        # 醒来路与聊天路同构：房间事件走经历流进时间线（带（房间名）前缀），
+        # 现场段只留快照、不再单列「你在这个房间看到的」
+        world.move("user", self.home)
+        world.act_mixed("user", self.home, "*敲了敲门框* 在忙吗")
+        p = cohabit.cohabit_prompt(self.cid, [{"kind": "event", "text": "x"}],
+                                   state_store.load_settings(self.cid))
+        self.assertIn("敲了敲门框", p)
+        self.assertIn("的房间）", p)                       # （房间名）前缀
+        self.assertNotIn("你在这个房间看到的", p)           # 现场段事件列表已退役
+
     def test_occupants_and_state_have_no_leak(self):
         world.move("user", self.home)
         world.state_change("user", self.home, "add", text="床头放了一杯水")
