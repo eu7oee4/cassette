@@ -47,6 +47,13 @@ struct ProactiveSettingsView: View {
 
                 // wake 内部设置只在开关打开时显示（关=完全停摆，摆着一排没用的设置反而误导）。
                 if store.settings.enabled {
+                    Section {
+                        Toggle("随机醒来", isOn: Binding(
+                            get: { store.settings.randomWake ?? true },
+                            set: { store.settings.randomWake = $0 }))
+                    } footer: {
+                        Text("关掉后不再随机醒——TA 自己定的下次醒来、你发消息/走进 TA 房间的唤醒都不受影响。")
+                    }
                     Section("活跃时段") {
                         hourPicker("开始", \.activeStart, range: 0...23)
                         hourPicker("结束", \.activeEnd, range: 1...24)

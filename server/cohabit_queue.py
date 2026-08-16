@@ -261,6 +261,11 @@ def _solo_check(cid: str, now: float) -> None:
         enqueue(cid, {"kind": "scheduled",
                       "text": "你之前给自己定了这个点醒来，现在到点了"}, system=False)
         return
+    # 随机醒来的独立开关（2026-08-16 机主：他们自己会定 NEXT，随机的想关就关）。
+    # 只关下面的概率掷骰——上面的 scheduled 到点、事件/手机唤醒全不受影响。
+    # 判 `is False`：老客户端把设置存回来时该键是 None，不能算关。
+    if settings.get("random_wake") is False:
+        return
     if not _alone(cid):
         return
     # 用户刚说过话（手机）就别随机醒——打字打一半被抢话的体验，老 wake 同款闸。

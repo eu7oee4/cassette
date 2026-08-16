@@ -102,6 +102,9 @@ DEFAULT_SETTINGS = {
     "wake_window_n": 50,         # wake 注入最近窗口条数（夹 20~300）
     "wake_daily_budget": None,   # 每天最多自发醒来次数；null = 不限。拦的是"醒"本身（省 token），
                                  # 与 daily_max（只拦推送）不同；硬触发（提醒/邮件）豁免但计数
+    "random_wake": True,         # 随机概率醒来（独处掷骰那路）。False=只关随机——他自己定的
+                                 # NEXT 定时、事件/手机唤醒都不受影响（enabled 才是总闸）。
+                                 # 读侧判 `is False`：老客户端存回 None 不算关
     "user_pronoun": "TA",        # 提到用户时的人称代词：她 | 他 | TA（用户在设置里选）
 }
 

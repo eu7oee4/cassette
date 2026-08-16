@@ -222,6 +222,14 @@ class TestSolo(QueueBase):
         cq._solo_tick(time.time())
         self.assertNotIn(self.cid, cq._pending)
 
+    def test_random_wake_off_keeps_scheduled(self):
+        self.set_char_settings(self.cid, random_wake=False)
+        cq._solo_tick(time.time())
+        self.assertNotIn(self.cid, cq._pending)           # 随机被关（独处且概率必中也不醒）
+        state_store.write_schedule({"next_wake_at": time.time() - 5}, self.cid)
+        cq._solo_tick(time.time())
+        self.assertEqual(cq._pending[self.cid][0]["kind"], "scheduled")   # 定时照醒
+
     def test_code_session_defers_owner_only(self):
         # 归属角色在电脑前：他的自主醒跳过，别的角色照常（M2 后不再全体避让）
         cohabit.coding_char = lambda: (self.cid, "code")

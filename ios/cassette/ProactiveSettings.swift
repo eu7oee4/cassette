@@ -16,6 +16,7 @@ struct ProactiveSettings: Codable, Equatable {
     var wakeWindowN: Int?          // wake 注入窗口条数；nil＝后端默认 50（夹 20~300）
     var wakeDailyBudget: Int?      // 每天最多自发醒来次数；nil＝不限（拦醒来本身，省 token）
     var userPronoun: String        // 提到用户的人称代词：她 | 他 | TA
+    var randomWake: Bool?          // 随机概率醒来；nil＝开（旧缓存没这键）。只关随机不动定时/事件
 
     enum CodingKeys: String, CodingKey {
         case enabled
@@ -31,6 +32,7 @@ struct ProactiveSettings: Codable, Equatable {
         case wakeWindowN = "wake_window_n"
         case wakeDailyBudget = "wake_daily_budget"
         case userPronoun = "user_pronoun"
+        case randomWake = "random_wake"
     }
 
     init(agentName: String = "cassette", userName: String = "user",

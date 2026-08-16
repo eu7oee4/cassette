@@ -758,6 +758,7 @@ class SettingsIn(BaseModel):
     wake_window_n: Optional[int] = None   # wake 注入窗口条数（None=默认 50；夹 20~300）
     wake_daily_budget: Optional[int] = None  # 每天最多自发醒来次数；None=不限（拦醒来本身，硬触发豁免）
     user_pronoun: str = "TA"  # 提到用户时的人称代词：她 | 他 | TA
+    random_wake: Optional[bool] = None  # 随机概率醒来；None=没表态（当开）。只关随机不动定时/事件
 
 
 def _validate_hhmm(s: str) -> None:

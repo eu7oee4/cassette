@@ -650,6 +650,9 @@ async def maybe_wake(char_id: Optional[str] = None) -> None:
                             if m.get("role") == "user" and m.get("ts")), None)
             if user_ts is not None and now - user_ts < q * 60:
                 return
+        # 随机醒来的独立开关（同 cohabit._solo_check 口径；判 is False，None 不算关）。
+        if settings.get("random_wake") is False:
+            return
         # 走概率（按 tick 缩放，保持"每小时期望醒几次"和 15min 校准一致）。
         local_now = datetime.now(config.APP_TZ)
         freq = settings.get("day_freq" if is_daytime(settings, local_now) else "night_freq", "low")
