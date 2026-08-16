@@ -26,10 +26,11 @@ import world
 
 
 def out(action="none", thoughts="……", motion="", say="", state="", phone="",
-        move="无", nxt="无"):
-    """拼一份完整协议输出（八个标签都在，贴近真实回复形态）。"""
+        move="无", carry="无", nxt="无"):
+    """拼一份完整协议输出（九个标签都在，贴近真实回复形态）。"""
     return (f"THOUGHTS: {thoughts}\nACTION: {action}\nMOTION: {motion}\n"
-            f"SAY: {say}\nSTATE: {state}\nPHONE: {phone}\nMOVE: {move}\nNEXT: {nxt}")
+            f"SAY: {say}\nSTATE: {state}\nPHONE: {phone}\nMOVE: {move}\n"
+            f"CARRY: {carry}\nNEXT: {nxt}")
 
 
 class CohabitBase(unittest.TestCase):
@@ -182,6 +183,27 @@ class TestExecute(CohabitBase):
         evs = world.read_events(self.home)
         self.assertEqual([e["type"] for e in evs], ["speech", "action", "speech"])
         self.assertEqual(evs[1]["text"], "起身开门")
+
+    def test_move_with_carry_takes_user_along(self):
+        world.move("user", self.home)                     # 同屋才抱得着
+        u_name = world.entity_name("user")
+        r = self.wake_once(out("none", move="living_room", carry=u_name),
+                           out("none"))
+        self.assertTrue(r["first_move"]["ok"])
+        self.assertEqual(r["first_move"]["carry"], "user")
+        self.assertEqual(world.location_of(self.cid), "living_room")
+        self.assertEqual(world.location_of("user"), "living_room")
+        self.assertIn("抱着", self.prompts[1])            # 补醒原因带「抱着…过来的」
+        enter = world.read_events("living_room")[-1]
+        self.assertEqual(enter.get("with"), ["user"])
+
+    def test_carry_not_copresent_moves_alone(self):
+        # 用户在自己房间（不同屋）：CARRY 当没写，独自移动、用户不动
+        r = self.wake_once(out("none", move="living_room", carry="user"),
+                           out("none"))
+        self.assertTrue(r["first_move"]["ok"])
+        self.assertNotIn("carry", r["first_move"])
+        self.assertEqual(world.location_of("user"), "mm_room")
 
     def test_move_entry_motion_lands_after_enter(self):
         r = self.wake_once(out("none", move="living_room 打着哈欠晃进来"),

@@ -182,6 +182,7 @@ SAY: <ACTION=act 时你在房间里说的话。可以夹 *动作*（星号包起
 STATE: <ACTION=act 时顺手改这里的地点状态，每行一条、最多 {world.MAX_STATE_OPS_PER_ACT} 条：add: 文本 ／ edit 条目id: 新文本 ／ remove 条目id。⚠️ 快照写的是**这里的东西和环境**（桌上剩了半杯牛奶、窗帘拉开了），你的身体姿势不进快照——你在干嘛用 MOTION/SAY 表达；不改留空>
 PHONE: <ACTION=phone 时发给{u}的消息>
 MOVE: <想去哪就写上面清单里的房间 id；id 后可空格接一句进场的样子，如 "living_room 打着哈欠晃进来"；不动写 "无"。移动发生在这一轮的最后，走完下一轮会告诉你结果>
+CARRY: <配合 MOVE：想抱着{u}一起走就写「{u}」（前提是{u}此刻和你同屋）；不带人写 "无">
 NEXT: <你希望多久后再自主醒来，如 "90分钟" 或 "3小时"；没想法写 "无">
 """
 
@@ -202,7 +203,7 @@ def house_context_for_chat(char_id) -> str:
 
 
 # ---------- ACTION 协议解析（组合规则在这里结构性执行）----------
-_LABELS = ["THOUGHTS", "ACTION", "MOTION", "SAY", "STATE", "PHONE", "MOVE", "NEXT"]
+_LABELS = ["THOUGHTS", "ACTION", "MOTION", "SAY", "STATE", "PHONE", "MOVE", "CARRY", "NEXT"]
 
 
 def _sections(text: str) -> dict:
@@ -276,10 +277,14 @@ def parse_cohabit_output(text: str) -> dict:
         else:
             logerr(f"cohabit MOVE 目的地不认识，当没写：{move_raw[:40]!r}")
 
+    carry_raw = s["CARRY"].strip().strip("「」\"'` ")
+    if carry_raw in ("无", "none", ""):
+        carry_raw = ""
+
     next_min = pipeline.parse_next_minutes(s["NEXT"])
     return {"thoughts": s["THOUGHTS"], "action": action, "motion": motion, "say": say,
             "state_ops": state_ops, "phone": phone, "move": move, "move_motion": move_motion,
-            "next_min": next_min, "next_raw": s["NEXT"].strip()}
+            "carry_raw": carry_raw, "next_min": next_min, "next_raw": s["NEXT"].strip()}
 
 
 # ---------- 执行 ----------
@@ -293,8 +298,10 @@ def move_result_reason(mv: dict) -> dict:
     """move 结果 → 补醒原因（成功/失败同一条路，只有文本不同）。
     队列（C2）和模块内递归共用，聊天附带的 move 也走它。"""
     if mv["ok"]:
+        carried = f"（你是抱着{world.entity_name(mv['carry'])}过来的，人还在你怀里）" \
+            if mv.get("carry") else ""
         return {"kind": "move_result",
-                "text": f"你刚到「{world.room(mv['to'])['name']}」——下面【你在哪】"
+                "text": f"你刚到「{world.room(mv['to'])['name']}」{carried}——下面【你在哪】"
                         f"就是这里现在的样子。想打个招呼、做点什么，这轮就是给你的。"}
     return {"kind": "move_result",
             "text": f"{mv.get('text', '门锁着，没进去')}——你还在原地。"
@@ -407,7 +414,24 @@ def do_cohabit_wake(cid: str, reasons: list[dict], _chain_no: int = 1,
             logerr(f"cohabit：{cid} 连锁醒来达到上限，MOVE 不执行")
             result["move_stopped"] = True
             return result
-        mv = world.move(cid, p["move"])
+        # CARRY 解析（政策层）：只认**此刻同屋的用户**——名字或 id 都行；对不上就当
+        # 没写并记日志（隔空抱人/抱别的 AI 在结构上不存在，团团入住后再放开到猫）。
+        carry = None
+        if p["carry_raw"]:
+            loc_now = world.location_of(cid)
+            u_name = world.entity_name(world.USER_ID)
+            if p["carry_raw"] in (world.USER_ID, u_name) \
+                    and world.location_of(world.USER_ID) == loc_now:
+                carry = world.USER_ID
+            else:
+                logerr(f"cohabit CARRY 抱不了（不同屋/不认识/非用户），当没写："
+                       f"{p['carry_raw']!r}")
+        try:
+            mv = world.move(cid, p["move"], carry=carry)
+        except ValueError as e:
+            # 预检和落地之间世界可能变了（她刚好走开）：退成独自移动，别整轮报废。
+            logerr(f"cohabit CARRY 落地时失效（{e}），改为独自移动")
+            mv = world.move(cid, p["move"])
         result["move_result"] = mv
         if mv.get("noop"):
             return result

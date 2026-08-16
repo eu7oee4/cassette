@@ -205,13 +205,16 @@ def read_experience(cid: str, limit: Optional[int] = None) -> list[dict]:
 
 
 def append_event(room_id: str, etype: str, actor: str, text: str,
-                 kind: Optional[str] = None) -> dict:
+                 kind: Optional[str] = None, with_: Optional[list] = None) -> dict:
     """写一条房间事件并返回它。**这里不做在场校验**——校验是 act/move/state_change
-    这些动作入口的事，引擎内部（比如 move 写进出通知）要能直接落笔。"""
+    这些动作入口的事，引擎内部（比如 move 写进出通知）要能直接落笔。
+    with_＝这条事件同时作用到的其他实体（抱着谁进出）：机制字段，可见性起点认它。"""
     ev = {"id": uuid.uuid4().hex[:8], "ts": int(time.time()),
           "type": etype, "actor": actor, "text": text}
     if kind:
         ev["kind"] = kind
+    if with_:
+        ev["with"] = list(with_)
     with _LOCK:
         d = ROOMS_DIR / room_id
         d.mkdir(parents=True, exist_ok=True)
@@ -252,7 +255,7 @@ def visible_events(room_id: str, entity: str,
                    limit: Optional[int] = None) -> list[dict]:
     """entity 的可见事件 = 本次在场区间（最近一次自己进屋的 enter 事件起，含那条）。
     人不在这个房间 → 空列表。从没有 enter 事件（开局就被放在屋里）→ 全部历史，
-    他确实一直在场。"""
+    他确实一直在场。被抱着进来的（自己在 enter 事件的 with 里）同样算自己的进场。"""
     if location_of(entity) != room_id:
         return []
     evs = read_events(room_id)
@@ -260,7 +263,7 @@ def visible_events(room_id: str, entity: str,
     for i in range(len(evs) - 1, -1, -1):
         e = evs[i]
         if e.get("type") == "system" and e.get("kind") == "enter" \
-                and e.get("actor") == entity:
+                and (e.get("actor") == entity or entity in (e.get("with") or [])):
             start = i
             break
     out = evs[start:]
@@ -277,12 +280,23 @@ def can_enter(entity: str, room_id: str) -> tuple[bool, str]:
     return False, "locked"
 
 
-def move(entity: str, to: str) -> dict:
+def move(entity: str, to: str, carry: Optional[str] = None) -> dict:
     """瞬移（不考虑空间路径），但过门禁。返回结果 dict，**门锁着不是异常是结局**：
     {"ok": False, "reason": "locked", "text": 给补醒注入用的一句话}。
-    成功时旧房间落 leave、新房间落 enter（hallway/away 不是房间，没有事件流）。"""
+    成功时旧房间落 leave、新房间落 enter（hallway/away 不是房间，没有事件流）。
+
+    carry＝抱着谁一起走：被抱者必须与移动者同处一室（不同室 ValueError——上层该先
+    验，这里失手就有声报错）；门禁按**移动者**判（开门的是他，被抱的跟着进）；
+    两人位置同更，事件只写一条「X 抱着 Y 进来了/离开了」+ with 字段（可见性起点
+    认 with，被抱者从那条事件起看得见新屋）。谁能抱谁是上层的政策（cohabit 一期
+    只放行抱用户），物理层只管同室这一条。"""
     with _LOCK:
         frm = location_of(entity)
+        if carry:
+            if carry == entity or carry not in entity_ids():
+                raise ValueError(f"抱不了：{carry}")
+            if location_of(carry) != frm:
+                raise ValueError(f"{entity_name(carry)} 不在你身边，抱不着")
         if to == frm:
             return {"ok": True, "from": frm, "to": to, "noop": True}
         if to not in (AWAY, HALLWAY):
@@ -294,11 +308,20 @@ def move(entity: str, to: str) -> dict:
         name = entity_name(entity)
         reg = load_registry()
         _set_location(entity, to)
+        if carry:
+            _set_location(carry, to)
+        tail = f" 抱着 {entity_name(carry)}" if carry else ""
+        with_ = [carry] if carry else None
         if frm in reg:
-            append_event(frm, "system", entity, f"{name} 离开了", kind="leave")
+            append_event(frm, "system", entity, f"{name}{tail} 离开了",
+                         kind="leave", with_=with_)
         if to in reg:
-            append_event(to, "system", entity, f"{name} 进来了", kind="enter")
-        return {"ok": True, "from": frm, "to": to}
+            append_event(to, "system", entity, f"{name}{tail} 进来了",
+                         kind="enter", with_=with_)
+        out = {"ok": True, "from": frm, "to": to}
+        if carry:
+            out["carry"] = carry
+        return out
 
 
 def act(entity: str, room_id: str, action: str = "", speech: str = "") -> dict:

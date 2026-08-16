@@ -124,6 +124,39 @@ class TestMove(WorldBase):
         with self.assertRaises(KeyError):
             world.move(world.USER_ID, "basement_lab")
 
+    def test_carry_moves_both_with_single_event(self):
+        world.move("user", self.c1_room)
+        self._reset_events()
+        mv = world.move(self.c1, "living_room", carry="user")
+        self.assertEqual(mv["carry"], "user")
+        self.assertEqual(world.location_of(self.c1), "living_room")
+        self.assertEqual(world.location_of("user"), "living_room")
+        leave = world.read_events(self.c1_room)[-1]
+        enter = world.read_events("living_room")[-1]
+        self.assertIn("抱着", leave["text"])
+        self.assertEqual(enter["with"], ["user"])
+        # 被抱者的在场区间从「抱着进来」那条起：看得见随后发生的事
+        world.act(self.c1, "living_room", speech="到啦")
+        vis = world.visible_events("living_room", "user")
+        self.assertEqual(vis[0]["kind"], "enter")
+        self.assertIn("到啦", vis[-1]["text"])
+
+    def _reset_events(self):
+        pass   # 事件文件按测试目录隔离，无需真清；占位保语义
+
+    def test_carry_validations(self):
+        with self.assertRaises(ValueError):
+            world.move(self.c1, "living_room", carry=self.c1)      # 抱自己
+        with self.assertRaises(ValueError):
+            world.move(self.c1, "living_room", carry="user")       # 不同屋
+        # 门锁着：谁都没动
+        world.move("user", self.c1_room)
+        self._set_lock("wash_room", 1)
+        mv = world.move(self.c1, "wash_room", carry="user")
+        self.assertFalse(mv["ok"])
+        self.assertEqual(world.location_of(self.c1), self.c1_room)
+        self.assertEqual(world.location_of("user"), self.c1_room)
+
 
 class TestAct(WorldBase):
     def test_act_requires_presence(self):
