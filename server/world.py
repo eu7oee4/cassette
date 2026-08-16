@@ -174,6 +174,36 @@ def _set_location(entity: str, loc: str) -> None:
 
 
 # ---------- 事件流（每房间 append-only）----------
+def _append_experience(room_id: str, ev: dict) -> None:
+    """事件落盘的同时写进每个**在场角色**的经历流（state/characters/<id>/experience.jsonl）
+    ——「他看见了什么」在发生那一刻定格成第一人称流水，注入时按 ts 与手机线程/内心
+    合并成一条经历时间线（PLAN「recent_window 泛化成第一人称经历流」的落地）。
+    作者自己也写（他做的事当然是他经历的一部分）；用户不写（用户的经历面是 app 本身）。
+    写放大 = 事件数 × 在场角色数，量级无压力。"""
+    for e in occupants(room_id):
+        if e == USER_ID:
+            continue
+        p = state_store.char_state_dir(e) / "experience.jsonl"
+        with p.open("a", encoding="utf-8") as f:
+            f.write(json.dumps({**ev, "room": room_id}, ensure_ascii=False) + "\n")
+
+
+def read_experience(cid: str, limit: Optional[int] = None) -> list[dict]:
+    p = state_store.char_state_dir(cid) / "experience.jsonl"
+    if not p.exists():
+        return []
+    out = []
+    for ln in p.read_text("utf-8").splitlines():
+        ln = ln.strip()
+        if not ln:
+            continue
+        try:
+            out.append(json.loads(ln))
+        except Exception:
+            pass
+    return out[-limit:] if limit else out
+
+
 def append_event(room_id: str, etype: str, actor: str, text: str,
                  kind: Optional[str] = None) -> dict:
     """写一条房间事件并返回它。**这里不做在场校验**——校验是 act/move/state_change
@@ -187,6 +217,11 @@ def append_event(room_id: str, etype: str, actor: str, text: str,
         d.mkdir(parents=True, exist_ok=True)
         with (d / "events.jsonl").open("a", encoding="utf-8") as f:
             f.write(json.dumps(ev, ensure_ascii=False) + "\n")
+        try:
+            _append_experience(room_id, ev)
+        except Exception as e:
+            # 经历流写不上不能反噬事件本身：事件已落盘就是发生了。
+            print(f"[world] 经历流写入失败（忽略）: {e}", flush=True)
         if event_hook:
             try:
                 event_hook(room_id, ev)

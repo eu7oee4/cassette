@@ -90,14 +90,20 @@ def gap_before_last(messages: list[Message]) -> Optional[str]:
 
 # ---------- 上下文时间线 ----------
 def build_context_timeline(conv_items: list[dict], reflect_limit: int = 5,
-                           char_id: Optional[str] = None) -> str:
+                           char_id: Optional[str] = None,
+                           experience_limit: int = 0) -> str:
     """把 最近对话 + 模型自己醒来时的内心（不在聊天里，用户在心流日志页看得到）合并成
     一条按时间排序的时间线。
     醒来和聊天共用——解决「对话本身没时间戳、和内心对不上先后顺序」的问题。
 
     ⚠️ char_id 不能省：内心来自 wake_log，而 wake_log 是**按角色分文件**的。不传就永远
     读默认角色那份——对话是 A 的、内心是 B 的，A 会读到一段自己没想过的心事然后接着往下说。
-    只有一个角色时看不出来（默认角色恰好就是自己），第二个角色一进来就串。"""
+    只有一个角色时看不出来（默认角色恰好就是自己），第二个角色一进来就串。
+
+    experience_limit > 0 时再并入第三路：小屋经历流（他在场看见的房间事件，跨房间、
+    跨在场区间，world._append_experience 在发生那一刻定格的）——三路合出「第一人称
+    经历时间线」（PLAN_cohabit 定稿）。聊天路传 40；醒来路保持 0（现场事件由
+    cohabit._where_block 的现场段承担，两处都注会重复）。"""
     items: list[tuple[int, str]] = []
 
     for c in conv_items:
@@ -119,6 +125,23 @@ def build_context_timeline(conv_items: list[dict], reflect_limit: int = 5,
             th = th[:140] + "…"
         # 「内心/你想」的措辞本身就表达了"没说出口"，不用额外标注可见性。
         items.append((int(w.get("ts", 0)), f"〔你醒来·{act}〕你想：{th}"))
+
+    # 第三路：小屋经历流（带（房间名）前缀，和手机消息一眼分得开）。
+    if experience_limit and char_id:
+        import world
+        reg = world.load_registry()
+        for ev in world.read_experience(char_id, limit=experience_limit):
+            rn = (reg.get(ev.get("room", "")) or {}).get("name") or ev.get("room", "?")
+            actor = ev.get("actor", "")
+            name = "你" if actor == char_id else world.entity_name(actor)
+            t = ev.get("type")
+            if t == "speech":
+                line = f"（{rn}）{name}：「{ev.get('text', '')}」"
+            elif t == "action":
+                line = f"（{rn}）{name} *{ev.get('text', '')}*"
+            else:
+                line = f"（{rn}·{ev.get('text', '')}）"
+            items.append((int(ev.get("ts", 0)), line))
 
     items.sort(key=lambda x: x[0])
     return "\n".join(f"[{fmt_ts(ts)}] {txt}" for ts, txt in items)
@@ -315,11 +338,16 @@ def build_prompt(messages: list[Message], catalog: Optional[list[dict]] = None,
         return "\n".join(extras + [""] + time_lines + ["", last.text])
 
     lines = extras + [""]
-    # 合并时间线：历史对话 + 醒来时的内心（不在聊天里，心流日志页可见），按时间排。
+    # 合并时间线：历史对话 + 醒来内心 + 小屋经历流（同居开着时），按时间排。
     conv_items = [{"ts": m.ts, "role": m.role, "text": m.text} for m in history]
-    timeline = build_context_timeline(conv_items, char_id=char_id)
+    timeline = build_context_timeline(conv_items, char_id=char_id,
+                                      experience_limit=40 if config.COHABIT_ENABLED else 0)
     if timeline:
-        lines.append("【下面是最近发生的，按时间顺序——对话 / 你自己醒来时的内心，看时间戳别搞混】")
+        if config.COHABIT_ENABLED:
+            lines.append("【下面是最近发生的，按时间顺序——手机对话 / 你醒来时的内心 / "
+                         "你在小屋里看见的（带（房间名）前缀），看时间戳别搞混先后】")
+        else:
+            lines.append("【下面是最近发生的，按时间顺序——对话 / 你自己醒来时的内心，看时间戳别搞混】")
         lines.append(timeline)
     else:
         # 历史全缺 ts（老客户端）：退回朴素列表

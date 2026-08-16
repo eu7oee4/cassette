@@ -27,13 +27,20 @@ class WorldBase(unittest.TestCase):
         world.ROOMS_DIR = self.tmp / "rooms"
         world.REGISTRY_PATH = world.ROOMS_DIR / "registry.json"
         world.WORLD_PATH = self.tmp / "world.json"
+        # 角色状态目录也指临时区：append_event 现在顺手写经历流（experience.jsonl），
+        # 不改这个真 state 会被测试事件污染。
+        import state_store
+        self._csr_orig = state_store.CHAR_STATE_ROOT
+        state_store.CHAR_STATE_ROOT = self.tmp / "chars"
         world.ensure_world()
         self.chars = characters.ids()
         self.c1 = self.chars[0]                    # 真实注册表里的第一个角色
         self.c1_room = f"{self.c1}_room"
 
     def tearDown(self):
+        import state_store
         world.ROOMS_DIR, world.REGISTRY_PATH, world.WORLD_PATH = self._orig
+        state_store.CHAR_STATE_ROOT = self._csr_orig
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     def _set_lock(self, room_id, lock, keys=None):
@@ -189,6 +196,36 @@ class TestRoomState(WorldBase):
         self.assertTrue(r["over_cap"])
         self.assertEqual(len(world.room_state("mm_room")),
                          world.ROOM_STATE_SOFT_CAP + 1)   # 软上限：不硬删
+
+
+class TestExperience(WorldBase):
+    def test_present_chars_record_user_not(self):
+        if len(self.chars) < 2:
+            self.skipTest("单角色环境")
+        c1, c2 = self.chars[0], self.chars[1]
+        world.move(c1, "living_room")
+        world.move(c2, "living_room")
+        world.move("user", "living_room")
+        world.act_mixed("user", "living_room", "*放下杯子* 都在呢")
+        for cid in (c1, c2):
+            texts = [e["text"] for e in world.read_experience(cid)]
+            self.assertIn("放下杯子", texts)
+            self.assertIn("都在呢", texts)
+        # 用户没有经历流文件（用户的经历面是 app）
+        self.assertEqual(world.read_experience("user"), [])
+
+    def test_actor_records_own_acts_with_room(self):
+        world.act_mixed(self.c1, self.c1_room, "自言自语一句")
+        exp = world.read_experience(self.c1)
+        self.assertEqual(exp[-1]["text"], "自言自语一句")
+        self.assertEqual(exp[-1]["room"], self.c1_room)
+
+    def test_absent_char_records_nothing(self):
+        world.act_mixed(self.c1, self.c1_room, "没人听见")
+        others = [c for c in self.chars if c != self.c1]
+        for cid in others:
+            self.assertNotIn("没人听见",
+                             [e["text"] for e in world.read_experience(cid)])
 
 
 class TestVisibility(WorldBase):
