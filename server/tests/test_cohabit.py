@@ -112,6 +112,11 @@ class TestParse(unittest.TestCase):
         self.assertEqual(p["state_ops"][1], ("edit", "deadbeef", "茶凉了"))
         self.assertEqual(p["state_ops"][2], ("remove", "cafebabe", None))
 
+    def test_state_remove_with_narration(self):
+        p = cohabit.parse_cohabit_output(
+            out("act", motion="收拾", state="remove deadbeef: 把空碗收走了"))
+        self.assertEqual(p["state_ops"][0], ("remove", "deadbeef", "把空碗收走了"))
+
     def test_motion_asterisks_stripped(self):
         p = cohabit.parse_cohabit_output(out("act", motion="*凑到窗边*"))
         self.assertEqual(p["motion"], "凑到窗边")

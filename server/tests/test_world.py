@@ -213,20 +213,30 @@ class TestAct(WorldBase):
 
 class TestRoomState(WorldBase):
     def test_add_edit_remove_with_notices(self):
+        # 通知三操作统一格式：「谁「那段文字」」（2026-08-16 机主拍板）
         r = world.state_change(world.USER_ID, "mm_room", "add", text="桌上剩了半杯牛奶")
         eid = r["entry"]["id"]
         self.assertEqual(r["entry"]["author"], world.USER_ID)
         self.assertEqual(r["event"]["kind"], "state")
-        self.assertIn("添加", r["event"]["text"])
+        self.assertIn("「桌上剩了半杯牛奶」", r["event"]["text"])
+        self.assertNotIn("添加", r["event"]["text"])
 
         world.move(self.c1, "living_room")
         world.move(self.c1, "mm_room")   # 角色也能改，前提是在场
         r = world.state_change(self.c1, "mm_room", "edit", entry_id=eid, text="牛奶只剩杯底了")
         self.assertEqual(r["entry"]["author"], self.c1)   # author = 现在这句话是谁写的
-        self.assertIn("牛奶只剩杯底了", r["event"]["text"])   # 通知=名字+新文本，不报差异
+        self.assertIn("「牛奶只剩杯底了」", r["event"]["text"])
 
-        r = world.state_change(self.c1, "mm_room", "remove", entry_id=eid)
+        # remove 带叙事：快照删条目，叙事进事件流（同一格式）
+        r = world.state_change(self.c1, "mm_room", "remove", entry_id=eid,
+                               text="把凉透的牛奶端走倒了")
         self.assertEqual(world.room_state("mm_room"), [])   # 快照只留结果
+        self.assertIn("「把凉透的牛奶端走倒了」", r["event"]["text"])
+        self.assertNotIn("清掉", r["event"]["text"])
+
+        # remove 不带叙事：退回老格式，交代清掉了什么
+        r = world.state_change(world.USER_ID, "mm_room", "add", text="窗台上一只纸飞机")
+        r = world.state_change(world.USER_ID, "mm_room", "remove", entry_id=r["entry"]["id"])
         self.assertIn("清掉", r["event"]["text"])
 
     def test_requires_presence_and_valid_entry(self):

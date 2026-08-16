@@ -26,8 +26,14 @@ struct RoomPage: View {
     private let service = ChatService()
 
     private enum StateSheetMode: Identifiable {
-        case add, edit(RoomStateEntry)
-        var id: String { if case .edit(let e) = self { return e.id } else { return "add" } }
+        case add, edit(RoomStateEntry), remove(RoomStateEntry)
+        var id: String {
+            switch self {
+            case .add: return "add"
+            case .edit(let e): return "e-\(e.id)"
+            case .remove(let e): return "r-\(e.id)"
+            }
+        }
     }
 
     /// 「我」还在这个房间吗（在场才有输入区；偷看永远没有）。
@@ -55,7 +61,8 @@ struct RoomPage: View {
             titleVisibility: .visible) {
             if let entry = editingEntry {
                 Button("改一改") { stateDraft = entry.text; stateSheet = .edit(entry) }
-                Button("清掉", role: .destructive) { stateChange("remove", entry: entry, text: nil) }
+                // 清掉也可以留一句叙事（进事件流；快照直接删）——面板里写，可空
+                Button("清掉", role: .destructive) { stateDraft = ""; stateSheet = .remove(entry) }
                 Button("取消", role: .cancel) {}
             }
         }
@@ -333,31 +340,41 @@ struct RoomPage: View {
 
     @ViewBuilder
     private func stateEditor(_ mode: StateSheetMode) -> some View {
+        let isRemove = { if case .remove = mode { return true } else { return false } }()
         NavigationStack {
             VStack(spacing: 14) {
-                TextField("比如：桌上剩了半杯牛奶", text: $stateDraft, axis: .vertical)
+                TextField(isRemove ? "说一句收拾了什么（可空），如：把空碗收走了"
+                                   : "比如：桌上剩了半杯牛奶",
+                          text: $stateDraft, axis: .vertical)
                     .textFieldStyle(.roundedBorder)
                     .padding(.horizontal, 16)
-                Text("这是「现在这里有什么」的快照——收拾掉一样东西就清掉那条，别写成日志。")
+                Text(isRemove
+                     ? "这条状态会直接从快照里删掉；写的话只进事件流（谁「那段文字」）。"
+                     : "这是「现在这里有什么」的快照——收拾掉一样东西就清掉那条，别写成日志。")
                     .font(.caption).foregroundStyle(.secondary)
                     .padding(.horizontal, 16)
                 Spacer()
             }
             .padding(.top, 20)
-            .navigationTitle(modeIsAdd(mode) ? "添加一条" : "改一改")
+            .navigationTitle(sheetTitle(mode))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("取消") { stateSheet = nil }
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("好了") {
+                    Button(isRemove ? "清掉" : "好了") {
                         let text = stateDraft.trimmingCharacters(in: .whitespacesAndNewlines)
-                        guard !text.isEmpty else { return }
-                        if case .edit(let entry) = mode {
-                            stateChange("edit", entry: entry, text: text)
-                        } else {
+                        switch mode {
+                        case .add:
+                            guard !text.isEmpty else { return }
                             stateChange("add", entry: nil, text: text)
+                        case .edit(let entry):
+                            guard !text.isEmpty else { return }
+                            stateChange("edit", entry: entry, text: text)
+                        case .remove(let entry):
+                            stateChange("remove", entry: entry,
+                                        text: text.isEmpty ? nil : text)
                         }
                         stateSheet = nil
                     }
@@ -367,9 +384,12 @@ struct RoomPage: View {
         .presentationDetents([.height(220)])
     }
 
-    private func modeIsAdd(_ mode: StateSheetMode) -> Bool {
-        if case .add = mode { return true }
-        return false
+    private func sheetTitle(_ mode: StateSheetMode) -> String {
+        switch mode {
+        case .add: return "添加一条"
+        case .edit: return "改一改"
+        case .remove: return "收拾掉这条"
+        }
     }
 
     // MARK: - 时间格式

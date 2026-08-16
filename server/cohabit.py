@@ -37,7 +37,7 @@ N_CHAIN = 4
 # 每轮 act 可附带的状态改动条数上限（口径在 world.MAX_STATE_OPS_PER_ACT，解析处执行）。
 _STATE_ADD_RE = re.compile(r"^\s*add\s*[:：]\s*(.+?)\s*$", re.I)
 _STATE_EDIT_RE = re.compile(r"^\s*edit\s+([0-9a-f]{8})\s*[:：]\s*(.+?)\s*$", re.I)
-_STATE_REMOVE_RE = re.compile(r"^\s*remove\s+([0-9a-f]{8})\s*$", re.I)
+_STATE_REMOVE_RE = re.compile(r"^\s*remove\s+([0-9a-f]{8})\s*(?:[:：]\s*(.+?))?\s*$", re.I)
 
 _WORLDVIEW = """【这个世界怎么运作——三条，都是机制，记住就好】
 1. 你有位置了。你此刻真实地待在下面写的那个地方，房间有门、可能有锁，别人能走进来，你也能走出去。这不是比喻。
@@ -179,7 +179,7 @@ THOUGHTS: <你此刻真实的内心，几句话>
 ACTION: <none / act / phone，三选一。act=在你所在的房间里表达；phone=给{u}手机发消息，人在哪都行；一轮只能选一样>
 MOTION: <ACTION=act 时你做的动作，第三人称白描（别带星号），如「把杯子放回桌上」；没有留空>
 SAY: <ACTION=act 时你在房间里说的话。可以夹 *动作*（星号包起来），会按顺序拆成 动作/说话/动作/说话 分开上屏；不说留空>
-STATE: <ACTION=act 时顺手改这里的地点状态，每行一条、最多 {world.MAX_STATE_OPS_PER_ACT} 条：add: 文本 ／ edit 条目id: 新文本 ／ remove 条目id。⚠️ 快照写的是**这里的东西和环境**（桌上剩了半杯牛奶、窗帘拉开了），你的身体姿势不进快照——你在干嘛用 MOTION/SAY 表达；不改留空>
+STATE: <ACTION=act 时顺手改这里的地点状态，每行一条、最多 {world.MAX_STATE_OPS_PER_ACT} 条：add: 文本 ／ edit 条目id: 新文本 ／ remove 条目id: 一句交代（如 "remove ab12cd34: 把凉透的牛奶端走倒了"，交代可省）。⚠️ 快照写的是**这里的东西和环境**（桌上剩了半杯牛奶、窗帘拉开了），你的身体姿势不进快照——你在干嘛用 MOTION/SAY 表达；不改留空>
 PHONE: <ACTION=phone 时发给{u}的消息>
 MOVE: <想去哪就写上面清单里的房间 id；id 后可空格接一句进场的样子，如 "living_room 打着哈欠晃进来"；不动写 "无"。移动发生在这一轮的最后，走完下一轮会告诉你结果>
 CARRY: <配合 MOVE：想抱着{u}一起走就写「{u}」（前提是{u}此刻和你同屋）；不带人写 "无">
@@ -247,7 +247,7 @@ def parse_cohabit_output(text: str) -> dict:
             elif (m := _STATE_EDIT_RE.match(ln)):
                 state_ops.append(("edit", m.group(1), m.group(2)))
             elif (m := _STATE_REMOVE_RE.match(ln)):
-                state_ops.append(("remove", m.group(1), None))
+                state_ops.append(("remove", m.group(1), m.group(2) or None))
             else:
                 logerr(f"cohabit STATE 行不认识，丢弃：{ln[:60]!r}")
         if len(state_ops) > world.MAX_STATE_OPS_PER_ACT:

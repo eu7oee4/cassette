@@ -397,13 +397,15 @@ def state_change(entity: str, room_id: str, op: str,
             raise NotPresent(f"{entity_name(entity)} 不在这个房间")
         entries = reg[room_id].setdefault("state", [])
         name = entity_name(entity)
+        # 通知格式三操作统一（机主 2026-08-16）：「谁「那段文字」」——只报结果不报差异。
+        # remove 的文字是叙事（「把空碗收走了」）：快照直接删条目，叙事进事件流。
         if op == "add":
             if not text:
                 raise ValueError("add 需要 text")
             entry = {"id": uuid.uuid4().hex[:8], "text": text,
                      "author": entity, "since": int(time.time())}
             entries.append(entry)
-            notice = f"{name} 添加了「{text}」"
+            notice = f"{name}「{text}」"
         elif op in ("edit", "remove"):
             entry = next((x for x in entries if x.get("id") == entry_id), None)
             if entry is None:
@@ -411,12 +413,12 @@ def state_change(entity: str, room_id: str, op: str,
             if op == "edit":
                 if not text:
                     raise ValueError("edit 需要 text")
-                # 通知只报结果不报差异（机主 2026-08-16：旧的「把 aaa 改成了 bbb」太啰嗦）
                 notice = f"{name}「{text}」"
                 entry.update(text=text, author=entity, since=int(time.time()))
             else:
                 entries.remove(entry)
-                notice = f"{name} 清掉了「{entry['text']}」"
+                # 没写叙事就退回老格式，别硬憋一句
+                notice = f"{name}「{text}」" if text else f"{name} 清掉了「{entry['text']}」"
         else:
             raise ValueError(f"不认识的操作：{op}")
         _write_json(REGISTRY_PATH, reg)
