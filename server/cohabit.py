@@ -80,7 +80,7 @@ def _render_event(ev: dict, self_id: str) -> str:
     return f"[{t}] （{text}）"   # system：进出 / 状态改动，事件文本自带人名
 
 
-def _where_block(cid: str) -> str:
+def _where_block(cid: str, ev_limit: int = 80) -> str:
     """「你在哪 + 这里有谁 + 地点状态 + 你在场看到的」。走廊/出门也如实说——
     那两处不是房间，没有事件流，能做的只有 move 和 phone。"""
     loc = world.location_of(cid)
@@ -113,7 +113,7 @@ def _where_block(cid: str) -> str:
     else:
         state_block = "【这里现在有什么】（没什么特别的）"
 
-    evs = world.visible_events(loc, cid, limit=80)
+    evs = world.visible_events(loc, cid, limit=ev_limit)
     ev_block = ("【你在这个房间看到的（从你这次进来算起）】\n" +
                 "\n".join(_render_event(e, cid) for e in evs)) if evs else \
         "【你在这个房间看到的】（你在这儿的这段时间还没发生什么）"
@@ -182,6 +182,20 @@ PHONE: <ACTION=phone 时发给{u}的消息>
 MOVE: <想去哪就写上面清单里的房间 id；id 后可空格接一句进场的样子，如 "living_room 打着哈欠晃进来"；不动写 "无"。移动发生在这一轮的最后，走完下一轮会告诉你结果>
 NEXT: <你希望多久后再自主醒来，如 "90分钟" 或 "3小时"；没想法写 "无">
 """
+
+
+def house_context_for_chat(char_id, ev_limit: int = 30) -> str:
+    """手机聊天注入的小屋现场（2026-08-16 机主拍板：房间事件原文也给聊天）。
+    复用醒来的 _where_block——你在哪/这里有谁（含电脑前标注）/地点状态/本次在场
+    事件，口径与醒来完全一致，不造第二套。头尾各一句通道框定：现场他看得见，
+    但这轮回的是手机短信，不是在房间里开口。开关关着返回空串。"""
+    if not config.COHABIT_ENABLED:
+        return ""
+    cid = characters.resolve(char_id)
+    return ("【小屋现场——你此刻真实待在这里，在场这段时间发生的事你都看见了】\n"
+            + _where_block(cid, ev_limit=ev_limit)
+            + "\n【注意通道：现在这条消息是手机上来的，你回的也是手机短信，"
+              "不是在房间里开口说话。】")
 
 
 # ---------- ACTION 协议解析（组合规则在这里结构性执行）----------

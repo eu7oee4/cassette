@@ -49,6 +49,7 @@ import urllib.parse
 import browser_keeper
 import characters
 import code_bridge
+import cohabit
 import cohabit_queue
 import config
 import game_bridge
@@ -333,9 +334,11 @@ def _prepare_chat(req: ChatRequest, char_id: Optional[str] = None) -> tuple[str,
             logerr(f"写 sticker_catalog 失败: {e}")
     # 手机消息 = 新外部输入：连发计数清零（开关关着时是空转，便宜）。
     cohabit_queue.external_input()
-    move_hint = cohabit_queue.chat_move_hint(char_id)
+    # 小屋现场（在场者/地点状态/本次在场事件原文）+ 可附加 move 的提示，开关关着都为空。
+    hints = [h for h in (cohabit.house_context_for_chat(char_id),
+                         cohabit_queue.chat_move_hint(char_id)) if h]
     return (pipeline.build_prompt(req.messages, catalog, char_id=char_id,
-                                  extra_hints=[move_hint] if move_hint else None),
+                                  extra_hints=hints or None),
             pipeline.sticker_handle_map(catalog))
 
 
@@ -516,7 +519,6 @@ def characters_list(x_auth: Optional[str] = Header(default=None, alias="X-Auth")
     verify_auth(x_auth)
     busy = None
     if config.COHABIT_ENABLED:
-        import cohabit
         busy = cohabit.coding_char()
     return {"items": [{"id": cid, "display_name": characters.display_name(cid),
                        "status": (busy[1] if busy and busy[0] == cid else None)}
@@ -855,7 +857,6 @@ def get_world(x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
     # 在场状态：code/game 会话开着的角色标出来（UI 显示「正在敲代码，先别打扰」）。
     busy = None
     if config.COHABIT_ENABLED:
-        import cohabit
         busy = cohabit.coding_char()
     return {"rooms": rooms,
             "entities": {e: {**v, "name": world.entity_name(e),

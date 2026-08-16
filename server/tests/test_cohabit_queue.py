@@ -300,6 +300,20 @@ class TestChatMove(QueueBase):
         self.assertIsNone(cq.chat_move(self.cid, "basement_lab"))
         self.assertEqual(world.location_of(self.cid), self.home)
 
+    def test_house_context_for_chat_carries_room_events(self):
+        world.move("user", self.home)
+        world.act_mixed("user", self.home, "*敲了敲门框* 在忙吗")
+        world.state_change("user", self.home, "add", text="门口放了杯咖啡")
+        ctx = cohabit.house_context_for_chat(self.cid)
+        self.assertIn("小屋现场", ctx)
+        self.assertIn("敲了敲门框", ctx)          # 事件原文（动作）
+        self.assertIn("在忙吗", ctx)              # 事件原文（说话）
+        self.assertIn("门口放了杯咖啡", ctx)       # 地点状态
+        self.assertIn("手机短信", ctx)             # 通道框定
+        config.COHABIT_ENABLED = False
+        self.assertEqual(cohabit.house_context_for_chat(self.cid), "")
+        config.COHABIT_ENABLED = True
+
     def test_chat_move_hint_lists_rooms_not_people(self):
         world.move("user", "living_room")
         hint = cq.chat_move_hint(self.cid)
