@@ -138,7 +138,9 @@ def cohabit_prompt(cid: str, reasons: list[dict], settings: dict) -> str:
     reason_lines = "\n".join(f"- {r.get('text', '')}" for r in reasons if r.get("text"))
 
     window = state_store.read_recent_window(cid)
-    wake_n = min(max(int(settings.get("wake_window_n") or 50), 20), 300)
+    # 同居醒来的窗口比聊天克制（机主 2026-08-16：token 撑不住）：设置值照读，但顶到 40
+    # ——热闹场里事件醒来很密，每次都拖全量窗口是大头。
+    wake_n = min(max(int(settings.get("wake_window_n") or 50), 20), 40)
     timeline = pipeline.build_context_timeline(window[-wake_n:], char_id=cid) or "（最近没有对话）"
 
     menu = pipeline.tool_menu_block("wake", cid)
@@ -163,7 +165,7 @@ def cohabit_prompt(cid: str, reasons: list[dict], settings: dict) -> str:
 {pipeline.pronoun_hint()}
 {_WORLDVIEW}
 
-{_where_block(cid)}
+{_where_block(cid, ev_limit=40)}
 
 {_rooms_block(cid)}
 
