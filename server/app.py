@@ -982,13 +982,16 @@ def _require_code() -> None:
                             detail="Code 模式没开：在 server/.env 里设 CODE_MODE_ENABLED=1 再重启后端")
 
 
-def _code_window_append(role: str, text: str) -> None:
+def _code_window_append(role: str, text: str, char_id: Optional[str] = None) -> None:
     """code 模式的对话也写进 recent_window（会话归属角色的那份）——不然醒来时它对这段
-    完全失明，会拿着几小时前的世界说胡话。加锁口径同 finalize。"""
+    完全失明，会拿着几小时前的世界说胡话。加锁口径同 finalize。
+
+    char_id 不传＝从 session.json 现读（发话/上报那两条路的常态）。起会话那两条路要显式
+    传：那儿的归属是自己算的（plugins.owner_of），别让窗口的归属和会话的归属两处各算一遍。"""
     if not (text or "").strip():
         return
     try:
-        cid = _session_char()
+        cid = (char_id or "").strip() or _session_char()
         with state_store.WINDOW_LOCK:
             window = state_store.read_recent_window(cid)
             window.append({"role": role, "text": text, "ts": int(time.time())})
@@ -1263,11 +1266,16 @@ def codemode_start(inp: CodemodeStartIn, x_auth: Optional[str] = Header(default=
         logerr(f"自切 code 模式：{task[:80]}")
         # task 是 TA 自己写的、直接进了会话，用户在手机上看不见 → 原样回显进聊天，
         # 让 TA 能当场发现转述错了。
+        echo = f"〔切到 Code 模式，task 如下〕\n\n{task}"
         try:
             state_store.outbox_append({"id": uuid.uuid4().hex[:12], "ts": int(time.time()),
-                                       "text": f"〔切到 Code 模式，task 如下〕\n\n{task}",
+                                       "text": echo,
                                        "sticker_ids": [], "delivered": False,
                                        "char_id": cid, "origin": "code"})
+            # 窗口也要跟上（:342 那条铁律）：只进 outbox 的话，下一条聊天来之前若自发醒来，
+            # 会看见自己在 code 里干活、却不知道为什么在干。**同一份文本**——下次 app 历史
+            # 整体覆盖窗口时才对得上，不然同一句话在窗口里前后两个样。
+            _code_window_append("assistant", echo, char_id=cid)
         except Exception as e:
             logerr(f"code task 回显失败: {e}")
     return r
@@ -1645,11 +1653,13 @@ def game_story_start(inp: GameStoryStartIn,
         return r
     logerr(f"切游戏剧情会话：{task[:80] if task else '(自己安排)'}")
     if task:
+        echo = f"〔去玩游戏了，说好的是〕\n\n{task}"
         try:
             state_store.outbox_append({"id": uuid.uuid4().hex[:12], "ts": int(time.time()),
-                                       "text": f"〔去玩游戏了，说好的是〕\n\n{task}",
+                                       "text": echo,
                                        "sticker_ids": [], "delivered": False,
                                        "char_id": cid, "origin": "game"})
+            _code_window_append("assistant", echo, char_id=cid)   # 同 codemode_start，见那儿的注释
         except Exception as e:
             logerr(f"game task 回显失败: {e}")
     return r
