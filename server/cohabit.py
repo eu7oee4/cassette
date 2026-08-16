@@ -182,9 +182,8 @@ def cohabit_prompt(cid: str, reasons: list[dict], settings: dict) -> str:
 严格按下面格式回答（每个标签一行开头，英文+冒号，全部都要写，用不上的留空）：
 THOUGHTS: <你此刻真实的内心，几句话>
 ACTION: <none / act / phone，三选一。act=在你所在的房间里表达；phone=给{u}手机发消息，人在哪都行；一轮只能选一样>
-MOTION: <ACTION=act 时你做的动作，第三人称白描（别带星号），如「把杯子放回桌上」；没有留空>
-SAY: <ACTION=act 时你在房间里说的话。可以夹 *动作*（星号包起来），会按顺序拆成 动作/说话/动作/说话 分开上屏；不说留空>
-STATE: <ACTION=act 时顺手改这里的地点状态，每行一条、最多 {world.MAX_STATE_OPS_PER_ACT} 条：add: 文本 ／ edit 条目id: 新文本 ／ remove 条目id: 一句交代（如 "remove ab12cd34: 把凉透的牛奶端走倒了"，交代可省）。⚠️ 快照写的是**这里的东西和环境**（桌上剩了半杯牛奶、窗帘拉开了），你的身体姿势不进快照——你在干嘛用 MOTION/SAY 表达；不改留空>
+SAY: <ACTION=act 时你在房间里的动作和说话，全写这一行：动作用 *星号* 包起来，说话直接写，可以交错（如 "*拉开窗帘* 天亮了 *回头看她*"），会按顺序拆开上屏。同一个动作只写一遍；不表达留空>
+STATE: <ACTION=act 时顺手改这里的地点状态，每行一条、最多 {world.MAX_STATE_OPS_PER_ACT} 条：add: 文本 ／ edit 条目id: 新文本 ／ remove 条目id: 一句交代（如 "remove ab12cd34: 把凉透的牛奶端走倒了"，交代可省）。⚠️ 快照写的是**这里的东西和环境**（桌上剩了半杯牛奶、窗帘拉开了），你的身体姿势不进快照——你在干嘛用 SAY 表达；不改留空>
 PHONE: <ACTION=phone 时发给{u}的消息>
 MOVE: <想去哪就写上面清单里的房间 id；id 后可空格接一句进场的样子，如 "living_room 打着哈欠晃进来"；不动写 "无"。移动发生在这一轮的最后，走完下一轮会告诉你结果>
 CARRY: <配合 MOVE：想抱着{u}一起走就写「{u}」（前提是{u}此刻和你同屋）；不带人写 "无">
@@ -208,6 +207,9 @@ def house_context_for_chat(char_id) -> str:
 
 
 # ---------- ACTION 协议解析（组合规则在这里结构性执行）----------
+# MOTION 已从 prompt 里退役（2026-08-16：和 SAY 的 *动作* 双出口导致同一动作写两遍，
+# 见 Cass 盖毯子那轮）。解析层留着它当容错：模型哪天惯性写了，照旧并进 SAY 首段，
+# 不会串进别的段。
 _LABELS = ["THOUGHTS", "ACTION", "MOTION", "SAY", "STATE", "PHONE", "MOVE", "CARRY", "NEXT"]
 
 
