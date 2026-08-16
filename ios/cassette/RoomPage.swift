@@ -15,8 +15,7 @@ struct RoomPage: View {
 
     @State private var detail: RoomDetail?
     @State private var events: [RoomEvent] = []
-    @State private var actionText = ""
-    @State private var speechText = ""
+    @State private var inputText = ""     // 混写：*星号* 是动作、其余是说话，可交错
     @State private var sending = false
     @State private var errorText: String?
     @State private var editingEntry: RoomStateEntry?   // 点了哪条地点状态（弹编辑/清掉）
@@ -81,15 +80,14 @@ struct RoomPage: View {
     }
 
     private func sendAct() {
-        let action = actionText.trimmingCharacters(in: .whitespacesAndNewlines)
-        let speech = speechText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !action.isEmpty || !speech.isEmpty else { return }
+        let text = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return }
         sending = true
         Task {
             defer { sending = false }
             do {
-                try await service.roomAct(roomID, action: action, speech: speech)
-                actionText = ""; speechText = ""
+                try await service.roomAct(roomID, text: text)
+                inputText = ""
                 await refresh()
             } catch { errorText = error.localizedDescription }
         }
@@ -209,6 +207,20 @@ struct RoomPage: View {
                             .padding(.top, 30)
                     }
                     ForEach(events) { ev in eventRow(ev).id(ev.id) }
+                    // 正在回应：房间里谁的醒来在生成中（轮询带回来的）
+                    if let reps = detail?.replying, !reps.isEmpty {
+                        ForEach(reps, id: \.self) { cid in
+                            HStack(spacing: 8) {
+                                HouseAvatarChip(entityID: cid, entity: nil, size: 26)
+                                Text("\(actorName(cid)) 正在回应")
+                                    .font(.caption)
+                                    .foregroundStyle(Color.house.textSecondary)
+                                HouseTypingDots()
+                                Spacer()
+                            }
+                            .id("replying-\(cid)")
+                        }
+                    }
                 }
                 .padding(.horizontal, 16).padding(.vertical, 10)
                 .frame(maxWidth: .infinity, minHeight: 44)
@@ -233,25 +245,29 @@ struct RoomPage: View {
     @ViewBuilder
     private func eventRow(_ ev: RoomEvent) -> some View {
         let mine = ev.actor == "user"
+        let idc = IdentityColor.color(for: ev.actor)
         switch ev.type {
         case "system":
             Text("—— \(ev.text) ——")
                 .font(.caption2).foregroundStyle(Color.house.textSecondary)
                 .frame(maxWidth: .infinity)
         case "action":
-            (Text("\(actorName(ev.actor)) ").bold() + Text("*\(ev.text)*").italic())
-                .font(.footnote).foregroundStyle(Color.house.textSecondary)
+            (Text("\(actorName(ev.actor)) ").bold().foregroundStyle(idc)
+             + Text("*\(ev.text)*").italic().foregroundStyle(Color.house.textSecondary))
+                .font(.footnote)
                 .frame(maxWidth: .infinity, alignment: mine ? .trailing : .leading)
-        default:   // speech
+        default:   // speech：气泡底 = 角色识别色（低透明度），谁说的一眼可辨
             VStack(alignment: mine ? .trailing : .leading, spacing: 3) {
-                Text("\(actorName(ev.actor)) · \(Self.hhmm(ev.ts))")
-                    .font(.caption2).foregroundStyle(Color.house.textSecondary)
+                (Text(actorName(ev.actor)).foregroundStyle(idc).bold()
+                 + Text(" · \(Self.hhmm(ev.ts))").foregroundStyle(Color.house.textSecondary))
+                    .font(.caption2)
                 Text(ev.text)
                     .font(.body)
-                    .foregroundStyle(mine ? Color.house.onAccent : Color.house.textPrimary)
+                    .foregroundStyle(Color.house.textPrimary)
                     .padding(.horizontal, 12).padding(.vertical, 8)
-                    .background(RoundedRectangle(cornerRadius: 16)
-                        .fill(mine ? Color.house.accent : Color.house.surfaceHi))
+                    .background(RoundedRectangle(cornerRadius: 16).fill(idc.opacity(0.26)))
+                    .overlay(RoundedRectangle(cornerRadius: 16)
+                        .stroke(idc.opacity(0.35), lineWidth: 1))
             }
             .frame(maxWidth: .infinity, alignment: mine ? .trailing : .leading)
         }
@@ -261,39 +277,29 @@ struct RoomPage: View {
         eid == "user" ? "你" : (CharacterNameCache.shared.name(eid) ?? eid)
     }
 
-    // MARK: - 输入区（与 AI 的 act 对称：动作 + 说话，可一空）
+    // MARK: - 输入区（混写：*星号* 是动作、其余是说话，可交错，与 AI 的 act 对称）
 
     private var inputBar: some View {
-        VStack(spacing: 6) {
-            TextField("*动作*（可空，如：把外套搭在椅背上）", text: $actionText, axis: .vertical)
-                .font(.footnote.italic())
+        HStack(spacing: 8) {
+            TextField("说话，*动作* 用星号包起来，可交错…", text: $inputText, axis: .vertical)
                 .focused($inputFocused)
                 .textFieldStyle(.plain)
-                .padding(.horizontal, 12).padding(.vertical, 7)
-                .background(RoundedRectangle(cornerRadius: 12).fill(Color.house.surfaceHi))
+                .padding(.horizontal, 12).padding(.vertical, 8)
+                .background(RoundedRectangle(cornerRadius: 14).fill(Color.house.surfaceHi))
                 .foregroundStyle(Color.house.textPrimary)
-            HStack(spacing: 8) {
-                TextField("说点什么…", text: $speechText, axis: .vertical)
-                    .focused($inputFocused)
-                    .textFieldStyle(.plain)
-                    .padding(.horizontal, 12).padding(.vertical, 8)
-                    .background(RoundedRectangle(cornerRadius: 14).fill(Color.house.surfaceHi))
-                    .foregroundStyle(Color.house.textPrimary)
-                Button(action: sendAct) {
-                    Image(systemName: "arrow.up.circle.fill")
-                        .font(.system(size: 30))
-                        .foregroundStyle(canSend ? Color.house.accent : Color.house.textSecondary)
-                }
-                .disabled(!canSend || sending)
+            Button(action: sendAct) {
+                Image(systemName: "arrow.up.circle.fill")
+                    .font(.system(size: 30))
+                    .foregroundStyle(canSend ? Color.house.accent : Color.house.textSecondary)
             }
+            .disabled(!canSend || sending)
         }
         .padding(.horizontal, 12).padding(.vertical, 8)
         .background(Color.house.surface.ignoresSafeArea(edges: .bottom))
     }
 
     private var canSend: Bool {
-        !actionText.trimmingCharacters(in: .whitespaces).isEmpty ||
-        !speechText.trimmingCharacters(in: .whitespaces).isEmpty
+        !inputText.trimmingCharacters(in: .whitespaces).isEmpty
     }
 
     // MARK: - 地点状态编辑
@@ -351,6 +357,26 @@ struct RoomPage: View {
         if s < 3600 { return "\(max(1, s / 60))分钟前" }
         if s < 86400 { return "\(s / 3600)小时前" }
         return "\(s / 86400)天前"
+    }
+}
+
+/// 「正在回应」的三点呼吸动画（小屋版 typing indicator）。
+struct HouseTypingDots: View {
+    @State private var on = false
+
+    var body: some View {
+        HStack(spacing: 3) {
+            ForEach(0..<3, id: \.self) { i in
+                Circle()
+                    .fill(Color.house.textSecondary)
+                    .frame(width: 5, height: 5)
+                    .opacity(on ? 1 : 0.25)
+                    .animation(.easeInOut(duration: 0.6)
+                        .repeatForever(autoreverses: true)
+                        .delay(Double(i) * 0.2), value: on)
+            }
+        }
+        .onAppear { on = true }
     }
 }
 

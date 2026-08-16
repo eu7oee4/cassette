@@ -49,6 +49,11 @@ _order: list[str] = []                 # FIFO
 _syswake_run: dict[str, int] = {}      # cid → 连续系统触发醒来计数（外部输入清零）
 _gate_hit: dict[str, bool] = {}        # 连发上限的日志只在撞上那次打一条
 _defer_hit: dict[str, bool] = {}       # code 会话延后的日志同理：进入延后那次打一条
+_executing: dict = {"cid": None}       # 正在执行醒来的角色（房间视图「正在回应」动画用）
+
+
+def executing() -> Optional[str]:
+    return _executing["cid"]
 
 # code 会话探测缓存（探一次是 tmux 子进程，worker 冲队时别每 pop 都探）。
 _CODE_PROBE_SEC = 5
@@ -308,9 +313,13 @@ def _drain() -> None:
             # 全局执行锁跨两套系统（wake.WAKE_EXEC_LOCK）：邮件硬触发跑在老路的线程池，
             # 不共锁就可能和这里同时起两个 claude -p。
             with wake.WAKE_EXEC_LOCK:
-                res = cohabit.do_cohabit_wake(cid, reasons,
-                                              chain_allowed=_may_chain,
-                                              on_move_result=lambda c, r: enqueue(c, r, system=True))
+                _executing["cid"] = cid
+                try:
+                    res = cohabit.do_cohabit_wake(cid, reasons,
+                                                  chain_allowed=_may_chain,
+                                                  on_move_result=lambda c, r: enqueue(c, r, system=True))
+                finally:
+                    _executing["cid"] = None
             if res.get("action") == "error":
                 # 错误冷却 30 分钟（口径同 do_wake_sync）：enqueue/solo 两头都认这个字段。
                 with state_store.SCHEDULE_LOCK:

@@ -64,6 +64,22 @@ extension HousePalette {
     )
 }
 
+/// 角色识别色：小屋里「谁说的」一眼可辨——气泡底、名字、头像描边都用它。
+/// 与主题解耦（换主题不换身份色）；新角色没配就按 id 哈希出一个稳定色。
+enum IdentityColor {
+    static func color(for entityID: String) -> Color {
+        switch entityID {
+        case "user":    return Color(hex: 0xB86166)   // 眠眠：玫瑰
+        case "default": return Color(hex: 0x7FA8C9)   // 小卡：雾蓝
+        case "cass":    return Color(hex: 0xC9A15B)   // Cassius：琥珀
+        default:
+            var h = 0
+            for u in entityID.unicodeScalars { h = (h &* 31 &+ Int(u.value)) & 0xFFFF }
+            return Color(hue: Double(h % 360) / 360.0, saturation: 0.38, brightness: 0.72)
+        }
+    }
+}
+
 extension Color {
     /// 当前生效的主题（以后做换主题时，改成从 UserDefaults 读用户选中的那套）。
     static let current = ThemePalette.plumTint

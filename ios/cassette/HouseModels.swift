@@ -49,6 +49,7 @@ struct RoomDetail: Decodable {
     let owner: String?
     let state: [RoomStateEntry]
     let occupants: [String]
+    let replying: [String]?   // 正在生成醒来回应的在场角色（「正在回应…」动画）
 }
 
 struct RoomStateEntry: Decodable, Identifiable, Equatable {
@@ -105,8 +106,9 @@ extension ChatService {
         return try JSONDecoder().decode(Box.self, from: data).events
     }
 
-    func roomAct(_ id: String, action: String, speech: String) async throws {
-        let body = try JSONEncoder().encode(["action": action, "speech": speech])
+    /// 混写表达：*星号* 是动作、其余是说话，可交错；服务端拆成事件序列。
+    func roomAct(_ id: String, text: String) async throws {
+        let body = try JSONEncoder().encode(["text": text])
         _ = try await perform(authedRequest("POST", "/rooms/\(id)/act", jsonBody: body, timeout: 10))
     }
 

@@ -29,6 +29,7 @@ move 里要套 append_event）。文件写入同 state_store：唯一临时名 +
 """
 import json
 import os
+import re
 import threading
 import time
 import uuid
@@ -282,6 +283,42 @@ def act(entity: str, room_id: str, action: str = "", speech: str = "") -> dict:
             out.append(append_event(room_id, "action", entity, action))
         if speech:
             out.append(append_event(room_id, "speech", entity, speech))
+        return {"room": room_id, "events": out}
+
+
+# 混写表达：一段文本里 *斜体* 是动作、其余是说话，按出现顺序拆成事件序列——
+# 「*坐下* 今天好冷 *拉过毯子* 你也过来」→ action/speech/action/speech 四条。
+_MIXED_SEG_RE = re.compile(r"\*([^*\n]+)\*")
+
+
+def split_mixed(text: str) -> list[tuple[str, str]]:
+    """混写文本 → [(类型, 内容)]，类型 action|speech，保序、去空。纯解析无 IO，可独立测。"""
+    out: list[tuple[str, str]] = []
+    pos = 0
+    for m in _MIXED_SEG_RE.finditer(text):
+        before = text[pos:m.start()].strip()
+        if before:
+            out.append(("speech", before))
+        seg = m.group(1).strip()
+        if seg:
+            out.append(("action", seg))
+        pos = m.end()
+    tail = text[pos:].strip()
+    if tail:
+        out.append(("speech", tail))
+    return out
+
+
+def act_mixed(entity: str, room_id: str, text: str) -> dict:
+    """混写表达入口（动作+说话可交错）。空文本 / 拆完全空 → ValueError。"""
+    segs = split_mixed((text or "").strip())
+    if not segs:
+        raise ValueError("说点什么或做点什么")
+    with _LOCK:
+        room(room_id)
+        if location_of(entity) != room_id:
+            raise NotPresent(f"{entity_name(entity)} 不在这个房间")
+        out = [append_event(room_id, kind, entity, seg) for kind, seg in segs]
         return {"room": room_id, "events": out}
 
 

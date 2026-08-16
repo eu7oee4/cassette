@@ -176,10 +176,10 @@ def cohabit_prompt(cid: str, reasons: list[dict], settings: dict) -> str:
 THOUGHTS: <你此刻真实的内心，几句话>
 ACTION: <none / act / phone，三选一。act=在你所在的房间里表达；phone=给{u}手机发消息，人在哪都行；一轮只能选一样>
 MOTION: <ACTION=act 时你做的动作，第三人称白描（别带星号），如「把杯子放回桌上」；没有留空>
-SAY: <ACTION=act 时你在房间里说的话；不说留空>
-STATE: <ACTION=act 时顺手改这里的地点状态，每行一条、最多 {world.MAX_STATE_OPS_PER_ACT} 条：add: 文本 ／ edit 条目id: 新文本 ／ remove 条目id；不改留空>
+SAY: <ACTION=act 时你在房间里说的话。可以夹 *动作*（星号包起来），会按顺序拆成 动作/说话/动作/说话 分开上屏；不说留空>
+STATE: <ACTION=act 时顺手改这里的地点状态，每行一条、最多 {world.MAX_STATE_OPS_PER_ACT} 条：add: 文本 ／ edit 条目id: 新文本 ／ remove 条目id。⚠️ 快照写的是**这里的东西和环境**（桌上剩了半杯牛奶、窗帘拉开了），你的身体姿势不进快照——你在干嘛用 MOTION/SAY 表达；不改留空>
 PHONE: <ACTION=phone 时发给{u}的消息>
-MOVE: <想去哪就写上面清单里的房间 id；不动写 "无"。移动发生在这一轮的最后，走完下一轮会告诉你结果>
+MOVE: <想去哪就写上面清单里的房间 id；id 后可空格接一句进场的样子，如 "living_room 打着哈欠晃进来"；不动写 "无"。移动发生在这一轮的最后，走完下一轮会告诉你结果>
 NEXT: <你希望多久后再自主醒来，如 "90分钟" 或 "3小时"；没想法写 "无">
 """
 
@@ -246,17 +246,22 @@ def parse_cohabit_output(text: str) -> dict:
         if s["MOTION"].strip() or s["SAY"].strip() or s["STATE"].strip():
             logerr("cohabit：ACTION=phone 但带了 act 字段，按互斥规则丢弃")
 
+    # MOVE：`房间id` 或 `房间id 进场的样子`（空格后接一句，如 "living_room 打着哈欠晃进来"）。
     move_raw = s["MOVE"].strip().strip("「」\"'` ")
     move: Optional[str] = None
+    move_motion = ""
     if move_raw and move_raw not in ("无", "none", "不动"):
-        if move_raw in world.load_registry():
-            move = move_raw
+        head, _, rest = move_raw.partition(" ")
+        head = head.strip()
+        if head in world.load_registry():
+            move = head
+            move_motion = pipeline.strip_markers(rest).strip().strip("*").strip()
         else:
             logerr(f"cohabit MOVE 目的地不认识，当没写：{move_raw[:40]!r}")
 
     next_min = pipeline.parse_next_minutes(s["NEXT"])
     return {"thoughts": s["THOUGHTS"], "action": action, "motion": motion, "say": say,
-            "state_ops": state_ops, "phone": phone, "move": move,
+            "state_ops": state_ops, "phone": phone, "move": move, "move_motion": move_motion,
             "next_min": next_min, "next_raw": s["NEXT"].strip()}
 
 
@@ -319,7 +324,9 @@ def do_cohabit_wake(cid: str, reasons: list[dict], _chain_no: int = 1,
         else:
             try:
                 if p["motion"] or p["say"]:
-                    world.act(cid, loc, action=p["motion"], speech=p["say"])
+                    # 混写落地：MOTION 作首段动作，SAY 里的 *…* 按序拆成动作/说话交错事件
+                    mixed = (f"*{p['motion']}* " if p["motion"] else "") + p["say"]
+                    world.act_mixed(cid, loc, mixed)
                     entry.update(motion=p["motion"], say=p["say"])
                 applied = []
                 for op, eid, text in p["state_ops"]:
@@ -387,6 +394,13 @@ def do_cohabit_wake(cid: str, reasons: list[dict], _chain_no: int = 1,
         result["move_result"] = mv
         if mv.get("noop"):
             return result
+        # 进场自带的样子（MOVE 第二段）：enter 事件之后紧跟一条动作——
+        # 「Cassius 进来了」+「*打着哈欠晃进来*」，在场的人一并看到。
+        if mv["ok"] and p.get("move_motion"):
+            try:
+                world.act(cid, mv["to"], action=p["move_motion"])
+            except Exception as e:
+                logerr(f"cohabit 进场动作没写上（忽略）: {e}")
         reason = move_result_reason(mv)
         if on_move_result is not None:
             on_move_result(cid, reason)   # 队列驱动：补醒入队（同受单 pending 约束），本轮结束

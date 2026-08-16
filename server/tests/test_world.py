@@ -137,6 +137,23 @@ class TestAct(WorldBase):
         with self.assertRaises(ValueError):
             world.act(world.USER_ID, "living_room")
 
+    def test_split_mixed_interleaves(self):
+        segs = world.split_mixed("*坐下* 今天好冷 *拉过毯子* 你也过来")
+        self.assertEqual(segs, [("action", "坐下"), ("speech", "今天好冷"),
+                                ("action", "拉过毯子"), ("speech", "你也过来")])
+        self.assertEqual(world.split_mixed("就说一句"), [("speech", "就说一句")])
+        self.assertEqual(world.split_mixed("*只做动作*"), [("action", "只做动作")])
+        self.assertEqual(world.split_mixed("   "), [])   # 纯空白无段
+
+    def test_act_mixed_writes_ordered_events(self):
+        world.move(world.USER_ID, "living_room")
+        out = world.act_mixed(world.USER_ID, "living_room", "*窝进沙发* 好冷 *搓手*")
+        self.assertEqual([e["type"] for e in out["events"]], ["action", "speech", "action"])
+        with self.assertRaises(ValueError):
+            world.act_mixed(world.USER_ID, "living_room", "  ")
+        with self.assertRaises(world.NotPresent):
+            world.act_mixed(world.USER_ID, "mm_room", "喂")
+
 
 class TestRoomState(WorldBase):
     def test_add_edit_remove_with_notices(self):

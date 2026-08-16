@@ -827,8 +827,9 @@ def post_pending_ack(body: AckIn, x_auth: Optional[str] = Header(default=None, a
 # 不认识的房间/条目 → 404，人不在场 → 409，门锁着 → 200 + ok:false（是结局不是错误）。
 
 class RoomActIn(BaseModel):
-    action: str = ""    # *斜体动作*，与 speech 可一空不可全空（和 AI 的 act 对称）
+    action: str = ""    # 旧式两段（保留兼容）
     speech: str = ""
+    text: str = ""      # 混写（推荐）：*斜体* 是动作、其余是说话，可交错，服务端拆
 
 
 class RoomStateIn(BaseModel):
@@ -870,7 +871,10 @@ def get_room(room_id: str, x_auth: Optional[str] = Header(default=None, alias="X
         r = world.room(room_id)
     except KeyError as e:
         raise HTTPException(status_code=404, detail=str(e))
-    return {"id": room_id, **r, "occupants": world.occupants(room_id)}
+    # replying：这个房间里谁正在生成醒来回应（房间视图的「正在回应…」动画）。
+    gen = cohabit_queue.executing()
+    replying = [gen] if gen and world.location_of(gen) == room_id else []
+    return {"id": room_id, **r, "occupants": world.occupants(room_id), "replying": replying}
 
 
 @app.get("/rooms/{room_id}/events")
@@ -894,6 +898,8 @@ def post_room_act(room_id: str, body: RoomActIn,
     verify_auth(x_auth)
     cohabit_queue.external_input()   # 用户动作 = 新外部输入，连发计数清零（在写事件之前）
     try:
+        if body.text.strip():
+            return world.act_mixed(world.USER_ID, room_id, body.text)
         return world.act(world.USER_ID, room_id, action=body.action, speech=body.speech)
     except KeyError as e:
         raise HTTPException(status_code=404, detail=str(e))

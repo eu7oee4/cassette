@@ -119,6 +119,14 @@ class TestParse(unittest.TestCase):
         self.assertEqual(cohabit.parse_cohabit_output(out(nxt="90分钟"))["next_min"], 90)
         self.assertIsNone(cohabit.parse_cohabit_output(out(nxt="无"))["next_min"])
 
+    def test_move_with_entry_motion(self):
+        p = cohabit.parse_cohabit_output(out(move="living_room 打着哈欠晃进来"))
+        self.assertEqual((p["move"], p["move_motion"]), ("living_room", "打着哈欠晃进来"))
+        p = cohabit.parse_cohabit_output(out(move="living_room"))
+        self.assertEqual((p["move"], p["move_motion"]), ("living_room", ""))
+        p = cohabit.parse_cohabit_output(out(move="basement 慢悠悠进来"))
+        self.assertIsNone(p["move"])   # 目的地不认识，整段当没写
+
 
 class TestPrompt(CohabitBase):
     def test_worldview_and_sections(self):
@@ -168,6 +176,20 @@ class TestExecute(CohabitBase):
         entry = self.log_entries()[-1]
         self.assertEqual((entry["action"], entry["room"]), ("act", self.home))
         self.assertEqual(entry["say"], "天亮了")
+
+    def test_say_with_inline_motion_interleaves(self):
+        self.wake_once(out("act", say="来了 *起身开门* 外面冷吧"))
+        evs = world.read_events(self.home)
+        self.assertEqual([e["type"] for e in evs], ["speech", "action", "speech"])
+        self.assertEqual(evs[1]["text"], "起身开门")
+
+    def test_move_entry_motion_lands_after_enter(self):
+        r = self.wake_once(out("none", move="living_room 打着哈欠晃进来"),
+                           out("none"))
+        self.assertTrue(r["first_move"]["ok"])
+        evs = world.read_events("living_room")
+        self.assertEqual([e.get("kind", e["type"]) for e in evs], ["enter", "action"])
+        self.assertEqual(evs[1]["text"], "打着哈欠晃进来")
 
     def test_phone_goes_through_push_line(self):
         r = self.wake_once(out("phone", phone="在干嘛呀"))

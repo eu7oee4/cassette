@@ -18,6 +18,9 @@ struct HousePage: View {
     @State private var world: WorldSnapshot?
     @State private var floor = 2
     @State private var pendingRoom: WorldRoom?    // 点了哪个房间（弹三选一）
+    @State private var entryTarget: WorldRoom?    // 「去这里/回家」的进场输入弹窗
+    @State private var entryText = ""             // 进场的样子（可空）
+    @State private var entryPushes = true         // 进完场要不要推房间页（回家=不推）
     @State private var nav: RoomNav?
     @State private var lockedText: String?        // 门锁着的提示
     @State private var loadError = false
@@ -49,10 +52,19 @@ struct HousePage: View {
             get: { pendingRoom != nil }, set: { if !$0 { pendingRoom = nil } }),
             titleVisibility: .visible) {
             if let room = pendingRoom {
-                Button(userLocation == room.id ? "进去（你在这里）" : "去这里") { goTo(room) }
+                Button(userLocation == room.id ? "进去（你在这里）" : "去这里") {
+                    entryText = ""; entryPushes = true; entryTarget = room
+                }
                 Button("偷看一眼") { nav = RoomNav(roomID: room.id, title: room.name, peek: true) }
                 Button("取消", role: .cancel) {}
             }
+        }
+        // 进场自带动作：可写可空（「打着哈欠下楼」），落成进门后的第一条动作事件
+        .alert("去「\(entryTarget?.name ?? "")」", isPresented: Binding(
+            get: { entryTarget != nil }, set: { if !$0 { entryTarget = nil } })) {
+            TextField("进场的样子（可空）", text: $entryText)
+            Button("走") { if let r = entryTarget { goTo(r, entry: entryText, push: entryPushes) } }
+            Button("算了", role: .cancel) {}
         }
         .alert("门锁着", isPresented: Binding(
             get: { lockedText != nil }, set: { if !$0 { lockedText = nil } })) {
@@ -79,13 +91,18 @@ struct HousePage: View {
         } catch { loadError = world == nil }
     }
 
-    private func goTo(_ room: WorldRoom) {
+    private func goTo(_ room: WorldRoom, entry: String = "", push: Bool = true) {
         Task {
             do {
                 let mv = try await service.worldMove(to: room.id)
                 if mv.ok {
+                    // 进场的样子：进门后的第一条动作。没写星号就整句当动作包起来。
+                    let t = entry.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !t.isEmpty {
+                        try? await service.roomAct(room.id, text: t.contains("*") ? t : "*\(t)*")
+                    }
                     await refresh()
-                    nav = RoomNav(roomID: room.id, title: room.name, peek: false)
+                    if push { nav = RoomNav(roomID: room.id, title: room.name, peek: false) }
                 } else {
                     lockedText = mv.text ?? "门锁着，没进去"
                 }
@@ -94,10 +111,16 @@ struct HousePage: View {
     }
 
     private func toggleAway() {
-        Task {
-            // 出门 = away（任意房间可直接出）；回家 = 默认落客厅。
-            _ = try? await service.worldMove(to: userLocation == "away" ? "living_room" : "away")
-            await refresh()
+        if userLocation == "away" {
+            // 回家 = 默认落客厅，也给一次进场输入（可空）；回家不自动推房间页
+            if let lr = world?.rooms.first(where: { $0.id == "living_room" }) {
+                entryText = ""; entryPushes = false; entryTarget = lr
+            }
+        } else {
+            Task {   // 出门：任意房间直接出，不用进场语
+                _ = try? await service.worldMove(to: "away")
+                await refresh()
+            }
         }
     }
 
@@ -310,6 +333,6 @@ struct HouseAvatarChip: View {
         }
         .frame(width: size, height: size)
         .clipShape(Circle())
-        .overlay(Circle().stroke(Color.house.accentLight, lineWidth: 2))
+        .overlay(Circle().stroke(IdentityColor.color(for: entityID), lineWidth: 2))
     }
 }
