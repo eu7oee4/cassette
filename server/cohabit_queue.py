@@ -167,9 +167,10 @@ def _on_room_event(room_id: str, ev: dict) -> None:
     except KeyError:
         return
     reason = {"kind": "event", "text": _reason_text(room_name, ev)}
-    for e in world.occupants(room_id):
-        if e == actor or e == world.USER_ID:
-            continue   # 作者排除 + 用户不是 AI
+    targets = [e for e in world.occupants(room_id)
+               if e != actor and e != world.USER_ID]   # 作者排除 + 用户不是 AI
+    random.shuffle(targets)   # 谁先接话随机：occupants 按注册序出，不洗的话 default 永远抢首
+    for e in targets:
         enqueue(e, reason, system=True)
 
 

@@ -34,7 +34,8 @@ class QueueBase(CohabitBase):
         self._code_open_orig = wake.code_session_open
         wake.code_session_open = lambda: False
         self._random_orig = cq.random
-        cq.random = types.SimpleNamespace(random=lambda: 0.0)   # 概率必中，判定可复现
+        # 概率必中 + 洗牌不动（判定可复现；shuffle 置空保持注册序，专门的顺序测试自己控）
+        cq.random = types.SimpleNamespace(random=lambda: 0.0, shuffle=lambda x: None)
         cq.install()
         self._reset_queue()
         import characters

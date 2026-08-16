@@ -198,19 +198,21 @@ struct RoomPage: View {
                         }
                     }
                 }
-                if d.state.isEmpty {
+                // 按最近改动倒序：edit 是原位更新，不排序的话新改的会压在折叠线下面看不见
+                let entries = d.state.sorted { $0.since > $1.since }
+                if entries.isEmpty {
                     Text("（没什么特别的）")
                         .font(.caption).foregroundStyle(Color.house.textSecondary.opacity(0.7))
-                } else if d.state.count > 4 {
+                } else if entries.count > 4 {
                     // 条目多了别把事件流挤没：约 4 条的高度内部滚动
                     ScrollView {
                         VStack(alignment: .leading, spacing: 6) {
-                            ForEach(d.state) { entry in stateRow(entry) }
+                            ForEach(entries) { entry in stateRow(entry) }
                         }
                     }
                     .frame(maxHeight: 112)
                 } else {
-                    ForEach(d.state) { entry in stateRow(entry) }
+                    ForEach(entries) { entry in stateRow(entry) }
                 }
             }
             .padding(12)
