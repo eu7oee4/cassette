@@ -411,7 +411,8 @@ def state_change(entity: str, room_id: str, op: str,
             if op == "edit":
                 if not text:
                     raise ValueError("edit 需要 text")
-                notice = f"{name} 把「{entry['text']}」改成了「{text}」"
+                # 通知只报结果不报差异（机主 2026-08-16：旧的「把 aaa 改成了 bbb」太啰嗦）
+                notice = f"{name}「{text}」"
                 entry.update(text=text, author=entity, since=int(time.time()))
             else:
                 entries.remove(entry)

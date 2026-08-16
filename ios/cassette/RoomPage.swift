@@ -154,6 +154,24 @@ struct RoomPage: View {
     }
 
     @ViewBuilder
+    private func stateRow(_ entry: RoomStateEntry) -> some View {
+        Button {
+            if !peek && present { editingEntry = entry }
+        } label: {
+            HStack(alignment: .top, spacing: 6) {
+                Text("·").foregroundStyle(Color.house.accent)
+                Text(entry.text)
+                    .font(.footnote).foregroundStyle(Color.house.textPrimary)
+                    .multilineTextAlignment(.leading)
+                Spacer()
+                Text(Self.relative(entry.since))
+                    .font(.caption2).foregroundStyle(Color.house.textSecondary)
+            }
+        }
+        .buttonStyle(.plain)
+    }
+
+    @ViewBuilder
     private var stateSection: some View {
         if let d = detail {
             VStack(alignment: .leading, spacing: 6) {
@@ -169,23 +187,16 @@ struct RoomPage: View {
                 if d.state.isEmpty {
                     Text("（没什么特别的）")
                         .font(.caption).foregroundStyle(Color.house.textSecondary.opacity(0.7))
-                } else {
-                    ForEach(d.state) { entry in
-                        Button {
-                            if !peek && present { editingEntry = entry }
-                        } label: {
-                            HStack(alignment: .top, spacing: 6) {
-                                Text("·").foregroundStyle(Color.house.accent)
-                                Text(entry.text)
-                                    .font(.footnote).foregroundStyle(Color.house.textPrimary)
-                                    .multilineTextAlignment(.leading)
-                                Spacer()
-                                Text(Self.relative(entry.since))
-                                    .font(.caption2).foregroundStyle(Color.house.textSecondary)
-                            }
+                } else if d.state.count > 4 {
+                    // 条目多了别把事件流挤没：约 4 条的高度内部滚动
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 6) {
+                            ForEach(d.state) { entry in stateRow(entry) }
                         }
-                        .buttonStyle(.plain)
                     }
+                    .frame(maxHeight: 112)
+                } else {
+                    ForEach(d.state) { entry in stateRow(entry) }
                 }
             }
             .padding(12)

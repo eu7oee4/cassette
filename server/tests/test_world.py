@@ -223,7 +223,7 @@ class TestRoomState(WorldBase):
         world.move(self.c1, "mm_room")   # 角色也能改，前提是在场
         r = world.state_change(self.c1, "mm_room", "edit", entry_id=eid, text="牛奶只剩杯底了")
         self.assertEqual(r["entry"]["author"], self.c1)   # author = 现在这句话是谁写的
-        self.assertIn("改成", r["event"]["text"])
+        self.assertIn("牛奶只剩杯底了", r["event"]["text"])   # 通知=名字+新文本，不报差异
 
         r = world.state_change(self.c1, "mm_room", "remove", entry_id=eid)
         self.assertEqual(world.room_state("mm_room"), [])   # 快照只留结果
