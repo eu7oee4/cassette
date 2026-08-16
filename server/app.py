@@ -849,6 +849,11 @@ class PauseIn(BaseModel):
     on: bool            # true=暂停（正在生成的说完为止）；false=恢复并立刻冲队
 
 
+class NudgeIn(BaseModel):
+    text: str           # 环境刺激的旁白，如「浴室传来水声」——原样落进醒因
+    targets: list[str] = []   # 点名醒谁（角色 id，可多个）
+
+
 @app.get("/world")
 def get_world(x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
     """房子视图：全部房间（含在场者）+ 全部实体的位置。"""
@@ -892,6 +897,31 @@ def post_world_pause(body: PauseIn,
     verify_auth(x_auth)
     cohabit_queue.set_paused(body.on)
     return {"paused": cohabit_queue.paused()}
+
+
+@app.post("/world/nudge")
+def post_world_nudge(body: NudgeIn,
+                     x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
+    """导演口：机主手写一段环境刺激（浴室的水声、外面的雷……），点名让谁事件醒。
+    只入队醒因、**不落任何房间事件**——这是世界之外的旁白，不是谁在房里做了什么，
+    别的在场者不该「看见」它。暂停时照常入队、恢复后兑现，和普通事件同规则。"""
+    verify_auth(x_auth)
+    if not config.COHABIT_ENABLED:
+        raise HTTPException(status_code=409, detail="同居世界没开")
+    text = body.text.strip()
+    if not text:
+        raise HTTPException(status_code=422, detail="得写点什么——TA 醒来总得知道为什么")
+    known = set(characters.ids())
+    targets = list(dict.fromkeys(body.targets))   # 去重保序
+    bad = [t for t in targets if t not in known]
+    if not targets or bad:
+        raise HTTPException(status_code=422,
+                            detail=f"不认识的角色：{'、'.join(bad) or '（没点名）'}")
+    # 机主的刺激 = 新外部输入：连发计数清零，别让刚聊热的场面把这次点名拦在上限外。
+    cohabit_queue.external_input()
+    queued = [t for t in targets
+              if cohabit_queue.enqueue(t, {"kind": "event", "text": text})]
+    return {"queued": queued}
 
 
 @app.get("/rooms/{room_id}/events")

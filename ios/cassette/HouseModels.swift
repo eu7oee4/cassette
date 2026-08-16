@@ -113,6 +113,14 @@ extension ChatService {
         _ = try await perform(authedRequest("POST", "/rooms/\(id)/act", jsonBody: body, timeout: 10))
     }
 
+    /// 导演口：手写一段环境刺激（如「浴室传来水声」），点名让谁事件醒。
+    /// 只入队醒因，不落房间事件——别的在场者不会「看见」这段旁白。
+    func worldNudge(text: String, targets: [String]) async throws {
+        struct Body: Encodable { let text: String; let targets: [String] }
+        let body = try JSONEncoder().encode(Body(text: text, targets: targets))
+        _ = try await perform(authedRequest("POST", "/world/nudge", jsonBody: body, timeout: 8))
+    }
+
     /// 暂停/恢复醒来队列（正在生成的说完为止；恢复立即冲队）。
     func worldPause(_ on: Bool) async throws {
         let body = try JSONEncoder().encode(["on": on])

@@ -23,6 +23,7 @@ struct HousePage: View {
     @State private var nav: RoomNav?
     @State private var lockedText: String?        // 门锁着的提示
     @State private var loadError = false
+    @State private var nudgeOpen = false          // 环境动静（导演口）弹层
 
     private let service = ChatService()
     private let floors: [(Int, String)] = [(0, "地下室"), (1, "1楼"), (2, "2楼")]
@@ -53,6 +54,10 @@ struct HousePage: View {
             TextField("进场的样子（可空）", text: $entryText)
             Button("走") { if let r = entryTarget { goTo(r, entry: entryText, push: entryPushes) } }
             Button("算了", role: .cancel) {}
+        }
+        .sheet(isPresented: $nudgeOpen) {
+            NudgeSheet(world: world, service: service)
+                .presentationDetents([.medium])
         }
         .alert("门锁着", isPresented: Binding(
             get: { lockedText != nil }, set: { if !$0 { lockedText = nil } })) {
@@ -174,6 +179,14 @@ struct HousePage: View {
                 Text(subtitle).font(.caption).foregroundStyle(Color.house.textSecondary)
             }
             Spacer()
+            // 环境动静（导演口）：旁白一段声响/气味，点名让谁醒
+            Button { nudgeOpen = true } label: {
+                Image(systemName: "bell")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(Color.house.accent)
+                    .frame(width: 38, height: 38)
+                    .background(Circle().fill(Color.house.surface))
+            }
             Button(action: toggleAway) {
                 Text(userLocation == "away" ? "回家" : "出门")
                     .font(.footnote.bold())
@@ -292,6 +305,94 @@ struct HousePage: View {
         .overlay(RoundedRectangle(cornerRadius: 20).stroke(Color.house.line, lineWidth: 1))
     }
 
+}
+
+/// 环境动静（导演口）：机主旁白一段声响/气味/光线，点名让谁被它「吵醒」。
+/// 只入队醒因、不落房间事件——没被点名的在场者不会看见这段旁白。
+private struct NudgeSheet: View {
+    let world: WorldSnapshot?
+    let service: ChatService
+    @Environment(\.dismiss) private var dismiss
+
+    @State private var text = ""
+    @State private var picked: Set<String> = []
+    @State private var sending = false
+    @State private var errorText: String? = nil
+
+    /// 可点名的角色（user 之外的全部实体），按 id 稳定排序。
+    private var chars: [(id: String, name: String)] {
+        (world?.entities ?? [:])
+            .filter { $0.key != "user" }
+            .map { (id: $0.key, name: $0.value.name) }
+            .sorted { $0.id < $1.id }
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    TextField("比如：浴室传来水声", text: $text, axis: .vertical)
+                        .lineLimit(2...4)
+                } header: {
+                    Text("发生了什么")
+                } footer: {
+                    Text("这段话会原样成为 TA 的醒来原因。没被点名的人不会察觉。")
+                }
+                Section("谁被惊动") {
+                    ForEach(chars, id: \.id) { c in
+                        Button {
+                            if picked.contains(c.id) { picked.remove(c.id) }
+                            else { picked.insert(c.id) }
+                        } label: {
+                            HStack {
+                                Text(c.name).foregroundStyle(.primary)
+                                Spacer()
+                                if picked.contains(c.id) {
+                                    Image(systemName: "checkmark")
+                                        .font(.footnote.weight(.semibold))
+                                        .foregroundStyle(Color.house.accent)
+                                }
+                            }
+                            .contentShape(Rectangle())
+                        }
+                    }
+                }
+                if let errorText {
+                    Text(errorText).font(.footnote).foregroundStyle(.red)
+                }
+            }
+            .navigationTitle("环境动静")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("取消") { dismiss() } }
+                ToolbarItem(placement: .confirmationAction) {
+                    if sending {
+                        ProgressView()
+                    } else {
+                        Button("触发") { send() }
+                            .disabled(picked.isEmpty
+                                      || text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    }
+                }
+            }
+        }
+    }
+
+    private func send() {
+        let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !t.isEmpty, !picked.isEmpty else { return }
+        sending = true
+        Task {
+            defer { sending = false }
+            do {
+                try await service.worldNudge(text: t, targets: Array(picked))
+                dismiss()
+            } catch {
+                errorText = (error as? ChatServiceError)?.errorDescription
+                    ?? error.localizedDescription
+            }
+        }
+    }
 }
 
 /// 房间视图的跳转参数。
