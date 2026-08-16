@@ -57,6 +57,7 @@ class QueueBase(CohabitBase):
             cq._gate_hit.clear()
             cq._defer_hit.clear()
         cq._signal.clear()
+        cq._paused["on"] = False
         # 探测缓存必须一并清：5 秒 TTL 会把上一个测试的 owner 带进下一个测试
         cq._code_cache.update(ts=0.0, owner=None)
 
@@ -169,6 +170,20 @@ class TestDrain(QueueBase):
             wake.chat_turn_end(self.cid)
         cq._drain()
         self.assertEqual(len(self.prompts), 1)
+
+    def test_pause_holds_queue_until_resume(self):
+        self.replies = [out("none"), out("none")]
+        cq.enqueue(self.cid, {"kind": "event", "text": "第一句"})
+        cq.set_paused(True)
+        cq._drain()
+        self.assertEqual(self.prompts, [])                      # 暂停：不执行
+        cq.enqueue(self.cid, {"kind": "event", "text": "第二句"})
+        self.assertEqual(len(cq._pending[self.cid]), 2)         # pending 照常攒着合并
+        cq.set_paused(False)
+        cq._drain()
+        self.assertEqual(len(self.prompts), 1)                  # 恢复后一次醒补齐两条原因
+        self.assertIn("第一句", self.prompts[0])
+        self.assertIn("第二句", self.prompts[0])
 
     def test_error_sets_cooldown_and_blocks_enqueue(self):
         cohabit._run = lambda prompt, cid: (None, [])

@@ -119,6 +119,20 @@ struct RoomPage: View {
                     .foregroundStyle(Color.house.textSecondary)
             }
             Spacer()
+            // 暂停/开始：按住场面好插嘴——正在生成的说完为止，之后队列攒着，
+            // 恢复一口气补（偷看模式也给：旁观他们对话时同样用得上）。
+            Button {
+                let target = !(detail?.paused ?? false)
+                Task { try? await service.worldPause(target); await refresh() }
+            } label: {
+                let isPaused = detail?.paused ?? false
+                Label(isPaused ? "开始" : "暂停",
+                      systemImage: isPaused ? "play.fill" : "pause.fill")
+                    .font(.footnote.bold())
+                    .foregroundStyle(isPaused ? Color.house.onAccent : Color.house.accent)
+                    .padding(.horizontal, 12).padding(.vertical, 7)
+                    .background(Capsule().fill(isPaused ? Color.house.accent : Color.house.surface))
+            }
             // 没有「离开」按钮：返回只是收起页面，人还留在房间——移动只发生在
             // 地图上点「去这里 / 出门 / 回家」（机主 2026-08-16 拍板，走廊概念从用户侧移除）。
         }

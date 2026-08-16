@@ -50,6 +50,7 @@ struct RoomDetail: Decodable {
     let state: [RoomStateEntry]
     let occupants: [String]
     let replying: [String]?   // 正在生成醒来回应的在场角色（「正在回应…」动画）
+    let paused: Bool?         // 醒来队列暂停中（用户按住场面好插嘴）
 }
 
 struct RoomStateEntry: Decodable, Identifiable, Equatable {
@@ -110,6 +111,12 @@ extension ChatService {
     func roomAct(_ id: String, text: String) async throws {
         let body = try JSONEncoder().encode(["text": text])
         _ = try await perform(authedRequest("POST", "/rooms/\(id)/act", jsonBody: body, timeout: 10))
+    }
+
+    /// 暂停/恢复醒来队列（正在生成的说完为止；恢复立即冲队）。
+    func worldPause(_ on: Bool) async throws {
+        let body = try JSONEncoder().encode(["on": on])
+        _ = try await perform(authedRequest("POST", "/world/pause", jsonBody: body, timeout: 8))
     }
 
     func roomStateChange(_ id: String, op: String, entryID: String?, text: String?) async throws {

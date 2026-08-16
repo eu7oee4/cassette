@@ -844,6 +844,10 @@ class MoveIn(BaseModel):
     to: str             # 房间 id | "hallway"（离开按钮）| "away"（出门开关）
 
 
+class PauseIn(BaseModel):
+    on: bool            # true=暂停（正在生成的说完为止）；false=恢复并立刻冲队
+
+
 @app.get("/world")
 def get_world(x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
     """房子视图：全部房间（含在场者）+ 全部实体的位置。"""
@@ -875,7 +879,18 @@ def get_room(room_id: str, x_auth: Optional[str] = Header(default=None, alias="X
     # replying：这个房间里谁正在生成醒来回应（房间视图的「正在回应…」动画）。
     gen = cohabit_queue.executing()
     replying = [gen] if gen and world.location_of(gen) == room_id else []
-    return {"id": room_id, **r, "occupants": world.occupants(room_id), "replying": replying}
+    return {"id": room_id, **r, "occupants": world.occupants(room_id),
+            "replying": replying, "paused": cohabit_queue.paused()}
+
+
+@app.post("/world/pause")
+def post_world_pause(body: PauseIn,
+                     x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
+    """暂停/恢复小屋的醒来队列（用户打字追不上 AI 对话节奏时按住场面）。
+    暂停不打断正在生成的那轮；事件与 pending 照常累积，恢复后一口气补。"""
+    verify_auth(x_auth)
+    cohabit_queue.set_paused(body.on)
+    return {"paused": cohabit_queue.paused()}
 
 
 @app.get("/rooms/{room_id}/events")

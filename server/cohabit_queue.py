@@ -50,10 +50,25 @@ _syswake_run: dict[str, int] = {}      # cid → 连续系统触发醒来计数�
 _gate_hit: dict[str, bool] = {}        # 连发上限的日志只在撞上那次打一条
 _defer_hit: dict[str, bool] = {}       # code 会话延后的日志同理：进入延后那次打一条
 _executing: dict = {"cid": None}       # 正在执行醒来的角色（房间视图「正在回应」动画用）
+# 用户的暂停键（2026-08-16）：打字需要时间，不按暂停的话插嘴总是慢 AI 两轮。
+# 暂停 = 只停**执行**：正在生成的那轮照常说完，事件照常落盘、pending 照常合并，
+# 按开始一口气恢复。内存态：后端重启即恢复运行（UI 从 /world 读真相，不会骗人）。
+_paused: dict = {"on": False}
 
 
 def executing() -> Optional[str]:
     return _executing["cid"]
+
+
+def paused() -> bool:
+    return _paused["on"]
+
+
+def set_paused(on: bool) -> None:
+    _paused["on"] = bool(on)
+    logerr(f"cohabit 队列{'暂停（正在生成的说完为止，之后攒着）' if on else '恢复（开始冲队）'}")
+    if not on:
+        _signal.set()   # 恢复那一脚立刻冲队，不等超时
 
 # code 会话探测缓存（探一次是 tmux 子进程，worker 冲队时别每 pop 都探）。
 _CODE_PROBE_SEC = 5
@@ -285,6 +300,8 @@ def _solo_tick(now: Optional[float] = None) -> None:
 
 # ---------- worker（执行锁并发 = 1）----------
 def _pop_next() -> tuple[Optional[str], list[dict]]:
+    if _paused["on"]:
+        return None, []    # 暂停：谁都不弹，pending 原地攒着（合并去重照常）
     busy = _code_owner()   # 锁外探（可能起 tmux 子进程，别拿着队列锁等它）
     if busy and busy in _pending and not _defer_hit.get(busy):
         logerr(f"cohabit 延后（{busy}）：code/game 会话开着，醒来攒着等收工")
