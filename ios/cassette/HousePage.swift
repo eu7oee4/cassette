@@ -17,7 +17,6 @@ struct HousePage: View {
 
     @State private var world: WorldSnapshot?
     @State private var floor = 2
-    @State private var pendingRoom: WorldRoom?    // 点了哪个房间（弹三选一）
     @State private var entryTarget: WorldRoom?    // 「去这里/回家」的进场输入弹窗
     @State private var entryText = ""             // 进场的样子（可空）
     @State private var entryPushes = true         // 进完场要不要推房间页（回家=不推）
@@ -47,17 +46,6 @@ struct HousePage: View {
         .toolbar(.hidden, for: .navigationBar)
         .navigationDestination(item: $nav) { n in
             RoomPage(roomID: n.roomID, title: n.title, peek: n.peek)
-        }
-        .confirmationDialog(pendingRoom?.name ?? "", isPresented: Binding(
-            get: { pendingRoom != nil }, set: { if !$0 { pendingRoom = nil } }),
-            titleVisibility: .visible) {
-            if let room = pendingRoom {
-                Button(userLocation == room.id ? "进去（你在这里）" : "去这里") {
-                    entryText = ""; entryPushes = true; entryTarget = room
-                }
-                Button("偷看一眼") { nav = RoomNav(roomID: room.id, title: room.name, peek: true) }
-                Button("取消", role: .cancel) {}
-            }
         }
         // 进场自带动作：可写可空（「打着哈欠下楼」），落成进门后的第一条动作事件
         .alert("去「\(entryTarget?.name ?? "")」", isPresented: Binding(
@@ -245,8 +233,17 @@ struct HousePage: View {
             .frame(maxWidth: .infinity).padding(.vertical, 60)
         } else {
             ForEach(rooms) { room in
-                Button { pendingRoom = room } label: { roomCard(room) }
-                    .buttonStyle(.plain)
+                // 点卡片：已在房间 → 直接进（不弹进场弹窗）；不在 → 弹进场输入再走。
+                // 偷看走卡片右上角的眼睛（在 roomCard 里，自己消费点击）。
+                roomCard(room)
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        if room.occupants.contains("user") {
+                            nav = RoomNav(roomID: room.id, title: room.name, peek: false)
+                        } else {
+                            entryText = ""; entryPushes = true; entryTarget = room
+                        }
+                    }
             }
         }
     }
@@ -261,11 +258,22 @@ struct HousePage: View {
                 }
                 Spacer()
                 if room.occupants.contains("user") {
-                    Text("你在这里").font(.caption2.bold())
+                    Text("\(HouseUserName.value)在这里").font(.caption2.bold())
                         .foregroundStyle(Color.house.onAccent)
                         .padding(.horizontal, 8).padding(.vertical, 3)
                         .background(Capsule().fill(Color.house.accent))
                 }
+                // 右上角眼睛 = 偷看一眼（上帝视角，不产生事件）
+                Button {
+                    nav = RoomNav(roomID: room.id, title: room.name, peek: true)
+                } label: {
+                    Image(systemName: "eye")
+                        .font(.system(size: 13))
+                        .foregroundStyle(Color.house.textSecondary)
+                        .frame(width: 28, height: 28)
+                        .background(Circle().fill(Color.house.surfaceHi))
+                }
+                .buttonStyle(.plain)
             }
             Spacer(minLength: 34)
             if room.occupants.isEmpty {

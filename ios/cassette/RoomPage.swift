@@ -274,7 +274,7 @@ struct RoomPage: View {
     }
 
     private func actorName(_ eid: String) -> String {
-        eid == "user" ? "你" : (CharacterNameCache.shared.name(eid) ?? eid)
+        eid == "user" ? HouseUserName.value : (CharacterNameCache.shared.name(eid) ?? eid)
     }
 
     // MARK: - 输入区（混写：*星号* 是动作、其余是说话，可交错，与 AI 的 act 对称）
@@ -357,6 +357,19 @@ struct RoomPage: View {
         if s < 3600 { return "\(max(1, s / 60))分钟前" }
         if s < 86400 { return "\(s / 3600)小时前" }
         return "\(s / 86400)天前"
+    }
+}
+
+/// 小屋里用户的显示名（机主 2026-08-16：小屋的「你」改成 user 名称）。
+/// 数据源 = 设置页同一份（proactive_settings 的 user_name，默认角色那份是全局键）。
+enum HouseUserName {
+    static var value: String {
+        if let data = UserDefaults.standard.data(forKey: "proactive_settings"),
+           let s = try? JSONDecoder().decode(ProactiveSettings.self, from: data),
+           !s.userName.isEmpty, s.userName != "user" {
+            return s.userName
+        }
+        return "你"   // 没起过昵称就退回「你」
     }
 }
 

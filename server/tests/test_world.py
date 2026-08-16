@@ -152,6 +152,22 @@ class TestAct(WorldBase):
         self.assertEqual(world.split_mixed("*只做动作*"), [("action", "只做动作")])
         self.assertEqual(world.split_mixed("   "), [])   # 纯空白无段
 
+    def test_split_mixed_crosses_newlines(self):
+        # 2026-08-16 真机实锤的形态：星号和内容跨行写，旧正则配不上导致孤星号漏进气泡
+        raw = ("「小狗你可以不叫，*\n汪我留着\n*。那声是你自己长的。」\n"
+               "*尾巴往她手心里蹭了半寸*「毛你继续薅。汪。」")
+        segs = world.split_mixed(raw)
+        self.assertEqual([k for k, _ in segs],
+                         ["speech", "action", "speech", "action", "speech"])
+        self.assertEqual(segs[1][1], "汪我留着")
+        self.assertNotIn("*", "".join(t for _, t in segs))   # 星号一个不剩
+
+    def test_split_mixed_odd_asterisk_degrades_gracefully(self):
+        segs = world.split_mixed("说着说着*忘了闭合星号")
+        self.assertEqual(segs, [("speech", "说着说着忘了闭合星号")])
+        segs = world.split_mixed("*完整动作* 然后一句话带个*孤星")
+        self.assertEqual(segs, [("action", "完整动作"), ("speech", "然后一句话带个孤星")])
+
     def test_act_mixed_writes_ordered_events(self):
         world.move(world.USER_ID, "living_room")
         out = world.act_mixed(world.USER_ID, "living_room", "*窝进沙发* 好冷 *搓手*")

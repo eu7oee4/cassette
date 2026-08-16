@@ -323,24 +323,23 @@ def act(entity: str, room_id: str, action: str = "", speech: str = "") -> dict:
 
 # 混写表达：一段文本里 *斜体* 是动作、其余是说话，按出现顺序拆成事件序列——
 # 「*坐下* 今天好冷 *拉过毯子* 你也过来」→ action/speech/action/speech 四条。
-_MIXED_SEG_RE = re.compile(r"\*([^*\n]+)\*")
 
 
 def split_mixed(text: str) -> list[tuple[str, str]]:
-    """混写文本 → [(类型, 内容)]，类型 action|speech，保序、去空。纯解析无 IO，可独立测。"""
+    """混写文本 → [(类型, 内容)]，类型 action|speech，保序、去空。纯解析无 IO，可独立测。
+
+    按星号切段配对（**允许跨行**——模型爱把 * 和内容换行写，正则版 [^*\\n] 配不上，
+    落进气泡的孤星号和错位实锤过 2026-08-16）；星号奇数个时最后一个当字面丢弃、
+    尾段并回说话——错一个星号只脏一段，不把后面全带歪。段内空白压平
+    （动作/说话里的换行都是排版噪音，事件本身是最小单元）。"""
+    parts = (text or "").split("*")
+    if len(parts) % 2 == 0 and len(parts) > 1:   # 星号奇数个：未闭合尾段并回上一段
+        parts = parts[:-2] + [parts[-2] + parts[-1]]
     out: list[tuple[str, str]] = []
-    pos = 0
-    for m in _MIXED_SEG_RE.finditer(text):
-        before = text[pos:m.start()].strip()
-        if before:
-            out.append(("speech", before))
-        seg = m.group(1).strip()
+    for i, seg in enumerate(parts):
+        seg = " ".join(seg.split())
         if seg:
-            out.append(("action", seg))
-        pos = m.end()
-    tail = text[pos:].strip()
-    if tail:
-        out.append(("speech", tail))
+            out.append(("action" if i % 2 == 1 else "speech", seg))
     return out
 
 
