@@ -17,6 +17,7 @@ import asyncio
 import random
 import re
 import subprocess
+import threading
 import time
 import uuid
 from datetime import datetime
@@ -37,6 +38,17 @@ from notify import bark_push, logerr
 WAKE_TICK_SEC = config.WAKE_TICK_SEC
 MIN_WAKE_GAP_SEC = 180                                    # 两次醒来最小间隔（防背靠背撞）
 FREQ_PROB_15 = {"low": 0.08, "mid": 0.20, "high": 0.40}   # 按 15min 一次校准的醒来概率（按 tick 缩放）
+
+# 全局醒来执行锁（跨两套系统的「并发=1」）：老 wake 的邮件硬触发跑在事件循环的线程池，
+# cohabit 队列的 worker 是独立线程——不共一把锁就可能同时起两个 claude -p。
+# 老路自己（调度器串行 tick）拿它零竞争，白拿不亏。
+WAKE_EXEC_LOCK = threading.Lock()
+
+
+def do_wake_sync_locked(*args, **kwargs) -> dict:
+    """do_wake_sync 的持锁版（maybe_wake 的两个 executor 调用点用它）。"""
+    with WAKE_EXEC_LOCK:
+        return do_wake_sync(*args, **kwargs)
 
 
 def _cid(char_id: Optional[str]) -> str:
@@ -313,10 +325,14 @@ def _date_str(ts: int) -> str:
 def wakes_today(char_id: Optional[str] = None) -> int:
     """这个角色今天已经醒来几次（source=="wake" 的日志条数）。含 error/none/被拦推送的——
     都起过模型，烧的都是真 token。只读尾部 1000 条，口径与 push_block 一致（覆盖好几天，够数）。
-    chat 侧的 stored 事件是 source=="chat"，天然不算。"""
+    chat 侧的 stored 事件是 source=="chat"，天然不算。
+    cohabit 的醒来（trigger 带 cohabit: 前缀）也不算——同居世界的预算口径在
+    cohabit_queue.solo_wakes_today（只数自主醒），事件/补醒不占任何预算；
+    混进这里会把聊天世界的预算显示撑虚高（C4 上电前缝上的口子）。"""
     today = _date_str(int(time.time()))
     return sum(1 for w in state_store.read_wake_log(limit=1000, char_id=char_id)
-               if w.get("source") == "wake" and _date_str(int(w.get("ts", 0))) == today)
+               if w.get("source") == "wake" and _date_str(int(w.get("ts", 0))) == today
+               and not str(w.get("trigger", "")).startswith("cohabit:"))
 
 
 def push_block(settings: dict, char_id: Optional[str] = None) -> Optional[tuple[str, str]]:
@@ -590,8 +606,14 @@ async def maybe_wake(char_id: Optional[str] = None) -> None:
     if mail_note:
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(
-            None, functools.partial(do_wake_sync, settings, "mail", True,
+            None, functools.partial(do_wake_sync_locked, settings, "mail", True,
                                     note=mail_note, char_id=cid))
+        return
+
+    # 同居世界上电后（C4）：聊天世界的自主醒来（scheduled/probability）整体退役，
+    # 移交 cohabit 队列（独处判定/预算/连发上限/执行锁都在那边）。这里只剩上面的
+    # 邮件硬触发。**不能双跑**：两边都会消费 next_wake_at，同一个 NEXT 会被醒两次。
+    if config.COHABIT_ENABLED:
         return
 
     # code 模式开着 → 自发的醒来一律避让。那会儿他人在电脑前干活，随机戳一条聊天气泡
@@ -650,7 +672,7 @@ async def maybe_wake(char_id: Optional[str] = None) -> None:
         _budget_hit[cid] = False
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(
-            None, functools.partial(do_wake_sync, settings, trigger, char_id=cid))
+            None, functools.partial(do_wake_sync_locked, settings, trigger, char_id=cid))
 
 
 async def scheduler_loop() -> None:

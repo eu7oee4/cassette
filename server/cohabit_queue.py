@@ -305,9 +305,12 @@ def _drain() -> None:
         if cid is None:
             return
         try:
-            res = cohabit.do_cohabit_wake(cid, reasons,
-                                          chain_allowed=_may_chain,
-                                          on_move_result=lambda c, r: enqueue(c, r, system=True))
+            # 全局执行锁跨两套系统（wake.WAKE_EXEC_LOCK）：邮件硬触发跑在老路的线程池，
+            # 不共锁就可能和这里同时起两个 claude -p。
+            with wake.WAKE_EXEC_LOCK:
+                res = cohabit.do_cohabit_wake(cid, reasons,
+                                              chain_allowed=_may_chain,
+                                              on_move_result=lambda c, r: enqueue(c, r, system=True))
             if res.get("action") == "error":
                 # 错误冷却 30 分钟（口径同 do_wake_sync）：enqueue/solo 两头都认这个字段。
                 with state_store.SCHEDULE_LOCK:
