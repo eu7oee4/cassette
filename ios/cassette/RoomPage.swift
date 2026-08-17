@@ -340,10 +340,11 @@ struct RoomPage: View {
         case "system":
             if ev.kind == "state" {
                 // 状态改动通知：谁改的靠颜色认（名字剥掉——服务端文本是「名字「一段话」」），
-                // 字号与斜体动作一致
+                // 字号与斜体动作一致；靠边规则也跟动作一致（我在右、别人在左）
                 Text(Self.stripLeadingName(ev.text))
-                    .font(.footnote).foregroundStyle(idc)
-                    .frame(maxWidth: .infinity)
+                    .font(.footnote).bold().foregroundStyle(idc)
+                    .multilineTextAlignment(mine ? .trailing : .leading)
+                    .frame(maxWidth: .infinity, alignment: mine ? .trailing : .leading)
             } else {
                 // 进出场等系统叙述：名字是句子的主语，剥不得，保持原样式
                 Text("—— \(ev.text) ——")
@@ -353,7 +354,7 @@ struct RoomPage: View {
         case "action":
             // 识别色名字 + 灰字动作（试过整句上识别色，2026-08-17 改回：名字留着更好认）
             (Text("\(actorName(ev.actor)) ").bold().foregroundStyle(idc)
-             + Text("*\(ev.text)*").italic().foregroundStyle(Color.house.textSecondary))
+             + Text("*\(ev.text)*").italic().bold().foregroundStyle(Color.house.textSecondary))
                 .font(.footnote)
                 // frame 只管整块靠哪边；折行后行内对齐要单独说，不然第二行起全回左边
                 .multilineTextAlignment(mine ? .trailing : .leading)
@@ -389,12 +390,17 @@ struct RoomPage: View {
     /// 状态通知的服务端文本剥掉打头的名字：常规是 `名字「一段话」`（从第一个「起保留）；
     /// remove 无叙事的兜底是 `名字 清掉了「原文」`（「之前有空格 → 从空格后保留，
     /// 「清掉了」不能丢，丢了读起来像新增）。都对不上就原样返回，别把内容剥没了。
+    /// 引号本身只是服务端的分隔符，剥完名字后一并去掉（机主 2026-08-17：显示上不要「」）。
     private static func stripLeadingName(_ text: String) -> String {
-        guard let q = text.firstIndex(of: "「") else { return text }
-        if let sp = text.firstIndex(of: " "), sp < q {
-            return String(text[text.index(after: sp)...])
+        var body = text
+        if let q = text.firstIndex(of: "「") {
+            if let sp = text.firstIndex(of: " "), sp < q {
+                body = String(text[text.index(after: sp)...])
+            } else {
+                body = String(text[q...])
+            }
         }
-        return String(text[q...])
+        return body.filter { $0 != "「" && $0 != "」" }
     }
 
     private func actorName(_ eid: String) -> String {
