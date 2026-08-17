@@ -964,9 +964,11 @@ def post_room_act(room_id: str, body: RoomActIn,
     verify_auth(x_auth)
     cohabit_queue.external_input()   # 用户动作 = 新外部输入，连发计数清零（在写事件之前）
     try:
-        if body.text.strip():
-            return world.act_mixed(world.USER_ID, room_id, body.text)
-        return world.act(world.USER_ID, room_id, action=body.action, speech=body.speech)
+        # 一次发送 = 一轮（混写拆出的多条共用一个 turn，UI 靠它跟别人的轮次隔开）
+        with world.turn():
+            if body.text.strip():
+                return world.act_mixed(world.USER_ID, room_id, body.text)
+            return world.act(world.USER_ID, room_id, action=body.action, speech=body.speech)
     except KeyError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except world.NotPresent:

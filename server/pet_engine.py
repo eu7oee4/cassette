@@ -236,7 +236,14 @@ def _cat_room(pid: str) -> Optional[str]:
 def _apply(pid: str, out: dict) -> dict:
     """协议落地（interact/wake 共用）：reply 事件 → 确定性覆盖 → 状态 → 姿态/移动。
     顺序讲究：reply 落在被逗的房间（move 末位执行，口径同 cohabit）；
-    移动前清旧姿态（人走了就够不着旧房间的快照了）。"""
+    移动前清旧姿态（人走了就够不着旧房间的快照了）。
+    整段套 world.turn()：这一轮猫落下的事件同一个 turn，UI 才画得出分轮横线
+    （逗猫的人那条动作在外面，跟猫的反应之间正好隔开）。"""
+    with world.turn():
+        return _apply_locked(pid, out)
+
+
+def _apply_locked(pid: str, out: dict) -> dict:
     loc = world.location_of(pid)
     reply = (out.get("reply") or "").strip()
     action = out.get("action") if out.get("action") in ACTION_TAGS else "none"
@@ -370,7 +377,7 @@ def enforce(pid: str) -> Optional[str]:
     猫粮；憋过 POOP_FORCE_AT 且砂盆没满 → 强制解决。返回干了什么（None=没干预）。
     动作走真实物理（move 落进出事件、act 落动作事件）——强制的是行为不是数值。"""
     pid = pets.match(pid) or pid
-    with _ENGINE_LOCK:
+    with _ENGINE_LOCK, world.turn():
         return _enforce_locked(pid)
 
 

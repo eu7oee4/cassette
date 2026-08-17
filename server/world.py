@@ -28,6 +28,8 @@
 并发：写入方会有 HTTP 路由 / wake 执行线程多个，读改写全走 _LOCK（RLock——
 move 里要套 append_event）。文件写入同 state_store：唯一临时名 + 原子替换。
 """
+import contextlib
+import contextvars
 import json
 import os
 import re
@@ -62,6 +64,25 @@ _LOCK = threading.RLock()
 # 钩子在世界锁**内**被调（act/move 是组合动作，锁内保证事件序完整）——
 # 挂进来的实现只准做入队这类快操作，绝不准回头调 world 的写函数。
 event_hook = None
+
+
+# 一轮的标记（2026-08-17）：同一次醒来落下的事件（动作/说话/状态改动/进场动作）
+# 共用一个 turn id，UI 靠它在轮与轮之间画横线——不然单人连着几轮醒来糊成一片，
+# 看不出哪些动作是同一时刻做的。**只有引擎驱动的一轮才标**（cohabit 醒来、猫引擎
+# 一次 tick）；用户自己发的、老历史都没有这个字段，UI 对 nil 不画线。
+_TURN: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar("world_turn",
+                                                                     default=None)
+
+
+@contextlib.contextmanager
+def turn(tid: Optional[str] = None):
+    """把一段落笔标成同一轮。可嵌套（补醒链里内层是新的一轮，退出后恢复外层）；
+    纯标记，出错不影响事件本身。"""
+    token = _TURN.set(tid or uuid.uuid4().hex[:8])
+    try:
+        yield
+    finally:
+        _TURN.reset(token)
 
 
 class NotPresent(Exception):
@@ -232,6 +253,9 @@ def append_event(room_id: str, etype: str, actor: str, text: str,
           "type": etype, "actor": actor, "text": text}
     if kind:
         ev["kind"] = kind
+    tid = _TURN.get()
+    if tid:
+        ev["turn"] = tid
     if with_:
         ev["with"] = list(with_)
     with _LOCK:

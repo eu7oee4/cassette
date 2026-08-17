@@ -332,7 +332,17 @@ def do_cohabit_wake(cid: str, reasons: list[dict], _chain_no: int = 1,
     补醒链两种走法：
     - 默认（两个回调都 None）：模块内直接递归，深度硬停 N_CHAIN——C1 独跑的安全绳；
     - 队列驱动（C2）：chain_allowed(cid) 在 move 执行**前**判连发上限（拦得住就不该
-      让人先瞬移再哑掉），on_move_result(cid, reason) 把补醒入队后本轮即返回。"""
+      让人先瞬移再哑掉），on_move_result(cid, reason) 把补醒入队后本轮即返回。
+
+    world.turn() 把这一轮落下的所有事件标成同一个 turn（UI 据此画分轮横线）；
+    补醒链里内层调用是新的一轮，各自一个 id。"""
+    with world.turn():
+        return _cohabit_wake_body(cid, reasons, _chain_no, chain_allowed, on_move_result)
+
+
+def _cohabit_wake_body(cid: str, reasons: list[dict], _chain_no: int,
+                       chain_allowed, on_move_result) -> dict:
+    """do_cohabit_wake 的正身（turn 标记在外层套着，别绕过它直接调）。"""
     cid = characters.resolve(cid)
     settings = state_store.load_settings(cid)
     now_ts = int(time.time())

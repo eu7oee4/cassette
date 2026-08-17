@@ -122,6 +122,7 @@ struct RoomEvent: Decodable, Identifiable, Equatable {
     let actor: String
     let text: String
     let kind: String?         // system 事件才有：enter / leave / state
+    let turn: String?         // 同一轮（一次醒来 / 一次发送）落下的事件共用；老历史没有
 }
 
 /// /world/move 的结果。门锁着不是错误：ok=false + text（「门锁着，没进去」）。

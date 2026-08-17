@@ -113,19 +113,20 @@ def respond(offer_id: str, accept: bool) -> dict:
                          "text": f"{u_name}摇头没让抱——你还在原地。"
                                  f"独自过去、留下、或者说点别的，都行。"})
         return {"ok": True, "accepted": False}
-    try:
-        mv = world.move(actor, o["to"], carry=u)
-    except ValueError as e:
-        # 上面刚验过同屋还失手 = 并发缝里世界又变了：作废，别把用户的点击变成 500。
-        logerr(f"carry 邀约落地失手（{e}），作废")
-        _enqueue(actor, _void_reason(o, "落地那一下世界刚好变了"))
-        raise ValueError("没抱成——世界刚好变了")
-    if mv["ok"] and o.get("move_motion"):
-        # 进场自带的样子（MOVE 第二段）：口径同 do_cohabit_wake，enter 后紧跟一条动作。
+    with world.turn():   # 抱着走这一下（进出场 + 进场动作）算一轮，UI 才不跟前后糊在一起
         try:
-            world.act(actor, mv["to"], action=o["move_motion"])
-        except Exception as e:
-            logerr(f"carry 邀约进场动作没写上（忽略）: {e}")
+            mv = world.move(actor, o["to"], carry=u)
+        except ValueError as e:
+            # 上面刚验过同屋还失手 = 并发缝里世界又变了：作废，别把用户的点击变成 500。
+            logerr(f"carry 邀约落地失手（{e}），作废")
+            _enqueue(actor, _void_reason(o, "落地那一下世界刚好变了"))
+            raise ValueError("没抱成——世界刚好变了")
+        if mv["ok"] and o.get("move_motion"):
+            # 进场自带的样子（MOVE 第二段）：口径同 do_cohabit_wake，enter 后紧跟一条动作。
+            try:
+                world.act(actor, mv["to"], action=o["move_motion"])
+            except Exception as e:
+                logerr(f"carry 邀约进场动作没写上（忽略）: {e}")
     reason = cohabit.move_result_reason(mv)
     if mv["ok"]:
         reason["text"] = f"{u_name}答应了让你抱。" + reason["text"]

@@ -314,7 +314,14 @@ struct RoomPage: View {
                             .font(.caption).foregroundStyle(Color.house.textSecondary)
                             .padding(.top, 30)
                     }
-                    ForEach(events) { ev in eventRow(ev).id(ev.id) }
+                    let breaks = turnBreaks
+                    ForEach(events) { ev in
+                        VStack(spacing: 10) {
+                            if breaks.contains(ev.id) { turnDivider }
+                            eventRow(ev)
+                        }
+                        .id(ev.id)
+                    }
                     // 正在回应：房间里谁的醒来在生成中（轮询带回来的）
                     if let reps = detail?.replying, !reps.isEmpty {
                         ForEach(reps, id: \.self) { cid in
@@ -348,6 +355,23 @@ struct RoomPage: View {
                 }
             }
         }
+    }
+
+    /// 该在哪几条事件前面画分轮横线：turn 变了就是新的一轮（一次醒来 / 一次发送）。
+    /// 两边都没 turn（老历史、同一次发送拆出来的多条）比出来相等，不画；第一条前面不画。
+    private var turnBreaks: Set<String> {
+        var out = Set<String>()
+        for (i, ev) in events.enumerated() where i > 0 && ev.turn != events[i - 1].turn {
+            out.insert(ev.id)
+        }
+        return out
+    }
+
+    private var turnDivider: some View {
+        Rectangle()
+            .fill(Color.house.textSecondary.opacity(0.22))
+            .frame(height: 1)
+            .padding(.vertical, 2)
     }
 
     @ViewBuilder
