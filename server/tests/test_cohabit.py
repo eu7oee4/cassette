@@ -20,6 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import characters
 import cohabit
 import offers
+import pets
 import pipeline
 import state_store
 import wake
@@ -68,6 +69,9 @@ class CohabitBase(unittest.TestCase):
 
         self.cid = characters.ids()[0]
         self.home = f"{self.cid}_room"
+        # 宠物注册表指临时区（默认没有宠物，存量用例行为不变）
+        self._pets_orig = pets.PETS_DIR
+        pets.PETS_DIR = self.tmp / "pets"
         # 邀约状态归零 + 补醒入队打桩（真 _enqueue 过 COHABIT_ENABLED 开关，测试收集断言）
         offers._offer = None
         self._offers_enqueue_orig = offers._enqueue
@@ -82,7 +86,17 @@ class CohabitBase(unittest.TestCase):
         cohabit._run = self._run_orig
         offers._enqueue = self._offers_enqueue_orig
         offers._offer = None
+        pets.PETS_DIR = self._pets_orig
         shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def register_pet(self, pid="tuantuan", name="团团"):
+        import json as _json
+        d = pets.PETS_DIR / pid
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "pet.json").write_text(_json.dumps({"display_name": name},
+                                                ensure_ascii=False), "utf-8")
+        world.ensure_world()   # 猫房补种
+        return pid
 
     def wake_once(self, *replies, reasons=None):
         self.replies = list(replies)
@@ -274,6 +288,28 @@ class TestExecute(CohabitBase):
         self.assertEqual(self.offer_reasons[-1][1]["kind"], "carry_void")
         with self.assertRaises(ValueError):               # 扫掉之后按钮白按了得有声
             offers.respond(r["carry_offer"]["id"], True)
+
+    def test_carry_pet_moves_without_offer(self):
+        # 抱猫不用先问（PLAN_pet P0）：同屋直接抱走，move+carry 当轮执行、无邀约
+        pid = self.register_pet()
+        world.move(pid, self.home)
+        r = self.wake_once(out("none", move="living_room", carry="团团"),
+                           out("none"))
+        self.assertTrue(r["first_move"]["ok"])
+        self.assertEqual(r["first_move"]["carry"], pid)
+        self.assertEqual(world.location_of(pid), "living_room")
+        self.assertEqual(world.location_of(self.cid), "living_room")
+        self.assertIsNone(offers.api_view())          # 没有挂起的邀约
+        self.assertIn("抱着", self.prompts[1])         # 补醒原因带「抱着…过来的」
+
+    def test_carry_prompt_mentions_pet_only_when_registered(self):
+        p = cohabit.cohabit_prompt(self.cid, [{"kind": "solo", "text": "x"}],
+                                   state_store.load_settings(self.cid))
+        self.assertNotIn("不用先问", p)                # 没猫时一个字不提
+        self.register_pet()
+        p = cohabit.cohabit_prompt(self.cid, [{"kind": "solo", "text": "x"}],
+                                   state_store.load_settings(self.cid))
+        self.assertIn("抱团团不用先问", p)
 
     def test_offer_void_when_user_walks_away(self):
         world.move("user", self.home)

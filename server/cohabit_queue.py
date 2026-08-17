@@ -35,6 +35,7 @@ import characters
 import cohabit
 import config
 import offers
+import pets
 import pipeline
 import state_store
 import wake
@@ -169,8 +170,10 @@ def _on_room_event(room_id: str, ev: dict) -> None:
     except KeyError:
         return
     reason = {"kind": "event", "text": _reason_text(room_name, ev)}
+    # 作者排除 + 用户不是 AI + 宠物不走这条线（猫怎么被吵醒是 P1 猫引擎自己的触发，
+    # 这个队列起的是 claude -p，把猫入队会在 characters.resolve 处炸）。
     targets = [e for e in world.occupants(room_id)
-               if e != actor and e != world.USER_ID]   # 作者排除 + 用户不是 AI
+               if e != actor and e != world.USER_ID and not pets.is_pet(e)]
     random.shuffle(targets)   # 谁先接话随机：occupants 按注册序出，不洗的话 default 永远抢首
     for e in targets:
         enqueue(e, reason, system=True)
@@ -232,12 +235,14 @@ def solo_wakes_today(cid: str) -> int:
 
 
 def _alone(cid: str) -> bool:
-    """独处 = 所在地点没有别人（任何地点；出门在外不算——char 出门本身还是后置功能）。"""
+    """独处 = 所在地点没有别人（任何地点；出门在外不算——char 出门本身还是后置功能）。
+    猫不算「别人」：同屋趴着一只猫照样算独处，随机醒不该被一只猫压住（PLAN_pet P0）。"""
     snap = world.world_snapshot()
     loc = snap[cid]["location"]
     if loc == world.AWAY:
         return False
-    return not any(e != cid and v["location"] == loc for e, v in snap.items())
+    return not any(e != cid and v["location"] == loc and not pets.is_pet(e)
+                   for e, v in snap.items())
 
 
 def _solo_check(cid: str, now: float) -> None:

@@ -40,6 +40,7 @@ from typing import Optional
 
 import characters
 import config
+import pets
 import state_store
 
 USER_ID = "user"
@@ -83,13 +84,16 @@ def _write_json(path: Path, data) -> None:
 
 # ---------- 实体 ----------
 def entity_ids() -> list[str]:
-    return [USER_ID] + characters.ids()
+    """用户 + 全部角色 + 全部宠物（PLAN_pet P0：pet 是第三类实体）。"""
+    return [USER_ID] + characters.ids() + pets.ids()
 
 
 def entity_name(entity: str) -> str:
-    """事件文本里的称呼：用户用设置里的昵称，角色用 display_name。"""
+    """事件文本里的称呼：用户用设置里的昵称，角色/宠物用各自的 display_name。"""
     if entity == USER_ID:
         return config.user_name()
+    if pets.is_pet(entity):
+        return pets.display_name(entity)
     try:
         return characters.display_name(entity)
     except KeyError:
@@ -130,6 +134,19 @@ def ensure_world() -> None:
                 "name": f"{characters.display_name(cid)}的房间", "floor": 2,
                 "type": "bedroom", "owner": cid, "lock": 0, "keys": [], "state": []}
         _write_json(REGISTRY_PATH, rooms)
+    # 猫房补种（PLAN_pet P0）：注册一只宠物、重启即有房——只补缺失条目，已有的
+    # 一个键都不动（注册表是机主可手编的运行时数据）。type=bedroom + owner 让
+    # _default_location 顺路成立：猫没记录过位置就待在自己的猫房。楼层/名字可手编。
+    reg = load_registry()
+    added = False
+    for pid in pets.ids():
+        rid = f"{pid}_room"
+        if rid not in reg:
+            reg[rid] = {"name": "猫房", "floor": 2, "type": "bedroom",
+                        "owner": pid, "lock": 0, "keys": [], "state": []}
+            added = True
+    if added:
+        _write_json(REGISTRY_PATH, reg)
     if not WORLD_PATH.exists():
         reg = load_registry()
         _write_json(WORLD_PATH, {e: {"location": _default_location(e, reg)}
@@ -181,7 +198,9 @@ def _append_experience(room_id: str, ev: dict) -> None:
     作者自己也写（他做的事当然是他经历的一部分）；用户不写（用户的经历面是 app 本身）。
     写放大 = 事件数 × 在场角色数，量级无压力。"""
     for e in occupants(room_id):
-        if e == USER_ID:
+        if e == USER_ID or pets.is_pet(e):
+            # 用户的经历面是 app 本身；宠物没有经历流——「猫的上下文只含当前房间」
+            # 是信息通道的结构性封堵（PLAN_pet 拍板），不是省 IO。
             continue
         p = state_store.char_state_dir(e) / "experience.jsonl"
         with p.open("a", encoding="utf-8") as f:
@@ -287,6 +306,8 @@ def can_enter(entity: str, room_id: str) -> tuple[bool, str]:
     r = room(room_id)
     if not r.get("lock"):
         return True, ""
+    if pets.is_pet(entity):
+        return True, ""   # 猫洞（PLAN_pet 拍板）：锁挡人不挡猫，信息安全靠注入不靠门
     if entity == r.get("owner") or entity in (r.get("keys") or []):
         return True, ""
     return False, "locked"

@@ -115,6 +115,20 @@ class TestEventWake(QueueBase):
         self.assertIn("在忙吗", texts)
         self.assertIn("的房间", texts)          # 房间名进原因
 
+    def test_pet_never_enqueued(self):
+        # 宠物不走 claude 醒来队列（PLAN_pet P0）：在场有猫，事件只唤角色
+        pid = self.register_pet()
+        world.move(pid, "living_room")
+        for cid in self.chars:
+            world.move(cid, "living_room")
+        world.move("user", "living_room")
+        self._reset_queue()
+        world.act("user", "living_room", speech="团团在这儿呢")
+        self.assertEqual(set(cq._pending), set(self.chars))   # 猫不在队列里
+        # 猫当作者（引擎代它落事件）同样只唤别人
+        world.append_event("living_room", "action", pid, "打了个滚")
+        self.assertNotIn(pid, cq._pending)
+
     def test_move_events_wake_both_rooms(self):
         # c1 和 cass 各在自己房间；c1 去 cass 的房间 → enter 事件唤 cass；
         # 留在原房的没人 → leave 无人可唤。
@@ -222,6 +236,14 @@ class TestSolo(QueueBase):
         self._reset_queue()
         cq._solo_tick(time.time())
         self.assertNotIn(self.cid, cq._pending)
+
+    def test_pet_company_still_counts_as_alone(self):
+        # 猫不算「别人」（PLAN_pet P0）：同屋趴着一只猫照样独处，随机醒不被压住
+        pid = self.register_pet()
+        world.move(pid, self.home)
+        self._reset_queue()
+        cq._solo_tick(time.time())
+        self.assertIn(self.cid, cq._pending)
 
     def test_scheduled_next_fires_even_with_company(self):
         world.move("user", self.home)

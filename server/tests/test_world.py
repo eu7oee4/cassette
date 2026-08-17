@@ -7,6 +7,7 @@ characters/settings 是只读依赖（实体列表、称呼），读真的没关
 跑法（cwd = server/）：
     .venv/bin/python -m unittest tests.test_world -v
 """
+import json
 import shutil
 import sys
 import tempfile
@@ -17,6 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import characters
 import config
+import pets
 import world
 
 
@@ -32,6 +34,9 @@ class WorldBase(unittest.TestCase):
         import state_store
         self._csr_orig = state_store.CHAR_STATE_ROOT
         state_store.CHAR_STATE_ROOT = self.tmp / "chars"
+        # 宠物注册表也指临时区（默认空目录 = 没有宠物，存量用例行为不变）
+        self._pets_orig = pets.PETS_DIR
+        pets.PETS_DIR = self.tmp / "pets"
         world.ensure_world()
         self.chars = characters.ids()
         self.c1 = self.chars[0]                    # 真实注册表里的第一个角色
@@ -41,7 +46,16 @@ class WorldBase(unittest.TestCase):
         import state_store
         world.ROOMS_DIR, world.REGISTRY_PATH, world.WORLD_PATH = self._orig
         state_store.CHAR_STATE_ROOT = self._csr_orig
+        pets.PETS_DIR = self._pets_orig
         shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _register_pet(self, pid="tuantuan", name="团团"):
+        d = pets.PETS_DIR / pid
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "pet.json").write_text(json.dumps({"display_name": name},
+                                               ensure_ascii=False), "utf-8")
+        world.ensure_world()   # 猫房补种
+        return pid
 
     def _set_lock(self, room_id, lock, keys=None):
         reg = world.load_registry()
@@ -358,6 +372,54 @@ class TestVisibility(WorldBase):
         # 新房间从「抱着进来」那条起照常可见（在场路径不变）
         self.assertEqual(world.visible_events("living_room", world.USER_ID)[0]["kind"],
                          "enter")
+
+
+class TestPets(WorldBase):
+    """PLAN_pet P0：pet 是第三类实体——有位置、可被抱、猫洞豁免、没有经历流。"""
+
+    def test_pet_entity_room_and_default_location(self):
+        pid = self._register_pet()
+        self.assertIn(pid, world.entity_ids())
+        self.assertEqual(world.entity_name(pid), "团团")
+        r = world.room(f"{pid}_room")
+        self.assertEqual((r["name"], r["owner"]), ("猫房", pid))
+        self.assertEqual(world.location_of(pid), f"{pid}_room")   # 默认待在猫房
+
+    def test_room_seeding_is_additive_only(self):
+        pid = self._register_pet()
+        reg = world.load_registry()
+        reg[f"{pid}_room"]["name"] = "团团的小窝"     # 机主手编
+        reg[f"{pid}_room"]["floor"] = 1
+        world._write_json(world.REGISTRY_PATH, reg)
+        world.ensure_world()                          # 再跑绝不覆盖
+        r = world.room(f"{pid}_room")
+        self.assertEqual((r["name"], r["floor"]), ("团团的小窝", 1))
+
+    def test_cat_flap_ignores_lock(self):
+        pid = self._register_pet()
+        self._set_lock(self.c1_room, 1)
+        self.assertTrue(world.move(pid, self.c1_room)["ok"])      # 锁挡人不挡猫
+        self.assertFalse(world.move(world.USER_ID, self.c1_room)["ok"])   # 人照样吃闭门羹
+
+    def test_user_carries_pet(self):
+        pid = self._register_pet()
+        world.move(pid, "mm_room")
+        mv = world.move(world.USER_ID, "living_room", carry=pid)
+        self.assertEqual(mv["carry"], pid)
+        self.assertEqual(world.location_of(pid), "living_room")
+        self.assertEqual(world.read_events("living_room")[-1].get("with"), [pid])
+
+    def test_pet_has_no_experience_stream(self):
+        # 「猫的上下文只含当前房间」的结构性封堵：事件永远不写进宠物的经历流
+        import state_store
+        pid = self._register_pet()
+        world.move(pid, "living_room")
+        world.move(self.c1, "living_room")
+        world.act(self.c1, "living_room", speech="猫不该记住这句")
+        streams = [p.parent.name for p in
+                   Path(state_store.CHAR_STATE_ROOT).rglob("experience.jsonl")]
+        self.assertIn(self.c1, streams)               # 角色照常写
+        self.assertNotIn(pid, streams)                # 宠物一条不写
 
 
 class TestRoutes(WorldBase):

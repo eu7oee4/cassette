@@ -56,6 +56,7 @@ import game_bridge
 import mail_bridge
 import offers
 import ombre_rest
+import pets
 import plugins
 import pipeline
 import sse
@@ -844,6 +845,7 @@ class RoomStateIn(BaseModel):
 
 class MoveIn(BaseModel):
     to: str             # 房间 id | "away"（出门开关）；走廊已摘除，不认识的一律 404
+    carry: Optional[str] = None   # 抱着谁一起走：只放行宠物（id 或名字），抱人不存在
 
 
 class PauseIn(BaseModel):
@@ -998,13 +1000,21 @@ def post_carry_offer(body: CarryRespondIn,
 @app.post("/world/move")
 def post_world_move(body: MoveIn,
                     x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
-    """用户移动（含出门 away / 回房子）。门锁着返回 ok:false + 提示，不是 HTTP 错误。"""
+    """用户移动（含出门 away / 回房子）。门锁着返回 ok:false + 提示，不是 HTTP 错误。
+    carry=抱着宠物一起走（PLAN_pet P0）：不同屋/不是宠物 → 422/409，别静默丢。"""
     verify_auth(x_auth)
     cohabit_queue.external_input()
+    carry = None
+    if body.carry:
+        carry = pets.match(body.carry)
+        if not carry:
+            raise HTTPException(status_code=422, detail=f"抱不了「{body.carry}」——只能抱宠物")
     try:
-        return world.move(world.USER_ID, body.to)
+        return world.move(world.USER_ID, body.to, carry=carry)
     except KeyError as e:
         raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=409, detail=str(e))   # 不同屋，抱不着
 
 
 # ---------- Code 模式（tmux 里一个常驻的交互式 claude）----------

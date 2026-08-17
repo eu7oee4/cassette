@@ -111,9 +111,14 @@
   `tests/test_world.py`+`test_cohabit.py` 三个用例改写、iOS `HouseModels.swift:11` 注释。
   当前 world.json 没人站走廊，删除干净。**away 保留**（出门/回家开关在用），
   只从猫的可去范围摘除。
-- **P0 世界层泛化**：pets 注册（`server/pets/<id>/` 与 characters 同构，实例 gitignore）；
-  猫房入房间注册表（免权限口径 PLAN_cohabit 已有）；`entity_ids()` 认猫；
-  `can_enter` pet 豁免；carry 政策放开到猫；`entity_name`/occupants/事件渲染认猫。
+- **P0 世界层泛化** ✅（2026-08-17）：`server/pets.py` 注册表（`server/pets/<id>/pet.json`
+  与 characters 同构，目录 gitignore）；猫房补种进房间注册表（只补缺不覆盖，
+  type=bedroom+owner → 默认位置顺路成立）；`entity_ids()`/`entity_name` 认猫；
+  `can_enter` 猫洞豁免；CARRY 放开到猫（抱猫不走邀约，直接 move+carry）；
+  醒来提示词有猫才提猫；事件醒来队列不认猫（enqueue 会炸的路从源头排除）；
+  `_alone` 猫不算「别人」；`_append_experience` 跳过猫（信息通道的结构性封堵）；
+  用户 `/world/move` 加 `carry` 参数（只放行宠物）。**团团实例未注册**——
+  没脑子的猫不该先出现在屋里，注册随 P1 搬家一起。
 - **P1 猫引擎**：pet_store/pet_engine 移植改造（DeepSeek 接线走 env、迷你协议、
   需求系统、快照维护、petlog/state 迁移脚本）。
 - **P2 触发与闸**：猫 worker（独立线程）、三路触发、发起者排除、猫连发上限、
