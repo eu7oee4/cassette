@@ -8,6 +8,8 @@ struct WorldSnapshot: Decodable {
     let rooms: [WorldRoom]
     let entities: [String: WorldEntity]
     let carry_offer: CarryOffer?      // 有人想抱你去别的房间（答应了才会一起移动）
+    let paused: Bool?                 // 醒来队列暂停中
+    let queue_error: String?          // 队列被按停的原因（模型过载）；按「开始」即清
 
     /// 在某个位置的实体 id（房间 id / "away"），顺序稳定（user 在前）。
     func ids(at location: String) -> [String] {
@@ -52,6 +54,7 @@ struct RoomDetail: Decodable {
     let occupants: [String]
     let replying: [String]?   // 正在生成醒来回应的在场角色（「正在回应…」动画）
     let paused: Bool?         // 醒来队列暂停中（用户按住场面好插嘴）
+    let queue_error: String?  // 队列被按停的原因（模型过载）；按「开始」即清
     let carry_offer: CarryOffer?   // 这个房间里挂着的抱人邀约（只在发生的房间带回）
     let pets: [String]?       // 在场的宠物（照顾入口的开关，PLAN_pet P3）
 }

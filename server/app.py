@@ -886,6 +886,8 @@ def get_world(x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
             "entities": {e: {**v, "name": world.entity_name(e),
                              "status": (busy[1] if busy and busy[0] == e else None)}
                          for e, v in snap.items()},
+            "paused": cohabit_queue.paused(),
+            "queue_error": (cohabit_queue.last_error() or {}).get("text") or None,
             "carry_offer": offers.api_view()}
 
 
@@ -905,6 +907,8 @@ def get_room(room_id: str, x_auth: Optional[str] = Header(default=None, alias="X
     return {"id": room_id, **r, "occupants": occ,
             "pets": [e for e in occ if pets.is_pet(e)],   # 照顾入口的开关（P3）
             "replying": replying, "paused": cohabit_queue.paused(),
+            # 队列被按停的原因（模型过载）：有值就在页上摆出来，按「开始」即清
+            "queue_error": (cohabit_queue.last_error() or {}).get("text") or None,
             "carry_offer": off if off and off["room"] == room_id else None}
 
 

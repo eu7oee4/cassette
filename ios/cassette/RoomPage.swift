@@ -50,6 +50,7 @@ struct RoomPage: View {
                 header
                 if peek { peekBanner }
                 else if detail != nil && !present { goneBanner }
+                if let err = detail?.queue_error { queueErrorBanner(err) }
                 presenceBar
                 stateSection
                 carryOfferCard
@@ -171,6 +172,21 @@ struct RoomPage: View {
             .font(.caption2).foregroundStyle(Color.house.textSecondary)
             .frame(maxWidth: .infinity).padding(.vertical, 5)
             .background(Color.house.surfaceHi)
+    }
+
+    /// 队列被按停的原因（模型过载，服务端已重试过一次）。按「开始」= 知道了，服务端清掉它。
+    private func queueErrorBanner(_ text: String) -> some View {
+        HStack(spacing: 6) {
+            Image(systemName: "exclamationmark.triangle.fill").font(.caption2)
+            Text("\(text)——队列已暂停，按「开始」重试")
+                .font(.caption2)
+                .multilineTextAlignment(.leading)
+            Spacer(minLength: 0)
+        }
+        .foregroundStyle(.red)
+        .padding(.horizontal, 16).padding(.vertical, 6)
+        .frame(maxWidth: .infinity)
+        .background(Color.red.opacity(0.12))
     }
 
     @ViewBuilder

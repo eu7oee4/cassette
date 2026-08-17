@@ -58,6 +58,9 @@ _executing: dict = {"cid": None}       # 正在执行醒来的角色（房间视
 # 暂停 = 只停**执行**：正在生成的那轮照常说完，事件照常落盘、pending 照常合并，
 # 按开始一口气恢复。内存态：后端重启即恢复运行（UI 从 /world 读真相，不会骗人）。
 _paused: dict = {"on": False}
+# 最近一次「把队列按停」的原因（模型那头过载）：UI 拿去摆在房间/房子页上。
+# 人按「开始」= 知道了，清掉。内存态，重启即清（跟 _paused 同口径）。
+_last_error: dict = {"text": "", "ts": 0}
 
 
 def executing() -> Optional[str]:
@@ -68,10 +71,15 @@ def paused() -> bool:
     return _paused["on"]
 
 
+def last_error() -> Optional[dict]:
+    return dict(_last_error) if _last_error["text"] else None
+
+
 def set_paused(on: bool) -> None:
     _paused["on"] = bool(on)
     logerr(f"cohabit 队列{'暂停（正在生成的说完为止，之后攒着）' if on else '恢复（开始冲队）'}")
     if not on:
+        _last_error.update(text="", ts=0)   # 人按开始 = 看见了，错误横幅收掉
         _signal.set()   # 恢复那一脚立刻冲队，不等超时
 
 # code 会话探测缓存（探一次是 tmux 子进程，worker 冲队时别每 pop 都探）。
@@ -393,6 +401,17 @@ def _drain() -> None:
                     sched = state_store.read_schedule(cid)
                     sched["cooldown_until"] = int(time.time()) + 1800
                     state_store.write_schedule(sched, cid)
+        except wake.Overloaded as e:
+            # 模型那头过载（已隔 30s 重试过一次）：**不压冷却**——不是我们坏了，压 30 分钟
+            # 等于替对面的临时故障惩罚自己。改成按下暂停键 + 把错误摆到 UI 上，人来定夺
+            # （2026-08-17 机主拍板）。原因塞回队列：按「开始」时这一轮照常兑现。
+            logerr(f"cohabit 醒来放弃（{cid}）：{e}——队列已暂停，等机主定夺")
+            with _lock:
+                for r in reasons:
+                    _push(cid, r)
+            _last_error.update(text=f"{world.entity_name(cid)}没醒成：{e}", ts=int(time.time()))
+            set_paused(True)
+            return
         except Exception as e:
             logerr(f"cohabit 醒来执行出错（{cid}，丢弃本次）: {e}")
 

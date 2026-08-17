@@ -33,6 +33,7 @@ struct HousePage: View {
             Color.house.bg.ignoresSafeArea()
             VStack(spacing: 0) {
                 header
+                if let err = world?.queue_error { queueErrorBanner(err) }
                 floorTabs
                 ScrollView {
                     VStack(spacing: 14) {
@@ -103,6 +104,25 @@ struct HousePage: View {
                 }
             } catch { lockedText = "没走成：\(error.localizedDescription)" }
         }
+    }
+
+    /// 醒来撞上模型过载（服务端已隔 30s 重试过一次）→ 队列被按停，原因摆在这儿。
+    /// 「开始」= 知道了：恢复队列，攒着的那一轮照常兑现（服务端顺手清掉这条）。
+    private func queueErrorBanner(_ text: String) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: "exclamationmark.triangle.fill").font(.caption2)
+            Text("\(text)——队列已暂停")
+                .font(.caption2).multilineTextAlignment(.leading)
+            Spacer(minLength: 0)
+            Button("开始") {
+                Task { try? await service.worldPause(false); await refresh() }
+            }
+            .font(.caption2.bold())
+        }
+        .foregroundStyle(.red)
+        .padding(.horizontal, 16).padding(.vertical, 6)
+        .frame(maxWidth: .infinity)
+        .background(Color.red.opacity(0.12))
     }
 
     // 抱人邀约：人不一定停在房间页，房子视图也得看得见（回应窗口约 2 分钟）。

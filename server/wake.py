@@ -303,11 +303,21 @@ def parse_wake_output(text: str) -> tuple[str, str, str, Optional[int], str]:
 
 
 # ---------- 起模型 ----------
-def run_claude_wake(prompt: str, char_id: Optional[str] = None) -> tuple[Optional[str], list[dict]]:
-    """起一次 claude -p（醒来用），collect_all_text 拼接全部文本段。失败/超时返回 (None, [])，不抛。
+class Overloaded(RuntimeError):
+    """模型那头过载（API 529）——可重试的临时故障，跟「配置坏了 / 登录态过期」不是一回事。
+    抛出来 = run_claude_wake 已经隔 OVERLOAD_RETRY_SEC 重试过一次，两次都过载。
+    上层别压 30 分钟冷却（2026-08-17 机主拍板：暂停队列 + 把错误摆到 UI 上，人来定夺）。"""
 
-    ⚠️ context='wake' 不能省：醒来这条路上有些插件工具是不挂的（plugins.NO_WAKE_PLUGINS），
-    默认值是 chat（全挂）。省掉它 = 一次没人看着的随机醒来手上多出自切 code 模式这种能力。"""
+
+OVERLOAD_RETRY_SEC = 30
+# 过载识别：stream-json 模式下报错走 stdout 的 result 那条（"api_error_status":529），
+# 文案兜底认 "529 Overloaded"。认不出来的失败照旧走老路（压冷却）。
+_OVERLOAD_RE = re.compile(r'"api_error_status"\s*:\s*529|529\s+Overloaded', re.I)
+
+
+def _run_claude_wake_once(prompt: str, char_id: Optional[str]) \
+        -> tuple[Optional[str], list[dict], bool]:
+    """跑一次，返回 (raw, stored, 是否过载)。过载时 raw 必为 None。"""
     args = (pipeline.base_claude_args(context="wake", char_id=char_id)
             + ["--output-format", "stream-json", "--verbose"])
     try:
@@ -317,12 +327,30 @@ def run_claude_wake(prompt: str, char_id: Optional[str] = None) -> tuple[Optiona
                               timeout=config.CLAUDE_TIMEOUT_SEC)
     except subprocess.TimeoutExpired:
         logerr("醒来调用超时")
-        return None, []
+        return None, [], False
     if proc.returncode != 0:
         # stderr 常是空的（stream-json 模式报错走 stdout）——两头都记，排障不绕路。
         logerr(f"醒来进程出错 rc={proc.returncode}: stderr={proc.stderr[:200]!r} stdout尾={proc.stdout[-300:]!r}")
-        return None, []
-    return pipeline.parse_claude_stream(proc.stdout, collect_all_text=True)
+        return None, [], bool(_OVERLOAD_RE.search(proc.stdout or ""))
+    return (*pipeline.parse_claude_stream(proc.stdout, collect_all_text=True), False)
+
+
+def run_claude_wake(prompt: str, char_id: Optional[str] = None) -> tuple[Optional[str], list[dict]]:
+    """起一次 claude -p（醒来用），collect_all_text 拼接全部文本段。失败/超时返回 (None, [])，不抛。
+    **例外**：API 529 过载会隔 OVERLOAD_RETRY_SEC 重试一次，还过载就抛 Overloaded——
+    这是对面的临时故障，值得跟「模型配置坏了」区别对待（调用方各自决定怎么处置）。
+
+    ⚠️ context='wake' 不能省：醒来这条路上有些插件工具是不挂的（plugins.NO_WAKE_PLUGINS），
+    默认值是 chat（全挂）。省掉它 = 一次没人看着的随机醒来手上多出自切 code 模式这种能力。"""
+    raw, stored, overloaded = _run_claude_wake_once(prompt, char_id)
+    if not overloaded:
+        return raw, stored
+    logerr(f"醒来撞上模型过载（API 529），{OVERLOAD_RETRY_SEC}s 后重试一次")
+    time.sleep(OVERLOAD_RETRY_SEC)
+    raw, stored, overloaded = _run_claude_wake_once(prompt, char_id)
+    if overloaded:
+        raise Overloaded("模型那头过载（API 529 Overloaded），隔 30 秒重试一次仍然过载")
+    return raw, stored
 
 
 # ---------- 分发 ----------
@@ -460,8 +488,16 @@ def do_wake_sync(settings: dict, trigger: str, force: bool = False, note: str = 
     自发的醒来（随机 / NEXT）永远是 False。note＝硬触发的缘由，透传给 wake_prompt。"""
     now_ts = int(time.time())
 
-    raw, stored = run_claude_wake(wake_prompt(settings, forced=force, note=note,
-                                              char_id=char_id), char_id=char_id)
+    try:
+        raw, stored = run_claude_wake(wake_prompt(settings, forced=force, note=note,
+                                                  char_id=char_id), char_id=char_id)
+    except Overloaded as e:
+        # 对面过载：记一条 error 心流、**不压冷却**（不是我们坏了，下个 tick 照常再试）。
+        logerr(f"醒来放弃（{char_id or 'default'}）：{e}")
+        state_store.append_wake_log({"ts": now_ts, "time": pipeline.now_str(), "source": "wake",
+                                     "action": "error", "trigger": trigger,
+                                     "note": "overloaded"}, char_id=char_id)
+        return {"action": "error", "overloaded": True}
     # 醒来时浏览过的网页：落 browse_log（Mind 页未来素材；一期 wake_log 不收 browse——
     # 它在 NON_MEMORY_TOOLS 里，下一行就被滤掉。二期进 Mind 时间线再回头）。
     browse_urls: list[str] = []

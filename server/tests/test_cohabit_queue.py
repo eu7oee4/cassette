@@ -69,6 +69,7 @@ class QueueBase(CohabitBase):
         pq._signal.clear()
         pq._initiator["id"] = None
         cq._paused["on"] = False
+        cq._last_error.update(text="", ts=0)
         # 探测缓存必须一并清：5 秒 TTL 会把上一个测试的 owner 带进下一个测试
         cq._code_cache.update(ts=0.0, owner=None)
 
@@ -258,6 +259,63 @@ class TestDrain(QueueBase):
         sched = state_store.read_schedule(self.cid)
         self.assertGreater(sched["cooldown_until"], time.time())
         self.assertFalse(cq.enqueue(self.cid, {"kind": "event", "text": "y"}))
+
+    def test_nudge_force_ignores_cooldown_and_clears_it(self):
+        state_store.write_schedule({"cooldown_until": time.time() + 1800}, self.cid)
+        self.assertFalse(cq.enqueue(self.cid, {"kind": "event", "text": "普通事件"}))
+        self.assertTrue(cq.enqueue(self.cid, {"kind": "event", "text": "机主点名"}, force=True))
+        self.assertNotIn("cooldown_until", state_store.read_schedule(self.cid))
+
+    def test_overload_pauses_and_keeps_reasons_without_cooldown(self):
+        def boom(prompt, cid):
+            raise wake.Overloaded("模型那头过载（API 529 Overloaded）")
+        cohabit._run = boom
+        cq.enqueue(self.cid, {"kind": "event", "text": "水声"})
+        cq._drain()
+        self.assertTrue(cq.paused())                              # 按下暂停键
+        self.assertIn("过载", (cq.last_error() or {}).get("text", ""))   # 错误摆给 UI
+        self.assertNotIn("cooldown_until", state_store.read_schedule(self.cid))  # 不压冷却
+        self.assertEqual([r["text"] for r in cq._pending[self.cid]], ["水声"])   # 原因塞回来
+        cq.set_paused(False)                                      # 按「开始」= 知道了
+        self.assertIsNone(cq.last_error())                        # 横幅收掉
+        self.assertIn(self.cid, cq._pending)                      # 那一轮还在，恢复后照常兑现
+
+
+class TestOverloadRetry(QueueBase):
+    """529 是对面的临时故障：隔 30 秒重试一次，还过载才放弃（不压冷却，见上面的用例）。"""
+
+    def setUp(self):
+        super().setUp()
+        self.slept = []
+        self._sleep_orig = wake.time.sleep
+        self._once_orig = wake._run_claude_wake_once
+        wake.time.sleep = self.slept.append   # 真睡 30 秒的单测没人等（tearDown 装回去）
+
+    def tearDown(self):
+        wake.time.sleep = self._sleep_orig
+        wake._run_claude_wake_once = self._once_orig
+        super().tearDown()
+
+    def test_retry_once_then_succeed(self):
+        calls = []
+
+        def once(prompt, cid):
+            calls.append(1)
+            return (None, [], True) if len(calls) == 1 else ("好了", [], False)
+        wake._run_claude_wake_once = once
+        self.assertEqual(wake.run_claude_wake("p"), ("好了", []))
+        self.assertEqual(self.slept, [wake.OVERLOAD_RETRY_SEC])
+
+    def test_twice_overloaded_raises(self):
+        wake._run_claude_wake_once = lambda prompt, cid: (None, [], True)
+        with self.assertRaises(wake.Overloaded):
+            wake.run_claude_wake("p")
+        self.assertEqual(len(self.slept), 1)                      # 只重试一次，不无限刷
+
+    def test_plain_failure_is_not_overload(self):
+        wake._run_claude_wake_once = lambda prompt, cid: (None, [], False)
+        self.assertEqual(wake.run_claude_wake("p"), (None, []))   # 老路：返回 None 不抛
+        self.assertEqual(self.slept, [])
 
 
 class TestSolo(QueueBase):
