@@ -7,6 +7,7 @@ import Foundation
 struct WorldSnapshot: Decodable {
     let rooms: [WorldRoom]
     let entities: [String: WorldEntity]
+    let carry_offer: CarryOffer?      // 有人想抱你去别的房间（答应了才会一起移动）
 
     /// 在某个位置的实体 id（房间 id / "hallway" / "away"），顺序稳定（user 在前）。
     func ids(at location: String) -> [String] {
@@ -51,6 +52,19 @@ struct RoomDetail: Decodable {
     let occupants: [String]
     let replying: [String]?   // 正在生成醒来回应的在场角色（「正在回应…」动画）
     let paused: Bool?         // 醒来队列暂停中（用户按住场面好插嘴）
+    let carry_offer: CarryOffer?   // 这个房间里挂着的抱人邀约（只在发生的房间带回）
+}
+
+/// 抱人邀约：AI 醒来轮写了 MOVE+CARRY → 不立刻移动，先问你。
+/// 答应 → 这时才 move+carry；拒绝/超时（约 2 分钟）→ 发起人收各自的补醒。
+struct CarryOffer: Decodable, Equatable {
+    let id: String
+    let actor: String
+    let actor_name: String
+    let room: String          // 邀约发生（= 你俩此刻所在）的房间
+    let to: String
+    let to_name: String
+    let deadline: Int
 }
 
 struct RoomStateEntry: Decodable, Identifiable, Equatable {
@@ -125,6 +139,15 @@ extension ChatService {
     func worldPause(_ on: Bool) async throws {
         let body = try JSONEncoder().encode(["on": on])
         _ = try await perform(authedRequest("POST", "/world/pause", jsonBody: body, timeout: 8))
+    }
+
+    /// 应答抱人邀约：答应 → 这时才真的一起移动；拒绝/已失效都不动。
+    /// 邀约已经不在（过期/位置变了）→ 服务端 409，错误文案直接给用户看。
+    func respondCarryOffer(id: String, accept: Bool) async throws {
+        struct Body: Encodable { let id: String; let accept: Bool }
+        let body = try JSONEncoder().encode(Body(id: id, accept: accept))
+        _ = try await perform(authedRequest("POST", "/world/carry_offer",
+                                            jsonBody: body, timeout: 10))
     }
 
     func roomStateChange(_ id: String, op: String, entryID: String?, text: String?) async throws {

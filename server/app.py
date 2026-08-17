@@ -54,6 +54,7 @@ import cohabit_queue
 import config
 import game_bridge
 import mail_bridge
+import offers
 import ombre_rest
 import plugins
 import pipeline
@@ -849,6 +850,11 @@ class PauseIn(BaseModel):
     on: bool            # true=暂停（正在生成的说完为止）；false=恢复并立刻冲队
 
 
+class CarryRespondIn(BaseModel):
+    id: str             # 邀约 id（/world /rooms 轮询里带回来的那个）
+    accept: bool        # true=让抱（这时才真的 move+carry）；false=不要
+
+
 class NudgeIn(BaseModel):
     text: str           # 环境刺激的旁白，如「浴室传来水声」——原样落进醒因
     targets: list[str] = []   # 点名醒谁（角色 id，可多个）
@@ -871,7 +877,8 @@ def get_world(x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
     return {"rooms": rooms,
             "entities": {e: {**v, "name": world.entity_name(e),
                              "status": (busy[1] if busy and busy[0] == e else None)}
-                         for e, v in snap.items()}}
+                         for e, v in snap.items()},
+            "carry_offer": offers.api_view()}
 
 
 @app.get("/rooms/{room_id}")
@@ -885,8 +892,10 @@ def get_room(room_id: str, x_auth: Optional[str] = Header(default=None, alias="X
     # replying：这个房间里谁正在生成醒来回应（房间视图的「正在回应…」动画）。
     gen = cohabit_queue.executing()
     replying = [gen] if gen and world.location_of(gen) == room_id else []
+    off = offers.api_view()
     return {"id": room_id, **r, "occupants": world.occupants(room_id),
-            "replying": replying, "paused": cohabit_queue.paused()}
+            "replying": replying, "paused": cohabit_queue.paused(),
+            "carry_offer": off if off and off["room"] == room_id else None}
 
 
 @app.post("/world/pause")
@@ -970,6 +979,20 @@ def post_room_state(room_id: str, body: RoomStateIn,
         raise HTTPException(status_code=409, detail="你不在这个房间——先「去这里」再改")
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e))
+
+
+@app.post("/world/carry_offer")
+def post_carry_offer(body: CarryRespondIn,
+                     x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
+    """应答抱人邀约。答应 → 这时才真的 move+carry（锁着的门照旧可能进不去，
+    成功失败同一条路补醒发起人）；拒绝/超时/世界变了 → 各自的补醒。
+    邀约已经不在（过期/被顶掉/位置变了）→ 409，UI 提示「已经过去了」。"""
+    verify_auth(x_auth)
+    cohabit_queue.external_input()   # 用户应答 = 新外部输入（答应那下连发计数清零）
+    try:
+        return offers.respond(body.id, body.accept)
+    except ValueError as e:
+        raise HTTPException(status_code=409, detail=str(e))
 
 
 @app.post("/world/move")

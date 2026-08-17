@@ -36,6 +36,7 @@ struct HousePage: View {
                 floorTabs
                 ScrollView {
                     VStack(spacing: 14) {
+                        carryOfferBanner
                         floorContent
                     }
                     .padding(.horizontal, 16)
@@ -59,7 +60,8 @@ struct HousePage: View {
             NudgeSheet(world: world, service: service)
                 .presentationDetents([.medium])
         }
-        .alert("门锁着", isPresented: Binding(
+        // 「没成」：门锁着 / 没走成 / 邀约已失效，都从这儿说
+        .alert("没成", isPresented: Binding(
             get: { lockedText != nil }, set: { if !$0 { lockedText = nil } })) {
             Button("好吧", role: .cancel) {}
         } message: { Text(lockedText ?? "") }
@@ -100,6 +102,40 @@ struct HousePage: View {
                     lockedText = mv.text ?? "门锁着，没进去"
                 }
             } catch { lockedText = "没走成：\(error.localizedDescription)" }
+        }
+    }
+
+    // 抱人邀约：人不一定停在房间页，房子视图也得看得见（回应窗口约 2 分钟）。
+    @ViewBuilder
+    private var carryOfferBanner: some View {
+        if let off = world?.carry_offer {
+            HStack(spacing: 10) {
+                Image(systemName: "figure.2.arms.open")
+                    .foregroundStyle(Color.house.accent)
+                Text("\(off.actor_name) 想抱你去「\(off.to_name)」")
+                    .font(.footnote).foregroundStyle(Color.house.textPrimary)
+                Spacer()
+                Button("不要") { respondOffer(off, accept: false) }
+                    .font(.footnote.bold())
+                    .foregroundStyle(Color.house.textSecondary)
+                Button("好呀") { respondOffer(off, accept: true) }
+                    .font(.footnote.bold())
+                    .padding(.horizontal, 12).padding(.vertical, 6)
+                    .background(Capsule().fill(Color.house.accent))
+                    .foregroundStyle(Color.house.onAccent)
+            }
+            .padding(12)
+            .background(RoundedRectangle(cornerRadius: 14).fill(Color.house.surface))
+            .overlay(RoundedRectangle(cornerRadius: 14)
+                .stroke(Color.house.accent.opacity(0.5), lineWidth: 1))
+        }
+    }
+
+    private func respondOffer(_ off: CarryOffer, accept: Bool) {
+        Task {
+            do { try await service.respondCarryOffer(id: off.id, accept: accept) }
+            catch { lockedText = error.localizedDescription }   // 409 = 邀约已经不在了
+            await refresh()
         }
     }
 

@@ -253,20 +253,32 @@ def read_events(room_id: str, limit: Optional[int] = None) -> list[dict]:
 
 def visible_events(room_id: str, entity: str,
                    limit: Optional[int] = None) -> list[dict]:
-    """entity 的可见事件 = 本次在场区间（最近一次自己进屋的 enter 事件起，含那条）。
-    人不在这个房间 → 空列表。从没有 enter 事件（开局就被放在屋里）→ 全部历史，
-    他确实一直在场。被抱着进来的（自己在 enter 事件的 with 里）同样算自己的进场。"""
-    if location_of(entity) != room_id:
-        return []
+    """entity 的可见事件：
+    - 在场 → 本次在场区间（最近一次自己进屋的 enter 事件起，含那条）；从没有
+      enter 事件（开局就被放在屋里）→ 全部历史，他确实一直在场。
+    - 不在场 → **最后一段在场区间**（enter..leave 含两端），只读回看——亲历过的
+      不因为离开而蒸发（被抱走的人补看上一屋不该要上帝视角，2026-08-17 机主）。
+      离开之后发生的事照旧永远不在这里。没有 leave 记录（从没进来过，或数据缺口
+      判不出区间）→ 空列表，宁可少给不多给。
+    被抱着进出的（自己在 enter/leave 事件的 with 里）同样算自己的进出场。"""
     evs = read_events(room_id)
-    start = 0
-    for i in range(len(evs) - 1, -1, -1):
-        e = evs[i]
-        if e.get("type") == "system" and e.get("kind") == "enter" \
-                and (e.get("actor") == entity or entity in (e.get("with") or [])):
-            start = i
-            break
-    out = evs[start:]
+
+    def mine(e: dict, kind: str) -> bool:
+        return e.get("type") == "system" and e.get("kind") == kind \
+            and (e.get("actor") == entity or entity in (e.get("with") or []))
+
+    if location_of(entity) == room_id:
+        start = next((i for i in range(len(evs) - 1, -1, -1)
+                      if mine(evs[i], "enter")), 0)
+        out = evs[start:]
+    else:
+        end = next((i for i in range(len(evs) - 1, -1, -1)
+                    if mine(evs[i], "leave")), None)
+        if end is None:
+            return []
+        start = next((i for i in range(end - 1, -1, -1)
+                      if mine(evs[i], "enter")), 0)
+        out = evs[start:end + 1]
     return out[-limit:] if limit else out
 
 

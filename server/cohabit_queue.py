@@ -34,6 +34,7 @@ from typing import Optional
 import characters
 import cohabit
 import config
+import offers
 import pipeline
 import state_store
 import wake
@@ -373,6 +374,7 @@ def worker_loop() -> None:
         _signal.clear()
         try:
             now = time.time()
+            offers.sweep(now)   # 抱人邀约的超时/失效扫除（发起人收作废补醒）
             if now - last_solo >= SOLO_TICK_SEC:
                 last_solo = now
                 _solo_tick(now)

@@ -19,6 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import characters
 import cohabit
+import offers
 import pipeline
 import state_store
 import wake
@@ -67,6 +68,11 @@ class CohabitBase(unittest.TestCase):
 
         self.cid = characters.ids()[0]
         self.home = f"{self.cid}_room"
+        # 邀约状态归零 + 补醒入队打桩（真 _enqueue 过 COHABIT_ENABLED 开关，测试收集断言）
+        offers._offer = None
+        self._offers_enqueue_orig = offers._enqueue
+        self.offer_reasons: list[tuple] = []
+        offers._enqueue = lambda cid, reason: self.offer_reasons.append((cid, reason))
 
     def tearDown(self):
         world.ROOMS_DIR, world.REGISTRY_PATH, world.WORLD_PATH = self._world_orig
@@ -74,6 +80,8 @@ class CohabitBase(unittest.TestCase):
         wake.bark_push, pipeline.tool_menu_block = self._bark_orig, self._menu_orig
         cohabit.coding_char = self._coding_orig
         cohabit._run = self._run_orig
+        offers._enqueue = self._offers_enqueue_orig
+        offers._offer = None
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     def wake_once(self, *replies, reasons=None):
@@ -219,18 +227,67 @@ class TestExecute(CohabitBase):
         self.assertEqual([e["type"] for e in evs], ["speech", "action", "speech"])
         self.assertEqual(evs[1]["text"], "起身开门")
 
-    def test_move_with_carry_takes_user_along(self):
+    def test_carry_becomes_offer_not_move(self):
+        # 抱人要她愿意（2026-08-17 机主拍板）：MOVE+CARRY 不再当轮移动——落邀约 +
+        # 房间系统事件（在场者靠这条事件醒来获得插话窗口），谁都没动、没有补醒链。
         world.move("user", self.home)                     # 同屋才抱得着
         u_name = world.entity_name("user")
-        r = self.wake_once(out("none", move="living_room", carry=u_name),
-                           out("none"))
-        self.assertTrue(r["first_move"]["ok"])
-        self.assertEqual(r["first_move"]["carry"], "user")
+        r = self.wake_once(out("act", say="抱你去客厅好不好",
+                               move="living_room", carry=u_name))
+        self.assertIn("carry_offer", r)
+        self.assertEqual(world.location_of(self.cid), self.home)
+        self.assertEqual(world.location_of("user"), self.home)
+        last = world.read_events(self.home)[-1]
+        self.assertEqual(last.get("kind"), "carry_offer")
+        self.assertIn("想抱", last["text"])
+        self.assertEqual(len(self.prompts), 1)            # 这轮到此为止，无补醒
+
+    def test_offer_accept_moves_both_and_wakes_actor(self):
+        world.move("user", self.home)
+        r = self.wake_once(out("none", move="living_room 打横抱着走进来",
+                               carry=world.entity_name("user")))
+        res = offers.respond(r["carry_offer"]["id"], True)
+        self.assertTrue(res["accepted"])
         self.assertEqual(world.location_of(self.cid), "living_room")
         self.assertEqual(world.location_of("user"), "living_room")
-        self.assertIn("抱着", self.prompts[1])            # 补醒原因带「抱着…过来的」
-        enter = world.read_events("living_room")[-1]
-        self.assertEqual(enter.get("with"), ["user"])
+        evs = world.read_events("living_room")
+        self.assertEqual(evs[0].get("with"), ["user"])    # 一条事件带 with
+        self.assertEqual(evs[1]["text"], "打横抱着走进来")  # 进场动作跟在 enter 后
+        cid, reason = self.offer_reasons[-1]
+        self.assertEqual(cid, self.cid)
+        self.assertIn("答应", reason["text"])
+        self.assertIn("怀里", reason["text"])
+
+    def test_offer_decline_keeps_everyone_and_wakes_actor(self):
+        world.move("user", self.home)
+        r = self.wake_once(out("none", move="living_room",
+                               carry=world.entity_name("user")))
+        res = offers.respond(r["carry_offer"]["id"], False)
+        self.assertFalse(res["accepted"])
+        self.assertEqual(world.location_of(self.cid), self.home)
+        self.assertEqual(world.location_of("user"), self.home)
+        self.assertEqual(world.read_events(self.home)[-1].get("kind"), "carry_result")
+        self.assertEqual(self.offer_reasons[-1][1]["kind"], "carry_declined")
+
+    def test_offer_sweep_timeout_voids(self):
+        world.move("user", self.home)
+        r = self.wake_once(out("none", move="living_room",
+                               carry=world.entity_name("user")))
+        offers.sweep(now=time.time() + offers.OFFER_TTL_SEC + 1)
+        self.assertIsNone(offers.api_view())
+        self.assertEqual(self.offer_reasons[-1][1]["kind"], "carry_void")
+        with self.assertRaises(ValueError):               # 扫掉之后按钮白按了得有声
+            offers.respond(r["carry_offer"]["id"], True)
+
+    def test_offer_void_when_user_walks_away(self):
+        world.move("user", self.home)
+        r = self.wake_once(out("none", move="living_room",
+                               carry=world.entity_name("user")))
+        world.move("user", "mm_room")                     # 没应答就自己走开了
+        with self.assertRaises(ValueError):
+            offers.respond(r["carry_offer"]["id"], True)
+        self.assertEqual(self.offer_reasons[-1][1]["kind"], "carry_void")
+        self.assertEqual(world.location_of(self.cid), self.home)   # 发起人没被带走
 
     def test_carry_not_copresent_moves_alone(self):
         # 用户在自己房间（不同屋）：CARRY 当没写，独自移动、用户不动

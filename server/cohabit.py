@@ -23,6 +23,7 @@ from typing import Optional
 import characters
 import code_bridge
 import config
+import offers
 import pipeline
 import plugins
 import state_store
@@ -191,7 +192,7 @@ SAY: <ACTION=act 时你在房间里的动作和说话，全写这一行：动作
 STATE: <ACTION=act 时顺手改这里的地点状态，每行一条、最多 {world.MAX_STATE_OPS_PER_ACT} 条：add: 文本 ／ edit 条目id: 新文本 ／ remove 条目id: 一句交代（如 "remove ab12cd34: 把凉透的牛奶端走倒了"，交代可省）。⚠️ 快照写的是**这里的东西和环境**（桌上剩了半杯牛奶、窗帘拉开了），你的身体姿势不进快照——你在干嘛用 SAY 表达；不改留空>
 PHONE: <ACTION=phone 时发给{u}的消息>
 MOVE: <想去哪就写上面清单里的房间 id；id 后可空格接一句进场的样子，如 "living_room 打着哈欠晃进来"；不动写 "无"。移动发生在这一轮的最后，走完下一轮会告诉你结果>
-CARRY: <配合 MOVE：想抱着{u}一起走就写「{u}」（前提是{u}此刻和你同屋）；不带人写 "无">
+CARRY: <配合 MOVE：想抱着{u}一起走就写「{u}」（前提是{u}此刻和你同屋）。抱人要{u}愿意：写了这项，这轮的 MOVE 不会立刻发生——先问{u}，答应了才一起过去；答应、拒绝还是没反应，之后都会告诉你。不带人写 "无">
 NEXT: <你希望多久后再自主醒来，如 "90分钟" 或 "3小时"；没想法写 "无">
 """
 
@@ -437,22 +438,19 @@ def do_cohabit_wake(cid: str, reasons: list[dict], _chain_no: int = 1,
             return result
         # CARRY 解析（政策层）：只认**此刻同屋的用户**——名字或 id 都行；对不上就当
         # 没写并记日志（隔空抱人/抱别的 AI 在结构上不存在，团团入住后再放开到猫）。
-        carry = None
+        # 抱人要对方愿意（2026-08-17 机主拍板）：认出来了也**不在这轮移动**——落一个
+        # 邀约（offers.create：房间系统事件给在场者插话窗口 + 用户在 app 里应答），
+        # 答应了才 move+carry；答应/拒绝/没反应都会以补醒回来，这轮到此为止。
         if p["carry_raw"]:
             loc_now = world.location_of(cid)
             u_name = world.entity_name(world.USER_ID)
             if p["carry_raw"] in (world.USER_ID, u_name) \
                     and world.location_of(world.USER_ID) == loc_now:
-                carry = world.USER_ID
-            else:
-                logerr(f"cohabit CARRY 抱不了（不同屋/不认识/非用户），当没写："
-                       f"{p['carry_raw']!r}")
-        try:
-            mv = world.move(cid, p["move"], carry=carry)
-        except ValueError as e:
-            # 预检和落地之间世界可能变了（她刚好走开）：退成独自移动，别整轮报废。
-            logerr(f"cohabit CARRY 落地时失效（{e}），改为独自移动")
-            mv = world.move(cid, p["move"])
+                result["carry_offer"] = offers.create(cid, p["move"], p["move_motion"])
+                return result
+            logerr(f"cohabit CARRY 抱不了（不同屋/不认识/非用户），当没写："
+                   f"{p['carry_raw']!r}")
+        mv = world.move(cid, p["move"])
         result["move_result"] = mv
         if mv.get("noop"):
             return result

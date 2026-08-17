@@ -323,6 +323,33 @@ class TestVisibility(WorldBase):
         vis = world.visible_events("living_room", self.c1)
         self.assertNotIn("第一段", "".join(e["text"] for e in vis))
 
+    def test_last_interval_readback_after_leaving(self):
+        # 离场后可回看自己最后一段在场区间（2026-08-17 机主）：亲历过的不因离开而
+        # 蒸发；走之后发生的照旧看不见——补看上一屋不再要上帝视角。
+        world.move(world.USER_ID, "living_room")
+        world.move(self.c1, "living_room")
+        world.act(self.c1, "living_room", speech="你在的时候说的")
+        world.move(world.USER_ID, "mm_room")
+        world.act(self.c1, "living_room", speech="你走之后说的")
+        vis = world.visible_events("living_room", world.USER_ID)
+        texts = "".join(e["text"] for e in vis)
+        self.assertEqual(vis[0]["kind"], "enter")      # 区间从自己进屋那条起
+        self.assertEqual(vis[-1]["kind"], "leave")     # 到自己离开那条为止
+        self.assertIn("你在的时候说的", texts)
+        self.assertNotIn("你走之后说的", texts)
+
+    def test_carried_out_keeps_witnessed_events(self):
+        # 被抱走的人：自己在 leave 事件的 with 里也算自己的离场，回看同一口径
+        world.move(world.USER_ID, self.c1_room)
+        world.act(self.c1, self.c1_room, speech="马上带你去个地方")
+        world.move(self.c1, "living_room", carry=world.USER_ID)
+        vis = world.visible_events(self.c1_room, world.USER_ID)
+        self.assertIn("马上带你去个地方", "".join(e["text"] for e in vis))
+        self.assertEqual(vis[-1]["kind"], "leave")
+        # 新房间从「抱着进来」那条起照常可见（在场路径不变）
+        self.assertEqual(world.visible_events("living_room", world.USER_ID)[0]["kind"],
+                         "enter")
+
 
 class TestRoutes(WorldBase):
     """路由层：真 HTTP 语义（TestClient 不跑 lifespan，watcher 线程不会起）。"""

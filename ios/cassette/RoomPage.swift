@@ -21,6 +21,7 @@ struct RoomPage: View {
     @State private var editingEntry: RoomStateEntry?   // 点了哪条地点状态（弹编辑/清掉）
     @State private var stateDraft = ""                 // add/edit 的草稿
     @State private var stateSheet: StateSheetMode?
+    @State private var offerBusy = false               // 邀约应答进行中（防连点）
     @FocusState private var inputFocused: Bool         // 输入区聚焦（收键盘/自动触底用）
 
     private let service = ChatService()
@@ -45,8 +46,10 @@ struct RoomPage: View {
             VStack(spacing: 0) {
                 header
                 if peek { peekBanner }
+                else if detail != nil && !present { goneBanner }
                 presenceBar
                 stateSection
+                carryOfferCard
                 eventList
                 if !peek && present { inputBar }
             }
@@ -153,6 +156,15 @@ struct RoomPage: View {
             .background(Color.house.accent.opacity(0.85))
     }
 
+    /// 离场回看（2026-08-17）：人已经不在这个房间——下面的事件流是服务端给的
+    /// 「你最后一段在场区间」，只读；你走之后发生的事不在里面（那才要偷看）。
+    private var goneBanner: some View {
+        Text("你已不在这个房间——这是你在场时看到的")
+            .font(.caption2).foregroundStyle(Color.house.textSecondary)
+            .frame(maxWidth: .infinity).padding(.vertical, 5)
+            .background(Color.house.surfaceHi)
+    }
+
     @ViewBuilder
     private var presenceBar: some View {
         if let d = detail {
@@ -226,6 +238,50 @@ struct RoomPage: View {
             .background(RoundedRectangle(cornerRadius: 14).fill(Color.house.surface))
             .overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.house.line, lineWidth: 1))
             .padding(.horizontal, 16).padding(.bottom, 8)
+        }
+    }
+
+    // MARK: - 抱人邀约（答应了才会一起移动；服务端只在发生的房间带回这张卡）
+
+    @ViewBuilder
+    private var carryOfferCard: some View {
+        if !peek, let off = detail?.carry_offer {
+            HStack(spacing: 10) {
+                Image(systemName: "figure.2.arms.open")
+                    .foregroundStyle(Color.house.accent)
+                Text("\(off.actor_name) 想抱你去「\(off.to_name)」")
+                    .font(.footnote).foregroundStyle(Color.house.textPrimary)
+                Spacer()
+                Button("不要") { respondOffer(off, accept: false) }
+                    .font(.footnote.bold())
+                    .foregroundStyle(Color.house.textSecondary)
+                Button("好呀") { respondOffer(off, accept: true) }
+                    .font(.footnote.bold())
+                    .padding(.horizontal, 12).padding(.vertical, 6)
+                    .background(Capsule().fill(Color.house.accent))
+                    .foregroundStyle(Color.house.onAccent)
+            }
+            .disabled(offerBusy)
+            .padding(12)
+            .background(RoundedRectangle(cornerRadius: 14).fill(Color.house.surface))
+            .overlay(RoundedRectangle(cornerRadius: 14)
+                .stroke(Color.house.accent.opacity(0.5), lineWidth: 1))
+            .padding(.horizontal, 16).padding(.bottom, 8)
+        }
+    }
+
+    private func respondOffer(_ off: CarryOffer, accept: Bool) {
+        offerBusy = true
+        Task {
+            defer { offerBusy = false }
+            do {
+                try await service.respondCarryOffer(id: off.id, accept: accept)
+                await refresh()
+                if accept { dismiss() }   // 被抱走了：回房子视图看自己到了哪
+            } catch {
+                errorText = error.localizedDescription   // 409 = 邀约已经不在了
+                await refresh()
+            }
         }
     }
 
