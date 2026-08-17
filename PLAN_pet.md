@@ -104,7 +104,7 @@
 
 ## Milestones
 
-- **P-1 hallway 摘除**（前置清理，独立 commit，与猫无关先行）：
+- **P-1 hallway 摘除** ✅（2026-08-17，前置清理，独立 commit，与猫无关先行）：
   代码足迹已查清（2026-08-16）——`world.py`（常量/docstring/move 特判/
   `_default_location` 兜底改**客厅**）、`cohabit.py` 两处分支（:89 走廊文案 / :350
   act 无房间守卫改只剩 away）、`cohabit_queue.py:213` 聊天提示、`app.py:845` 注释、

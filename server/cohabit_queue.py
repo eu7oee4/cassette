@@ -212,8 +212,6 @@ def chat_move_hint(char_id: Optional[str]) -> str:
     loc = world.location_of(cid)
     if loc == world.AWAY:
         where = "出门在外"
-    elif loc == world.HALLWAY:
-        where = "走廊"
     else:
         where = world.room(loc).get("name", loc)
     rooms = "、".join(f"{rid}={r.get('name', rid)}"

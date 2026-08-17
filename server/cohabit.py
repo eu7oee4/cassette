@@ -82,13 +82,11 @@ def _render_event(ev: dict, self_id: str) -> str:
 
 
 def _where_block(cid: str, ev_limit: int = 80) -> str:
-    """「你在哪 + 这里有谁 + 地点状态 + 你在场看到的」。走廊/出门也如实说——
-    那两处不是房间，没有事件流，能做的只有 move 和 phone。"""
+    """「你在哪 + 这里有谁 + 地点状态 + 你在场看到的」。出门也如实说——
+    away 不是房间，没有事件流，能做的只有 move 和 phone。"""
     loc = world.location_of(cid)
     if loc == world.AWAY:
         return "【你在哪】你出门在外，不在房子里。房子里的事你看不见；手机随时可用。"
-    if loc == world.HALLWAY:
-        return "【你在哪】你站在走廊里，不在任何房间。想进哪个房间就 MOVE 过去。"
     r = world.room(loc)
     busy = coding_char()
     others = []
@@ -361,8 +359,8 @@ def do_cohabit_wake(cid: str, reasons: list[dict], _chain_no: int = 1,
         entry = {"ts": now_ts, "time": pipeline.now_str(), "source": "wake",
                  "action": "act", "trigger": trigger, "thoughts": p["thoughts"],
                  "room": loc, **move_log}
-        if loc in (world.AWAY, world.HALLWAY):
-            # 结构上到不了这儿的才怪：模型在走廊硬要 act。不落事件，如实记日志。
+        if loc == world.AWAY:
+            # 结构上到不了这儿的才怪：模型人在外面硬要 act。不落事件，如实记日志。
             logerr(f"cohabit：{cid} 在 {loc} 试图 act，无房间可写，丢弃")
             entry["action"] = "none"
             entry["note"] = "act_no_room"

@@ -17,8 +17,9 @@
                                  / speech（对话）。
 
 实体 = 用户（固定 id "user"）+ 全部注册角色（characters.ids()）。位置取值 =
-房间 id | "hallway"（在楼里但不在任何房间，用户点「离开」落这儿）| "away"（出门，
-数据层第一天就成立：away 的人房间事件与他无关，只剩手机可用）。
+房间 id | "away"（出门，数据层第一天就成立：away 的人房间事件与他无关，只剩手机
+可用）。曾有过 "hallway"（在楼里但不在任何房间）——UI 侧 2026-08-16 已移除、
+数据层 2026-08-17 摘干净：大家都是瞬移走的，两个房间之间没有「路上」。
 
 可见性口径（C1 注入按这个来）：visible_events = 自己本次在场区间内的该房间事件。
 离场期间的事件永远看不见——看得见牛奶，不知道谁放的。偷看（全部历史）是用户的
@@ -43,7 +44,6 @@ import state_store
 
 USER_ID = "user"
 AWAY = "away"
-HALLWAY = "hallway"
 
 ROOMS_DIR = state_store.STATE_DIR / "rooms"
 REGISTRY_PATH = ROOMS_DIR / "registry.json"
@@ -137,12 +137,12 @@ def ensure_world() -> None:
 
 
 def _default_location(entity: str, reg: dict) -> str:
-    """没记录过位置的实体：有自己卧室就在卧室，没有就在走廊（后注册的角色先站走廊，
-    别凭空塞进谁的房间）。"""
+    """没记录过位置的实体：有自己卧室就在卧室，没有就先站客厅（走廊摘除后
+    公共空间是唯一不凭空塞进谁房间的落点）。"""
     for rid, r in reg.items():
         if r.get("type") == "bedroom" and r.get("owner") == entity:
             return rid
-    return HALLWAY
+    return "living_room"
 
 
 # ---------- 位置（world.json 是唯一权威）----------
@@ -295,7 +295,7 @@ def can_enter(entity: str, room_id: str) -> tuple[bool, str]:
 def move(entity: str, to: str, carry: Optional[str] = None) -> dict:
     """瞬移（不考虑空间路径），但过门禁。返回结果 dict，**门锁着不是异常是结局**：
     {"ok": False, "reason": "locked", "text": 给补醒注入用的一句话}。
-    成功时旧房间落 leave、新房间落 enter（hallway/away 不是房间，没有事件流）。
+    成功时旧房间落 leave、新房间落 enter（away 不是房间，没有事件流）。
 
     carry＝抱着谁一起走：被抱者必须与移动者同处一室（不同室 ValueError——上层该先
     验，这里失手就有声报错）；门禁按**移动者**判（开门的是他，被抱的跟着进）；
@@ -311,7 +311,7 @@ def move(entity: str, to: str, carry: Optional[str] = None) -> dict:
                 raise ValueError(f"{entity_name(carry)} 不在你身边，抱不着")
         if to == frm:
             return {"ok": True, "from": frm, "to": to, "noop": True}
-        if to not in (AWAY, HALLWAY):
+        if to != AWAY:
             r = room(to)   # 不认识的房间 → KeyError，调用方处理
             ok, reason = can_enter(entity, to)
             if not ok:

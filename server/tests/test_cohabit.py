@@ -198,11 +198,7 @@ class TestPrompt(CohabitBase):
         finally:
             pipeline.ombre_alive = orig_alive
 
-    def test_hallway_and_away(self):
-        world.move(self.cid, world.HALLWAY)
-        p = cohabit.cohabit_prompt(self.cid, [{"kind": "solo", "text": "x"}],
-                                   state_store.load_settings(self.cid))
-        self.assertIn("走廊", p)
+    def test_away(self):
         world.move(self.cid, world.AWAY)
         p = cohabit.cohabit_prompt(self.cid, [{"kind": "solo", "text": "x"}],
                                    state_store.load_settings(self.cid))
@@ -358,8 +354,8 @@ class TestExecute(CohabitBase):
         sched = state_store.read_schedule(self.cid)
         self.assertAlmostEqual(sched["next_wake_at"], before + 90 * 60, delta=5)
 
-    def test_act_in_hallway_is_logged_not_written(self):
-        world.move(self.cid, world.HALLWAY)
+    def test_act_while_away_is_logged_not_written(self):
+        world.move(self.cid, world.AWAY)
         r = self.wake_once(out("act", say="喊给谁听呢"))
         entry = self.log_entries()[-1]
         self.assertEqual((entry["action"], entry["note"]), ("none", "act_no_room"))

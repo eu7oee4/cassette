@@ -9,7 +9,7 @@ struct WorldSnapshot: Decodable {
     let entities: [String: WorldEntity]
     let carry_offer: CarryOffer?      // 有人想抱你去别的房间（答应了才会一起移动）
 
-    /// 在某个位置的实体 id（房间 id / "hallway" / "away"），顺序稳定（user 在前）。
+    /// 在某个位置的实体 id（房间 id / "away"），顺序稳定（user 在前）。
     func ids(at location: String) -> [String] {
         entities.filter { $0.value.location == location }.map(\.key)
             .sorted { a, _ in a == "user" }

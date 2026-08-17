@@ -843,7 +843,7 @@ class RoomStateIn(BaseModel):
 
 
 class MoveIn(BaseModel):
-    to: str             # 房间 id | "hallway"（离开按钮）| "away"（出门开关）
+    to: str             # 房间 id | "away"（出门开关）；走廊已摘除，不认识的一律 404
 
 
 class PauseIn(BaseModel):

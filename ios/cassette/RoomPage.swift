@@ -2,7 +2,7 @@ import SwiftUI
 
 /// 房间视图（PLAN_cohabit C3）。两种打开方式：
 /// - 去这里（peek=false）：真实在场——事件流 = 本次在场区间（scope=visible），
-///   底部输入区与 AI 的 act 对称（*动作* + 说话，可一空），显式「离开」按钮（回走廊）。
+///   底部输入区与 AI 的 act 对称（*动作* + 说话，可一空）；返回只收页面、人留原地。
 /// - 偷看一眼（peek=true）：玩家的上帝视角——全部历史（scope=all）、只读、不产生事件。
 struct RoomPage: View {
     let roomID: String

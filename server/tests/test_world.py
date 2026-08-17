@@ -107,7 +107,7 @@ class TestMove(WorldBase):
         world.move(self.c1, "living_room")
         self.assertTrue(world.move(self.c1, self.c1_room)["ok"])
 
-    def test_away_and_hallway(self):
+    def test_away(self):
         r = world.move(world.USER_ID, world.AWAY)
         self.assertTrue(r["ok"])
         self.assertEqual(world.location_of(world.USER_ID), world.AWAY)
@@ -116,9 +116,18 @@ class TestMove(WorldBase):
         # 回家：从 away 直接进房间，正常过门禁、落 enter
         self.assertTrue(world.move(world.USER_ID, "living_room")["ok"])
         self.assertEqual(world.read_events("living_room")[-1]["kind"], "enter")
-        # hallway：在楼里但不在任何房间
-        self.assertTrue(world.move(world.USER_ID, world.HALLWAY)["ok"])
-        self.assertEqual(world.location_of(world.USER_ID), world.HALLWAY)
+        # 走廊已摘除（2026-08-17）：当成普通的不认识的房间
+        with self.assertRaises(KeyError):
+            world.move(world.USER_ID, "hallway")
+
+    def test_no_bedroom_defaults_to_living_room(self):
+        # 没有自己卧室的实体（比如注册表被手编掉了卧室）：默认落客厅，不站走廊
+        reg = world.load_registry()
+        del reg[self.c1_room]
+        world._write_json(world.REGISTRY_PATH, reg)
+        world.WORLD_PATH.unlink()          # 清位置记录，逼出默认值
+        world.ensure_world()
+        self.assertEqual(world.location_of(self.c1), "living_room")
 
     def test_move_unknown_room(self):
         with self.assertRaises(KeyError):
