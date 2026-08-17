@@ -58,6 +58,16 @@ class QueueBase(CohabitBase):
             cq._gate_hit.clear()
             cq._defer_hit.clear()
         cq._signal.clear()
+        # 钩子末尾会转发给 pet_queue：它的内存态一并清，别让上个用例的计时漏过来
+        import pet_queue as pq
+        with pq._lock:
+            pq._pending.clear()
+            pq._chain.clear()
+            pq._last_wake.clear()
+            pq._need_last.clear()
+            pq._cooldown.clear()
+        pq._signal.clear()
+        pq._initiator["id"] = None
         cq._paused["on"] = False
         # 探测缓存必须一并清：5 秒 TTL 会把上一个测试的 owner 带进下一个测试
         cq._code_cache.update(ts=0.0, owner=None)
@@ -128,6 +138,31 @@ class TestEventWake(QueueBase):
         # 猫当作者（引擎代它落事件）同样只唤别人
         world.append_event("living_room", "action", pid, "打了个滚")
         self.assertNotIn(pid, cq._pending)
+
+    def test_cat_event_gates_for_chars(self):
+        # 猫的动静唤人（PLAN_pet P2）：概率通过时唤、连发不重置、发起者排除、概率闸
+        import pet_queue as pq
+        pid = self.register_pet()
+        world.move(pid, "living_room")
+        for cid in self.chars:
+            world.move(cid, "living_room")
+        self._reset_queue()
+        cq._syswake_run[self.chars[0]] = 2
+        world.append_event("living_room", "action", pid, "撞倒了花瓶")
+        self.assertIn(self.chars[0], cq._pending)             # random=0.0 概率必中
+        self.assertEqual(cq._syswake_run[self.chars[0]], 2)   # 猫不是外部输入，不重置
+        # 发起者排除：他刚用工具逗的猫，反应已在工具结果里同轮拿到
+        self._reset_queue()
+        with pq.interaction_guard(self.chars[0]):
+            world.append_event("living_room", "action", pid, "蹭了蹭他的手")
+        self.assertNotIn(self.chars[0], cq._pending)
+        if len(self.chars) > 1:
+            self.assertIn(self.chars[1], cq._pending)         # 别的在场者照常
+        # 概率闸：拉高随机数 → 全被摁住
+        self._reset_queue()
+        cq.random.random = lambda: 0.9
+        world.append_event("living_room", "action", pid, "翻了个身")
+        self.assertFalse(set(cq._pending) & set(self.chars))
 
     def test_move_events_wake_both_rooms(self):
         # c1 和 cass 各在自己房间；c1 去 cass 的房间 → enter 事件唤 cass；

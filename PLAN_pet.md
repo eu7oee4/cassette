@@ -128,8 +128,15 @@
   引擎面 interact()/wake()/enforce() 建好未接线——触发是 P2、工具是 P3。
   **迁移脚本未执行**：等 P2/P3 齐了上电时跑（先搬=屋里出现一只没脑子的猫，
   且 mianmian 侧还活着会状态分裂）。测试 115 全绿（新增 13）。
-- **P2 触发与闸**：猫 worker（独立线程）、三路触发、发起者排除、猫连发上限、
-  char 侧猫事件概率降权、猫事件不重置 char 连发。
+- **P2 触发与闸** ✅（2026-08-17）：`pet_queue.py`——猫 worker（app lifespan 起独立
+  daemon，没宠物空转，注册+重启即上线）；事件概率醒（作者排除+PET_EVENT_PROB=0.25+
+  间隔 180s+连发 N=3，interact=外部输入清零，需求/溜达=自主醒反清零同 solo 口径）；
+  需求 tick（60s：enforce 硬地板先行且不叠模型醒、同类需求 30 分钟不重复催、
+  没需求 IDLE_PROB=0.02 溜达）；错误冷却 10 分钟。char 侧三道门在
+  cohabit_queue._on_room_event：猫动静唤 char 概率 PET_TO_CHAR_PROB=0.5、
+  **发起者排除**（interaction_guard：工具结果已同轮给过反应）、连发不重置
+  （external_input 只有用户路由调，结构性成立）。引擎级 _ENGINE_LOCK 串行
+  interact/tick。测试 125 全绿（新增 10）。
 - **P3 照料入口**：pet MCP 四工具 + 工具菜单说明；用户侧 RoomPage 按钮组。
 - **P4 iOS 渲染**：sprite 管线搬运（美术是 mianmian 私产 → gitignore 实例数据）；
   HousePage/RoomPage 里团团的展示与走动；聊天页 overlay 要不要保留待议

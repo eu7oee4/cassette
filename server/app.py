@@ -56,6 +56,7 @@ import game_bridge
 import mail_bridge
 import offers
 import ombre_rest
+import pet_queue
 import pets
 import plugins
 import pipeline
@@ -161,6 +162,9 @@ async def _lifespan(_app: FastAPI):
         cohabit_queue.install()
         threading.Thread(target=cohabit_queue.worker_loop, daemon=True,
                          name="cohabit-worker").start()
+        # 猫 worker（PLAN_pet P2）：没注册宠物时空转极便宜——注册团团+重启即上线。
+        threading.Thread(target=pet_queue.worker_loop, daemon=True,
+                         name="pet-worker").start()
     tasks = []
     if config.PROACTIVE_ENABLED:
         tasks.append(asyncio.create_task(wake.scheduler_loop()))

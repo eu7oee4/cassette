@@ -35,6 +35,7 @@ import characters
 import cohabit
 import config
 import offers
+import pet_queue
 import pets
 import pipeline
 import state_store
@@ -170,13 +171,25 @@ def _on_room_event(room_id: str, ev: dict) -> None:
     except KeyError:
         return
     reason = {"kind": "event", "text": _reason_text(room_name, ev)}
-    # 作者排除 + 用户不是 AI + 宠物不走这条线（猫怎么被吵醒是 P1 猫引擎自己的触发，
-    # 这个队列起的是 claude -p，把猫入队会在 characters.resolve 处炸）。
+    # 作者排除 + 用户不是 AI + 宠物不走这条线（猫的醒来在 pet_queue，这个队列起的是
+    # claude -p，把猫入队会在 characters.resolve 处炸）。
     targets = [e for e in world.occupants(room_id)
                if e != actor and e != world.USER_ID and not pets.is_pet(e)]
     random.shuffle(targets)   # 谁先接话随机：occupants 按注册序出，不洗的话 default 永远抢首
+    pet_actor = pets.is_pet(actor)
     for e in targets:
+        if pet_actor:
+            # 猫的动静唤人（PLAN_pet P2）：①发起者排除——他刚用工具逗的猫，反应已在
+            # 工具结果里同轮拿到，事件再唤他就是自唤醒回环；②概率降权——猫翻个身
+            # 不值得每次都烧一次 claude -p。连发计数照常不重置（external_input 只有
+            # 用户路由会调，猫够不着，结构性成立）。
+            if e == pet_queue.initiator():
+                continue
+            if random.random() >= pet_queue.PET_TO_CHAR_PROB:
+                continue
         enqueue(e, reason, system=True)
+    # 猫这边的事件响应（概率+间隔+连发闸全在 pet_queue；世界锁内只入队不调引擎）
+    pet_queue.on_room_event(room_id, ev)
 
 
 def install() -> None:

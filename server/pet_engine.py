@@ -22,6 +22,7 @@ wake.WAKE_EXEC_LOCK——那是 claude -p 的锁，DeepSeek ~3.5s 一次，不�
 import json
 import os
 import re
+import threading
 import urllib.request
 from typing import Optional
 
@@ -29,6 +30,10 @@ import pets
 import pet_store
 import world
 from notify import logerr
+
+# interact（工具线程）与 tick（pet worker）可能同时摸猫：引擎级串行，
+# 免得两次模型调用交错着改同一份状态。猫只有一只，全局锁足够。
+_ENGINE_LOCK = threading.Lock()
 
 PETLOG_INJECT_N = 20     # 注入 petlog 条数（口径同 mianmian）
 ROOM_EVENTS_N = 12       # 注入当前房间可见事件条数
@@ -293,6 +298,7 @@ def interact(pid: str, actor: str, feed: Optional[str] = None,
     """直接互动（投喂三选一 / 自由文本撸猫），**要求 actor 与猫同地点**。
     工具替 actor 落房间事件（别在 MOTION 里重复——工具说明的口径）；
     猫必醒（睡着也把互动喂给模型，装不装死它自己决定）。"""
+    import pet_queue   # 函数内断环：pet_queue 顶层 import 本模块
     pid = pets.match(pid) or pid
     if not pets.is_pet(pid):
         raise KeyError(f"没有这只宠物：{pid}")
@@ -302,35 +308,43 @@ def interact(pid: str, actor: str, feed: Optional[str] = None,
     if feed is None and not (text or "").strip():
         raise ValueError("投喂或互动至少写一样")
 
-    pname, aname = world.entity_name(pid), world.entity_name(actor)
-    trigger = []
-    if feed:
-        world.append_event(loc, "system", actor, f"{aname} 给{pname}喂了{feed}",
-                           kind="pet_feed")
-        pet_store.append_petlog(pid, actor, "feed", f"{aname} 给{pname}喂了{feed}")
-        trigger.append(f"{aname} 给你喂了{feed}")
-    if (text or "").strip():
-        text = text.strip()
-        try:
-            world.act(actor, loc, action=text)   # actor 的动作事件：在场的人都看得见
-        except Exception as e:
-            logerr(f"pet_engine 互动动作没落上（忽略）: {e}")
-        pet_store.append_petlog(pid, actor, "interact", f"{aname} {text}")
-        trigger.append(f"{aname} {text}")
+    with _ENGINE_LOCK:
+        pet_queue.external_for_pet(pid)   # 被直接互动 = 猫的外部输入，连发清零
+        pname, aname = world.entity_name(pid), world.entity_name(actor)
+        trigger = []
+        if feed:
+            world.append_event(loc, "system", actor, f"{aname} 给{pname}喂了{feed}",
+                               kind="pet_feed")
+            pet_store.append_petlog(pid, actor, "feed", f"{aname} 给{pname}喂了{feed}")
+            trigger.append(f"{aname} 给你喂了{feed}")
+        if (text or "").strip():
+            text = text.strip()
+            try:
+                world.act(actor, loc, action=text)   # actor 的动作事件：在场的人都看得见
+            except Exception as e:
+                logerr(f"pet_engine 互动动作没落上（忽略）: {e}")
+            pet_store.append_petlog(pid, actor, "interact", f"{aname} {text}")
+            trigger.append(f"{aname} {text}")
 
-    out = _parse(_call_model(pid, _build_prompt(pid, pet_store.read_state(pid), trigger)))
-    res = _apply(pid, out)
-    if feed:
-        # 吃了东西 → 憋屎加速（确定性，不管模型给没给数值——生存性行为不靠模型自觉）
-        res["state"] = pet_store.apply_interaction(pid, poop_add=pet_store.POOP_MEAL_BOOST)
-    return res
+        out = _parse(_call_model(pid, _build_prompt(pid, pet_store.read_state(pid),
+                                                    trigger)))
+        # 反应事件落地期间挂发起者护栏：他在工具结果里同轮拿到反应，事件不再唤他
+        with pet_queue.interaction_guard(actor):
+            res = _apply(pid, out)
+        if feed:
+            # 吃了东西 → 憋屎加速（确定性，不管模型给没给数值）
+            res["state"] = pet_store.apply_interaction(
+                pid, poop_add=pet_store.POOP_MEAL_BOOST)
+        return res
 
 
 def wake(pid: str, reasons: list[str]) -> dict:
     """猫的迷你醒来（P2 的 tick/事件触发调）：注入同 interact，只是触发原因不同。"""
     pid = pets.match(pid) or pid
-    out = _parse(_call_model(pid, _build_prompt(pid, pet_store.read_state(pid), reasons)))
-    return _apply(pid, out)
+    with _ENGINE_LOCK:
+        out = _parse(_call_model(pid, _build_prompt(pid, pet_store.read_state(pid),
+                                                    reasons)))
+        return _apply(pid, out)
 
 
 def enforce(pid: str) -> Optional[str]:
@@ -338,6 +352,11 @@ def enforce(pid: str) -> Optional[str]:
     猫粮；憋过 POOP_FORCE_AT 且砂盆没满 → 强制解决。返回干了什么（None=没干预）。
     动作走真实物理（move 落进出事件、act 落动作事件）——强制的是行为不是数值。"""
     pid = pets.match(pid) or pid
+    with _ENGINE_LOCK:
+        return _enforce_locked(pid)
+
+
+def _enforce_locked(pid: str) -> Optional[str]:
     s = pet_store.read_state(pid)
     home = _cat_room(pid)
     if home is None:
