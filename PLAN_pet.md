@@ -148,7 +148,14 @@
 - **P4 iOS 渲染**：sprite 管线搬运（美术是 mianmian 私产 → gitignore 实例数据）；
   HousePage/RoomPage 里团团的展示与走动；聊天页 overlay 要不要保留待议
   （cassette 聊天已是悬浮层，overlay 叠 overlay 的形态待真机看）。
-- **P5 搬家收尾（mianmian 仓的活，单独尾巴）**：poke 标记/聊天 overlay/pet MCP 挂载退役。
+- **⚡ 上电（2026-08-17 17:43）**：迁移脚本已执行（33 天 / petlog 600 条 / DEEPSEEK 键
+  入 .env）、后端已重启、pet worker 在跑；团团落在猫房，needs 立刻识别出
+  thirsty/sleepy/poop（mianmian 侧到搬家时刻的真实衰减）。
+- **P4 iOS 渲染（后补，机主拍板先上电）**：sprite 管线搬运 + HousePage/RoomPage 猫展示。
+- **P5 搬家收尾（mianmian 仓的活，单独尾巴）**：poke 标记/聊天 overlay/pet MCP
+  挂载退役。紧迫性已降级（2026-08-17 查实 :8765 本来就停着，petlog 停在 08-15，
+  搬走的就是最终状态、无双跑）；口径=**哪天要再启 mianmian 后端之前先做 P5**，
+  否则旧快照会复活一只平行团团。
 
 ## 待议
 
