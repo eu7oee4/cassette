@@ -295,8 +295,10 @@ struct RoomPage: View {
                     .frame(maxWidth: .infinity)
             }
         case "action":
-            Text("*\(ev.text)*").italic()
-                .font(.footnote).foregroundStyle(idc)
+            // 识别色名字 + 灰字动作（试过整句上识别色，2026-08-17 改回：名字留着更好认）
+            (Text("\(actorName(ev.actor)) ").bold().foregroundStyle(idc)
+             + Text("*\(ev.text)*").italic().foregroundStyle(Color.house.textSecondary))
+                .font(.footnote)
                 // frame 只管整块靠哪边；折行后行内对齐要单独说，不然第二行起全回左边
                 .multilineTextAlignment(mine ? .trailing : .leading)
                 .frame(maxWidth: .infinity, alignment: mine ? .trailing : .leading)
