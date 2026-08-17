@@ -101,14 +101,22 @@ def code_session_closed() -> None:
 
 
 # ---------- 入队与闸 ----------
-def enqueue(cid: str, reason: dict, system: bool = True) -> bool:
+def enqueue(cid: str, reason: dict, system: bool = True, force: bool = False) -> bool:
     """入队一个醒来原因。system=True 的（事件/move 补醒）过连发上限和错误冷却；
-    自主醒来（solo/scheduled）传 False——它归预算管，闸在 _solo_check 里。"""
+    自主醒来（solo/scheduled）传 False——它归预算管，闸在 _solo_check 里。
+
+    force=True：机主手点的导演口（/world/nudge）——冷却拦的是「模型一直挂、事件流
+    每条都硬起一次注定失败的子进程」，人手动点的一次是明确指令，值得再试一次
+    （2026-08-17：三次点名全被冷却静默吞掉，机主那头只看到弹窗关了）。
+    force 不只是绕过，是**把这条冷却解除**：不然这轮醒来里的 MOVE 补醒会被同一条
+    冷却拦掉，人瞬移过去就哑了。再失败的话 _drain 会重新压 30 分钟，自愈。"""
     if not config.COHABIT_ENABLED:
         return False
     if system:
         # 错误冷却：模型持续失败时别对着事件流每条都硬起一次注定失败的子进程。
-        if time.time() < float(state_store.read_schedule(cid).get("cooldown_until") or 0):
+        if force:
+            _clear_cooldown(cid)
+        elif time.time() < float(state_store.read_schedule(cid).get("cooldown_until") or 0):
             return False
         with _lock:
             if _syswake_run.get(cid, 0) >= config.COHABIT_CHAIN_N:
@@ -123,6 +131,16 @@ def enqueue(cid: str, reason: dict, system: bool = True) -> bool:
             _push(cid, reason)
     _signal.set()
     return True
+
+
+def _clear_cooldown(cid: str) -> None:
+    """抹掉错误冷却（只有机主点名走这条）。没冷却就什么都不写。"""
+    with state_store.SCHEDULE_LOCK:
+        sched = state_store.read_schedule(cid)
+        if sched.get("cooldown_until"):
+            logerr(f"cohabit：机主点名，解除 {cid} 的错误冷却")
+            sched.pop("cooldown_until", None)
+            state_store.write_schedule(sched, cid)
 
 
 def _push(cid: str, reason: dict) -> None:

@@ -938,8 +938,10 @@ def post_world_nudge(body: NudgeIn,
                             detail=f"不认识的角色：{'、'.join(bad) or '（没点名）'}")
     # 机主的刺激 = 新外部输入：连发计数清零，别让刚聊热的场面把这次点名拦在上限外。
     cohabit_queue.external_input()
+    # force=True：错误冷却是给自动触发设的闸，机主手点的一次不该被它静默吞掉
+    # （连带解除冷却，见 cohabit_queue.enqueue）。
     queued = [t for t in targets
-              if cohabit_queue.enqueue(t, {"kind": "event", "text": text})]
+              if cohabit_queue.enqueue(t, {"kind": "event", "text": text}, force=True)]
     return {"queued": queued}
 
 
