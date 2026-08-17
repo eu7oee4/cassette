@@ -282,19 +282,28 @@ struct RoomPage: View {
         let idc = IdentityColor.color(for: ev.actor)
         switch ev.type {
         case "system":
-            Text("—— \(ev.text) ——")
-                .font(.caption2).foregroundStyle(Color.house.textSecondary)
-                .frame(maxWidth: .infinity)
+            if ev.kind == "state" {
+                // 状态改动通知：谁改的靠颜色认（名字剥掉——服务端文本是「名字「一段话」」），
+                // 字号与斜体动作一致
+                Text(Self.stripLeadingName(ev.text))
+                    .font(.footnote).foregroundStyle(idc)
+                    .frame(maxWidth: .infinity)
+            } else {
+                // 进出场等系统叙述：名字是句子的主语，剥不得，保持原样式
+                Text("—— \(ev.text) ——")
+                    .font(.caption2).foregroundStyle(Color.house.textSecondary)
+                    .frame(maxWidth: .infinity)
+            }
         case "action":
-            (Text("\(actorName(ev.actor)) ").bold().foregroundStyle(idc)
-             + Text("*\(ev.text)*").italic().foregroundStyle(Color.house.textSecondary))
-                .font(.footnote)
+            Text("*\(ev.text)*").italic()
+                .font(.footnote).foregroundStyle(idc)
                 .frame(maxWidth: .infinity, alignment: mine ? .trailing : .leading)
-        default:   // speech：气泡底 = 角色识别色（低透明度），谁说的一眼可辨
-            VStack(alignment: mine ? .trailing : .leading, spacing: 3) {
-                (Text(actorName(ev.actor)).foregroundStyle(idc).bold()
-                 + Text(" · \(Self.hhmm(ev.ts))").foregroundStyle(Color.house.textSecondary))
-                    .font(.caption2)
+        default:   // speech：气泡底 = 角色识别色（低透明度），谁说的靠颜色认；时间贴气泡内侧
+            HStack(alignment: .bottom, spacing: 6) {
+                if mine {
+                    Spacer(minLength: 40)
+                    timeLabel(ev.ts)
+                }
                 Text(ev.text)
                     .font(.body)
                     .foregroundStyle(Color.house.textPrimary)
@@ -302,9 +311,30 @@ struct RoomPage: View {
                     .background(RoundedRectangle(cornerRadius: 16).fill(idc.opacity(0.26)))
                     .overlay(RoundedRectangle(cornerRadius: 16)
                         .stroke(idc.opacity(0.35), lineWidth: 1))
+                if !mine {
+                    timeLabel(ev.ts)
+                    Spacer(minLength: 40)
+                }
             }
             .frame(maxWidth: .infinity, alignment: mine ? .trailing : .leading)
         }
+    }
+
+    private func timeLabel(_ ts: Int) -> some View {
+        Text(Self.hhmm(ts))
+            .font(.caption2)
+            .foregroundStyle(Color.house.textSecondary)
+    }
+
+    /// 状态通知的服务端文本剥掉打头的名字：常规是 `名字「一段话」`（从第一个「起保留）；
+    /// remove 无叙事的兜底是 `名字 清掉了「原文」`（「之前有空格 → 从空格后保留，
+    /// 「清掉了」不能丢，丢了读起来像新增）。都对不上就原样返回，别把内容剥没了。
+    private static func stripLeadingName(_ text: String) -> String {
+        guard let q = text.firstIndex(of: "「") else { return text }
+        if let sp = text.firstIndex(of: " "), sp < q {
+            return String(text[text.index(after: sp)...])
+        }
+        return String(text[q...])
     }
 
     private func actorName(_ eid: String) -> String {
