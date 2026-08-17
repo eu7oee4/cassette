@@ -12,6 +12,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 import time
 import urllib.error
 import urllib.request
@@ -412,6 +413,35 @@ def _ombre_mcp_config(char_id: Optional[str] = None) -> Path:
     return path
 
 
+# 宠物照料工具（PLAN_pet P3）：内置不走插件商店——宠物系统是主仓代码，
+# 实例（谁家有猫）才是数据。家里没猫整个 server 不挂：工具在 TA 眼里不存在，
+# 菜单块（needs 过滤）也不会渲染，不会跟他提一只不存在的猫。
+PET_MCP_TOOLS = [f"mcp__pets__{t}"
+                 for t in ("pet_state", "pet_feed", "pet_interact", "pet_scoop")]
+
+
+def _pet_mcp_mounted(char_id: Optional[str] = None) -> bool:
+    import pets
+    return bool(config.COHABIT_ENABLED and pets.ids())
+
+
+def _pet_mcp_config(char_id: Optional[str] = None) -> Path:
+    """渲染 pet MCP 的 mcp-config（口径同 _ombre_mcp_config：按角色分文件）。
+    stdio 用本仓 venv 起 server/pet_mcp.py；env 下发角色身份（同 plugins.mounted
+    的 CASSETTE_CHAR_ID 路），鉴权 key 由子进程从继承环境里读。"""
+    me = (char_id or state_store.DEFAULT_CHAR_ID)
+    path = state_store.char_state_dir(char_id) / "pets.mcp.json"
+    payload = json.dumps({"mcpServers": {"pets": {
+        "type": "stdio", "command": sys.executable,
+        "args": [str(config.BASE_DIR / "pet_mcp.py")],
+        "env": {"CASSETTE_CHAR_ID": me}}}})
+    if not path.exists() or path.read_text("utf-8") != payload:
+        tmp = path.with_name(f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+        tmp.write_text(payload, "utf-8")
+        tmp.replace(path)
+    return path
+
+
 def ombre_alive(char_id: Optional[str] = None) -> bool:
     """快速探活角色的 Ombre /mcp 端点：任何 HTTP 响应都算活（MCP 对裸 GET 回 406 是正常的），
     连不上/超时=死。OMBRE_ENABLED=0 直接当死。结果按 url 缓存 ~30s（角色可各指一个实例，
@@ -504,6 +534,8 @@ def mounted_tool_names(context: str = "chat", char_id: Optional[str] = None) -> 
         names += OMBRE_TOOLS
     _, plug_tools = plugins.mounted(context, char_id)
     names += plug_tools
+    if _pet_mcp_mounted(char_id):
+        names += PET_MCP_TOOLS
     # ToolSearch 也得算进来，条件跟 base_claude_args 一模一样——菜单头那句「用法默认
     # 没加载，先去取」正是按它在不在场决定说不说的。漏了它＝延迟开着却不告诉 TA 要先
     # 取用法，他直接调必失败（静默失效，只能靠肉眼看菜单头才发现）。
@@ -660,6 +692,9 @@ def base_claude_args(persona_file: Optional[Path] = None,
     if plug_cfg:
         mcp_configs.append(plug_cfg)
         tools += plug_tools
+    if _pet_mcp_mounted(char_id):
+        mcp_configs.append(str(_pet_mcp_config(char_id)))
+        tools += PET_MCP_TOOLS
     # 工具延迟：上下文里只留工具名，用法（schema）等 TA 自己按名字取。工具一多，
     # 光 schema 就是大头——实测醒来那条路 52 个工具时 20,076 token，开了延迟 3,509（−83%）。
     # ToolSearch 必须**进白名单**才算数：它是内置工具，而这里的 --tools 是精确白名单，

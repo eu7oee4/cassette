@@ -347,6 +347,24 @@ def wake(pid: str, reasons: list[str]) -> dict:
         return _apply(pid, out)
 
 
+def scoop(pid: str, actor: str) -> dict:
+    """铲屎（P3）：要求 **actor 人在猫房**——盆在那儿；不要求猫在场（铲的是盆不是猫）。
+    落系统事件：猫在场会经事件线概率反应（pet_queue），不用特殊处理。"""
+    pid = pets.match(pid) or pid
+    if not pets.is_pet(pid):
+        raise KeyError(f"没有这只宠物：{pid}")
+    home = _cat_room(pid)
+    if home is None:
+        raise KeyError("没有猫房（注册表里找不到）")
+    if world.location_of(actor) != home:
+        raise PetNotHere("猫砂盆在猫房——人先过去再铲")
+    st = pet_store.scoop(pid)
+    aname = world.entity_name(actor)
+    world.append_event(home, "system", actor, f"{aname} 铲了猫砂盆", kind="pet_scoop")
+    pet_store.append_petlog(pid, actor, "scoop", f"{aname} 铲了猫砂盆")
+    return {"state": st}
+
+
 def enforce(pid: str) -> Optional[str]:
     """生存硬地板（P2 tick 每轮先调，不走模型）：饿过 FORCE_EAT_AT → 强制去猫房吃
     猫粮；憋过 POOP_FORCE_AT 且砂盆没满 → 强制解决。返回干了什么（None=没干预）。

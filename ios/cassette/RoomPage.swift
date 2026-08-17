@@ -22,7 +22,10 @@ struct RoomPage: View {
     @State private var stateDraft = ""                 // add/edit 的草稿
     @State private var stateSheet: StateSheetMode?
     @State private var offerBusy = false               // 邀约应答进行中（防连点）
+    @State private var petCare: PetCareTarget?         // 照顾面板（在场宠物）
     @FocusState private var inputFocused: Bool         // 输入区聚焦（收键盘/自动触底用）
+
+    struct PetCareTarget: Identifiable { let id: String }
 
     private let service = ChatService()
 
@@ -70,6 +73,11 @@ struct RoomPage: View {
             }
         }
         .sheet(item: $stateSheet) { mode in stateEditor(mode) }
+        .sheet(item: $petCare) { target in
+            PetCareSheet(petID: target.id,
+                         canScoop: detail?.owner == target.id)   // 猫砂盆只在猫房
+                .presentationDetents([.medium, .large])
+        }
         .task(id: scenePhase) {
             guard scenePhase == .active else { return }
             await refresh()
@@ -178,6 +186,16 @@ struct RoomPage: View {
                     Text(d.occupants.isEmpty ? "现在没人" : "")
                         .font(.caption).foregroundStyle(Color.house.textSecondary)
                     Spacer()
+                    // 照顾入口：宠物在场且我也在场才摸得着（偷看是上帝视角，摸不着猫）
+                    if !peek, present, let pet = d.pets?.first {
+                        Button { petCare = PetCareTarget(id: pet) } label: {
+                            Image(systemName: "pawprint.fill")
+                                .font(.system(size: 15))
+                                .foregroundStyle(Color.house.accent)
+                                .frame(width: 30, height: 30)
+                                .background(Circle().fill(Color.house.surface))
+                        }
+                    }
                 }
                 // 正在电脑前的人：状态一行灰字（数据从 /world 来，轮询便宜起见这里
                 // 不重复拉——房卡/会话列表已有；进了屋能感知的是「他就在这、很专注」）。
@@ -533,6 +551,178 @@ struct HouseTypingDots: View {
             }
         }
         .onAppear { on = true }
+    }
+}
+
+/// 照顾面板（PLAN_pet P3）：状态四条 + 砂盆 + 需求 ｜ 喂三选一 ｜ 自由互动 ｜ 铲屎。
+/// 与 pet MCP 打同一套 /pets/* 端点；猫的动作/喵声照常落事件流，这里只展示同轮反应。
+struct PetCareSheet: View {
+    let petID: String
+    let canScoop: Bool        // 只有猫房（owner==pet）才有猫砂盆
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var info: PetInfo?
+    @State private var reply = ""          // 猫的最近一次反应（同轮返回）
+    @State private var interactText = ""
+    @State private var busy = false
+    @State private var errorText: String?
+
+    private let service = ChatService()
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 14) {
+                    if let i = info {
+                        statHeader(i)
+                        statBars(i.state)
+                        if !i.needs.isEmpty { needsBlock(i.needs) }
+                        if !reply.isEmpty { replyBubble }
+                        feedRow
+                        interactRow
+                        if canScoop { scoopRow(i.state) }
+                    } else {
+                        ProgressView().frame(maxWidth: .infinity).padding(.top, 40)
+                    }
+                }
+                .padding(16)
+            }
+            .background(Color.house.bg)
+            .navigationTitle(info?.name ?? "")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("收起") { dismiss() }
+                }
+            }
+            .alert("没成", isPresented: Binding(
+                get: { errorText != nil }, set: { if !$0 { errorText = nil } })) {
+                Button("好", role: .cancel) {}
+            } message: { Text(errorText ?? "") }
+            .task { info = try? await service.petInfo(petID) }
+        }
+    }
+
+    private func refresh() async { info = try? await service.petInfo(petID) }
+
+    private func run(_ op: @escaping () async throws -> Void) {
+        busy = true
+        Task {
+            defer { busy = false }
+            do { try await op(); await refresh() }
+            catch { errorText = error.localizedDescription; await refresh() }
+        }
+    }
+
+    // MARK: 展示
+
+    private func statHeader(_ i: PetInfo) -> some View {
+        HStack(spacing: 8) {
+            Text("第 \(i.state.day) 天")
+                .font(.caption).foregroundStyle(Color.house.textSecondary)
+            if i.state.asleep {
+                Text("睡着了 💤").font(.caption).foregroundStyle(Color.house.textSecondary)
+            }
+            Spacer()
+            Text("猫砂盆：\(i.state.litterLabel)")
+                .font(.caption)
+                .foregroundStyle(i.state.litter >= 3 ? Color.red : Color.house.textSecondary)
+        }
+    }
+
+    private func statBars(_ s: PetStats) -> some View {
+        VStack(spacing: 8) {
+            statBar("饱腹", s.satiety)
+            statBar("水分", s.hydration)
+            statBar("精力", s.energy)
+            statBar("心情", s.mood)
+        }
+        .padding(12)
+        .background(RoundedRectangle(cornerRadius: 14).fill(Color.house.surface))
+    }
+
+    private func statBar(_ label: String, _ v: Int) -> some View {
+        HStack(spacing: 10) {
+            Text(label).font(.caption).foregroundStyle(Color.house.textSecondary)
+                .frame(width: 34, alignment: .leading)
+            ProgressView(value: Double(v), total: 100)
+                .tint(v < 35 ? Color.red.opacity(0.7) : Color.house.accent)
+            Text("\(v)").font(.caption2.monospacedDigit())
+                .foregroundStyle(Color.house.textSecondary)
+                .frame(width: 28, alignment: .trailing)
+        }
+    }
+
+    private func needsBlock(_ needs: [PetNeed]) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            ForEach(needs) { n in
+                Text("· \(n.text)")
+                    .font(.caption).foregroundStyle(Color.house.textPrimary)
+            }
+        }
+    }
+
+    private var replyBubble: some View {
+        Text(reply)
+            .font(.footnote.italic())
+            .foregroundStyle(Color.house.textPrimary)
+            .padding(10)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(RoundedRectangle(cornerRadius: 12)
+                .fill(Color.house.accent.opacity(0.15)))
+    }
+
+    // MARK: 动作
+
+    private var feedRow: some View {
+        HStack(spacing: 10) {
+            ForEach(["罐罐", "猫条", "冻干"], id: \.self) { food in
+                Button(food) {
+                    run { reply = try await service.petInteract(petID, feed: food).reply }
+                }
+                .font(.footnote.bold())
+                .padding(.horizontal, 14).padding(.vertical, 8)
+                .background(Capsule().fill(Color.house.surface))
+                .foregroundStyle(Color.house.textPrimary)
+            }
+            Spacer()
+        }
+        .disabled(busy)
+    }
+
+    private var interactRow: some View {
+        HStack(spacing: 8) {
+            TextField("摸摸它 / 逗逗它，一句话…", text: $interactText)
+                .textFieldStyle(.plain)
+                .padding(.horizontal, 12).padding(.vertical, 8)
+                .background(RoundedRectangle(cornerRadius: 12).fill(Color.house.surfaceHi))
+            Button {
+                let t = interactText.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !t.isEmpty else { return }
+                run {
+                    reply = try await service.petInteract(petID, text: t).reply
+                    interactText = ""
+                }
+            } label: {
+                Image(systemName: "hand.wave.fill")
+                    .foregroundStyle(busy ? Color.house.textSecondary : Color.house.accent)
+            }
+            .disabled(busy)
+        }
+    }
+
+    private func scoopRow(_ s: PetStats) -> some View {
+        Button {
+            run { try await service.petScoop(petID) }
+        } label: {
+            Label(s.litter > 1 ? "铲屎（该铲了）" : "铲屎",
+                  systemImage: "trash.fill")
+                .font(.footnote.bold())
+                .frame(maxWidth: .infinity).padding(.vertical, 10)
+                .background(RoundedRectangle(cornerRadius: 12).fill(Color.house.surface))
+                .foregroundStyle(s.litter > 1 ? Color.red : Color.house.textSecondary)
+        }
+        .disabled(busy)
     }
 }
 

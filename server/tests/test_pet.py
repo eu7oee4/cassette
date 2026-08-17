@@ -15,6 +15,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import config
 import pet_engine
 import pet_store
 import world
@@ -169,6 +170,92 @@ class TestWakeMovePose(PetBase):
         self.assertIn("你饿了", self.prompts[-1])
         self.assertNotIn("这句话猫不该知道", self.prompts[-1])
         self.assertIn("你说不出人话", self.prompts[-1])     # 协议无说话字段的纪律在场
+
+
+class TestScoop(PetBase):
+    def test_scoop_requires_actor_in_cat_room(self):
+        self.force_state(litter=3)
+        with self.assertRaises(pet_engine.PetNotHere):   # c1 在自己房间
+            pet_engine.scoop(self.pid, self.c1)
+        world.move(self.c1, self.cat_room)
+        r = pet_engine.scoop(self.pid, self.c1)
+        self.assertEqual(r["state"]["litter"], 1)
+        ev = world.read_events(self.cat_room)[-1]
+        self.assertEqual(ev.get("kind"), "pet_scoop")
+        self.assertIn("铲了猫砂盆", ev["text"])
+
+    def test_scoop_does_not_need_cat_present(self):
+        world.move(self.pid, "living_room")              # 猫不在，盆还在
+        world.move(self.c1, self.cat_room)
+        self.assertEqual(pet_engine.scoop(self.pid, self.c1)["state"]["litter"], 1)
+
+
+class TestRoutesP3(PetBase):
+    """/pets/* 路由：UI 和 pet MCP 共用的那套（TestClient 不跑 lifespan，无 worker）。"""
+
+    @classmethod
+    def setUpClass(cls):
+        from fastapi.testclient import TestClient
+        import app as app_module
+        cls.client = TestClient(app_module.app)
+        cls.h = {"X-Auth": config.AUTH_KEY}
+
+    def test_state_dash_alias_and_presence(self):
+        r = self.client.get("/pets/-", headers=self.h).json()
+        self.assertEqual((r["id"], r["name"]), (self.pid, "团团"))
+        self.assertEqual(r["location"], self.cat_room)
+        self.assertEqual(self.client.get("/pets/nope", headers=self.h).status_code, 404)
+        # 角色查看要求同地点（用户是玩家面，不带 actor 随时可看）
+        r = self.client.get(f"/pets/-?actor={self.c1}", headers=self.h)
+        self.assertEqual(r.status_code, 409)
+        world.move(self.c1, self.cat_room)
+        self.assertEqual(self.client.get(f"/pets/-?actor={self.c1}",
+                                         headers=self.h).status_code, 200)
+
+    def test_interact_route(self):
+        world.move("user", self.cat_room)
+        self.replies = [{"reply": "*翻了个身* 喵", "log": "被喂了"}]
+        r = self.client.post("/pets/-/interact", json={"feed": "罐罐"}, headers=self.h)
+        self.assertEqual(r.status_code, 200)
+        self.assertIn("喵", r.json()["reply"])
+        r = self.client.post("/pets/-/interact", json={"feed": "猫粮"}, headers=self.h)
+        self.assertEqual(r.status_code, 422)             # 猫粮是自助的，不在投喂清单
+        r = self.client.post("/pets/-/interact", json={}, headers=self.h)
+        self.assertEqual(r.status_code, 422)             # 投喂或互动至少一样
+
+    def test_scoop_route_and_room_pets(self):
+        r = self.client.post("/pets/-/scoop", json={}, headers=self.h)
+        self.assertEqual(r.status_code, 409)             # 用户不在猫房
+        world.move("user", self.cat_room)
+        r = self.client.post("/pets/-/scoop", json={}, headers=self.h)
+        self.assertEqual(r.status_code, 200)
+        room = self.client.get(f"/rooms/{self.cat_room}", headers=self.h).json()
+        self.assertIn(self.pid, room["pets"])            # 照顾入口的开关
+
+
+class TestMount(PetBase):
+    def test_pet_mcp_mounts_only_with_pets_and_enabled(self):
+        import pipeline
+        import pets as pets_mod
+        orig = config.COHABIT_ENABLED
+        try:
+            config.COHABIT_ENABLED = True
+            self.assertTrue(pipeline._pet_mcp_mounted())
+            cfg = json.loads(pipeline._pet_mcp_config("default").read_text("utf-8"))
+            srv = cfg["mcpServers"]["pets"]
+            self.assertTrue(srv["args"][0].endswith("pet_mcp.py"))
+            self.assertEqual(srv["env"]["CASSETTE_CHAR_ID"], "default")
+            config.COHABIT_ENABLED = False
+            self.assertFalse(pipeline._pet_mcp_mounted())   # 开关关着不挂
+            config.COHABIT_ENABLED = True
+            pets_dir = pets_mod.PETS_DIR
+            pets_mod.PETS_DIR = self.tmp / "no_pets"
+            try:
+                self.assertFalse(pipeline._pet_mcp_mounted())   # 没猫不挂，菜单也不提
+            finally:
+                pets_mod.PETS_DIR = pets_dir
+        finally:
+            config.COHABIT_ENABLED = orig
 
 
 class TestEnforce(PetBase):

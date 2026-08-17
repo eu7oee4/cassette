@@ -137,7 +137,14 @@
   **发起者排除**（interaction_guard：工具结果已同轮给过反应）、连发不重置
   （external_input 只有用户路由调，结构性成立）。引擎级 _ENGINE_LOCK 串行
   interact/tick。测试 125 全绿（新增 10）。
-- **P3 照料入口**：pet MCP 四工具 + 工具菜单说明；用户侧 RoomPage 按钮组。
+- **P3 照料入口** ✅（2026-08-17）：`/pets/*` 四端点（状态含 needs / 日志 / 互动 /
+  铲屎——UI 与 MCP 共用一套，pid 支持 "-"=家里唯一那只；角色查看/互动要求同地点，
+  用户查看是玩家面不限）；`pet_mcp.py` 内置 stdio 四工具（pet_state/feed/interact/
+  scoop，纪律写进工具描述：事件已替你落、别在 MOTION/SAY 重复），挂载在
+  pipeline.base_claude_args（COHABIT_ENABLED 且有宠物才挂，chat/wake 都给，
+  mounted_tool_names 口径同步）；tool_menu.example.md 补四块（看猫/喂猫/撸猫/铲屎）；
+  iOS 房间页爪印入口 + PetCareSheet（四值条/砂盆/需求/喂三选一/自由互动/铲屎，
+  铲屎只在猫房显示）。测试 131 全绿（新增 6），模拟器编译过。
 - **P4 iOS 渲染**：sprite 管线搬运（美术是 mianmian 私产 → gitignore 实例数据）；
   HousePage/RoomPage 里团团的展示与走动；聊天页 overlay 要不要保留待议
   （cassette 聊天已是悬浮层，overlay 叠 overlay 的形态待真机看）。

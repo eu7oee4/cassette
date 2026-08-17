@@ -53,6 +53,46 @@ struct RoomDetail: Decodable {
     let replying: [String]?   // 正在生成醒来回应的在场角色（「正在回应…」动画）
     let paused: Bool?         // 醒来队列暂停中（用户按住场面好插嘴）
     let carry_offer: CarryOffer?   // 这个房间里挂着的抱人邀约（只在发生的房间带回）
+    let pets: [String]?       // 在场的宠物（照顾入口的开关，PLAN_pet P3）
+}
+
+/// /pets/{id}：宠物状态（照顾面板数据源）。
+struct PetInfo: Decodable {
+    let id: String
+    let name: String
+    let location: String
+    let state: PetStats
+    let needs: [PetNeed]
+}
+
+struct PetStats: Decodable {
+    let satiety: Int
+    let hydration: Int
+    let energy: Int
+    let mood: Int
+    let litter: Int           // 1 干净 / 2 有屎 / 3 满了
+    let asleep: Bool
+    let day: Int              // 养到第几天
+
+    var litterLabel: String {
+        switch litter {
+        case 1: return "干净"
+        case 2: return "有屎"
+        default: return "满了"
+        }
+    }
+}
+
+struct PetNeed: Decodable, Identifiable {
+    let kind: String
+    let text: String
+    var id: String { kind }
+}
+
+/// /pets/{id}/interact 的返回（新状态面板会重新拉，这里只要反应本身）。
+struct PetReaction: Decodable {
+    let reply: String
+    let action: String
 }
 
 /// 抱人邀约：AI 醒来轮写了 MOVE+CARRY → 不立刻移动，先问你。
@@ -154,5 +194,28 @@ extension ChatService {
         struct Body: Encodable { let op: String; let id: String?; let text: String? }
         let body = try JSONEncoder().encode(Body(op: op, id: entryID, text: text))
         _ = try await perform(authedRequest("POST", "/rooms/\(id)/state", jsonBody: body, timeout: 10))
+    }
+
+    // MARK: 宠物照料（PLAN_pet P3；用户与 pet MCP 共用同一套端点）
+
+    func petInfo(_ id: String) async throws -> PetInfo {
+        let data = try await perform(authedRequest("GET", "/pets/\(id)", timeout: 8))
+        return try JSONDecoder().decode(PetInfo.self, from: data)
+    }
+
+    /// 投喂（罐罐/猫条/冻干）或自由互动白描。猫必醒，反应直接在返回里
+    /// （动作/喵声也会落进房间事件流，轮询自然上屏）。要等猫引擎，超时给足。
+    func petInteract(_ id: String, feed: String? = nil, text: String? = nil) async throws -> PetReaction {
+        struct Body: Encodable { let actor: String; let feed: String?; let text: String? }
+        let body = try JSONEncoder().encode(Body(actor: "user", feed: feed, text: text))
+        let data = try await perform(authedRequest("POST", "/pets/\(id)/interact",
+                                                   jsonBody: body, timeout: 90))
+        return try JSONDecoder().decode(PetReaction.self, from: data)
+    }
+
+    /// 铲屎：人得在猫房（服务端校验，不在会 409）。
+    func petScoop(_ id: String) async throws {
+        let body = try JSONEncoder().encode(["actor": "user"])
+        _ = try await perform(authedRequest("POST", "/pets/\(id)/scoop", jsonBody: body, timeout: 10))
     }
 }

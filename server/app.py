@@ -56,7 +56,9 @@ import game_bridge
 import mail_bridge
 import offers
 import ombre_rest
+import pet_engine
 import pet_queue
+import pet_store
 import pets
 import plugins
 import pipeline
@@ -899,7 +901,9 @@ def get_room(room_id: str, x_auth: Optional[str] = Header(default=None, alias="X
     gen = cohabit_queue.executing()
     replying = [gen] if gen and world.location_of(gen) == room_id else []
     off = offers.api_view()
-    return {"id": room_id, **r, "occupants": world.occupants(room_id),
+    occ = world.occupants(room_id)
+    return {"id": room_id, **r, "occupants": occ,
+            "pets": [e for e in occ if pets.is_pet(e)],   # 照顾入口的开关（P3）
             "replying": replying, "paused": cohabit_queue.paused(),
             "carry_offer": off if off and off["room"] == room_id else None}
 
@@ -985,6 +989,95 @@ def post_room_state(room_id: str, body: RoomStateIn,
         raise HTTPException(status_code=409, detail="你不在这个房间——先「去这里」再改")
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e))
+
+
+# ---------- 宠物照料（PLAN_pet P3）：UI 和 pet MCP 共用同一套端点，逻辑只有一份 ----------
+# pid 可以是 id / 显示名 / "-"（家里唯一的那只——工具默认这么传，单猫现实）。
+
+class PetInteractIn(BaseModel):
+    actor: str = "user"       # 实体 id：user 或角色 id（MCP 由 CASSETTE_CHAR_ID 下发）
+    feed: Optional[str] = None    # 罐罐 | 猫条 | 冻干（三选一；猫粮和水它猫房自助）
+    text: Optional[str] = None    # 自由互动白描（「挠了挠团团的下巴」），原样给猫引擎
+
+
+class PetScoopIn(BaseModel):
+    actor: str = "user"
+
+
+def _resolve_pet(pid: str) -> str:
+    real = pets.match(pid) or (pets.ids()[0] if pid == "-" and pets.ids() else None)
+    if not real:
+        raise HTTPException(status_code=404, detail=f"没有这只宠物：{pid}")
+    return real
+
+
+def _check_pet_actor(actor: str) -> None:
+    if actor != world.USER_ID and actor not in characters.ids():
+        raise HTTPException(status_code=422, detail=f"不认识的 actor：{actor}")
+
+
+@app.get("/pets/{pid}")
+def get_pet(pid: str, actor: str = "",
+            x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
+    """宠物状态（四值/砂盆/睡醒/需求/在哪）。带 actor（角色查看）要求同地点——
+    「查看」是凑近看猫的样子；用户不带 actor（玩家面，随时可看）。"""
+    verify_auth(x_auth)
+    real = _resolve_pet(pid)
+    if actor and actor != world.USER_ID:
+        _check_pet_actor(actor)
+        if world.location_of(actor) != world.location_of(real):
+            raise HTTPException(status_code=409,
+                                detail=f"{world.entity_name(real)} 不在你身边")
+    s = pet_store.read_state(real)
+    return {"id": real, "name": world.entity_name(real),
+            "location": world.location_of(real),
+            "state": s, "needs": pet_store.needs(s)}
+
+
+@app.get("/pets/{pid}/log")
+def get_pet_log(pid: str, limit: int = 20,
+                x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
+    verify_auth(x_auth)
+    return {"log": pet_store.read_petlog(_resolve_pet(pid), limit=limit)}
+
+
+@app.post("/pets/{pid}/interact")
+def post_pet_interact(pid: str, body: PetInteractIn,
+                      x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
+    """投喂/互动（同地点才够得着，猫必醒，反应在返回里同轮给发起者）。"""
+    verify_auth(x_auth)
+    real = _resolve_pet(pid)
+    _check_pet_actor(body.actor)
+    if body.feed and body.feed not in ("罐罐", "猫条", "冻干"):
+        raise HTTPException(status_code=422, detail="feed 只有 罐罐/猫条/冻干（猫粮和水它自助）")
+    if body.actor == world.USER_ID:
+        cohabit_queue.external_input()   # 用户逗猫 = 外部输入（口径同房间 act）
+    try:
+        return pet_engine.interact(real, body.actor, feed=body.feed, text=body.text)
+    except pet_engine.PetNotHere as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    except Exception as e:
+        # 引擎/模型故障（DeepSeek 超时、key 没配）：502 有声报错，别让猫静默装死
+        raise HTTPException(status_code=502, detail=f"猫引擎出错：{e}")
+
+
+@app.post("/pets/{pid}/scoop")
+def post_pet_scoop(pid: str, body: PetScoopIn,
+                   x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
+    """铲屎：人得在猫房（盆在那儿）；不要求猫在场。"""
+    verify_auth(x_auth)
+    real = _resolve_pet(pid)
+    _check_pet_actor(body.actor)
+    if body.actor == world.USER_ID:
+        cohabit_queue.external_input()
+    try:
+        return pet_engine.scoop(real, body.actor)
+    except pet_engine.PetNotHere as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
 
 
 @app.post("/world/carry_offer")
