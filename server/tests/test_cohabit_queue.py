@@ -158,6 +158,22 @@ class TestDrain(QueueBase):
         # 第 N 轮的 move 在瞬移前被拦：位置停在第 N-1 轮的目的地
         self.assertEqual(world.location_of(self.cid), targets[config.COHABIT_CHAIN_N - 2])
         self.assertFalse(cq.enqueue(self.cid, {"kind": "event", "text": "again"}))
+        # 被拦那轮如实落进 wake_log：写了 MOVE、没走成。只有 stderr 的话事后看不出来。
+        entry = self.log_entries()[-1]
+        self.assertEqual(entry["move"], targets[config.COHABIT_CHAIN_N - 1])
+        self.assertTrue(entry["move_stopped"])
+
+    def test_solo_wake_clears_chain_and_move_still_works(self):
+        """机主睡着时的死锁（2026-08-17）：自主醒来若也计数，几轮之后连发闸顶满，
+        之后每一轮的 MOVE 都在瞬移前被拦——人被永久钉在原地，只有机主醒来才能解。"""
+        cq._syswake_run[self.cid] = config.COHABIT_CHAIN_N      # 闸已顶满
+        self.replies = [out("none", move="living_room"), out("none")]
+        cq.enqueue(self.cid, {"kind": "scheduled", "text": "到点了"}, system=False)
+        cq._drain()
+        self.assertEqual(cq._syswake_run[self.cid], 1)          # 自主醒清零，move 补醒记 1
+        self.assertEqual(world.location_of(self.cid), "living_room")   # 走成了
+        self.assertNotIn("move_stopped", self.log_entries()[-2])
+        self.assertTrue(cq.enqueue(self.cid, {"kind": "event", "text": "x"}))  # 入队闸也松了
 
     def test_chat_turn_defers_execution(self):
         self.replies = [out("none")]

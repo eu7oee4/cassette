@@ -16,7 +16,8 @@
 - **连发上限（入队处拦）**：无新外部输入（用户发言/动作/移动/状态编辑/手机消息）时，
   一个 AI 连续被系统触发的醒来 ≤ config.COHABIT_CHAIN_N（含事件醒来与 move 补醒链）。
   不入队才省 token——入队后醒来选 none 已经烧了。自主醒来不受这道闸（它归预算管），
-  但执行照样计数。
+  执行时也**不计数、反而清零**：它不是任何链条的延续，计数它等于让睡着的机主把 AI
+  锁死在原地（见 _pop_next）。
 
 总开关 config.COHABIT_ENABLED（默认关）：关着时 install 不挂钩子、worker 不启动、
 所有入口一进来就返回——C2 全部接好线但不上电，上电是 C4 的事。
@@ -319,8 +320,16 @@ def _pop_next() -> tuple[Optional[str], list[dict]]:
             return None, []
         _order.remove(cid)
         reasons = _pending.pop(cid)
-        # 计数在执行开始时加：本次醒来（无论产出什么）算进连发；外部输入随时清零。
-        _syswake_run[cid] = _syswake_run.get(cid, 0) + 1
+        # 计数在执行开始时加，但**只数系统触发**（事件/move 补醒）——闸拦的是"别人在推他"
+        # 的连锁，自主醒来不是任何链条的延续，反过来把计数断掉（同 external_input）。
+        # 2026-08-17 的坑：solo/scheduled 也计数、又只有机主的外部输入能清零 → 机主一睡，
+        # 四次自主醒来就把闸顶满，之后每一轮的 MOVE 都在瞬移前被拦，人被钉死在原地
+        # （Cassius 连着五轮写了 MOVE 全被吞，日志只有一行 stderr）。
+        if any(r.get("kind") in ("solo", "scheduled") for r in reasons):
+            _syswake_run[cid] = 0
+            _gate_hit.pop(cid, None)
+        else:
+            _syswake_run[cid] = _syswake_run.get(cid, 0) + 1
         return cid, reasons
 
 

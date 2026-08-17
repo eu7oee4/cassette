@@ -386,7 +386,7 @@ def try_push(text: str, settings: dict, thoughts: str = "", trigger: str = "",
              next_wake_at: Optional[int] = None, next_wake_note: str = "",
              started_ts: Optional[int] = None, stored: Optional[list] = None,
              browse: Optional[list] = None, force: bool = False,
-             char_id: Optional[str] = None) -> bool:
+             char_id: Optional[str] = None, extra: Optional[dict] = None) -> bool:
     """硬顶闸（每天条数 + 最小间隔 + 静默）。只拦推送、不拦思考。通过 → 进 outbox + Bark + 追加窗口。
     thoughts＝这次醒来的内心，一并记进日志（连被抑制的也记）。
     sticker_ids＝这条消息附带的表情（app 按 id 取本地图上屏）；
@@ -396,7 +396,9 @@ def try_push(text: str, settings: dict, thoughts: str = "", trigger: str = "",
     force＝硬触发（日程提醒这类到点必须说的事）：绕开打扰控制三闸 **和** stale 那道。
     stale 也跳是有讲究的——它拦的是"拿旧上下文说话"，而提醒的内容由时间驱动，
     用户刚说没说过话都一样有效；不跳的话人正好在聊天就等于把提醒吞了。
-    空消息闸不跳：空气泡什么场合都不该推。"""
+    空消息闸不跳：空气泡什么场合都不该推。
+    extra＝调用方要一并记进日志的字段（同居路的 move/move_stopped），四条出口都带上——
+    被抑制的那几条尤其要带，"他当时还想挪个地方"是排查现场的一半。"""
     now_ts = int(time.time())
     started_ts = started_ts or now_ts
     # 空消息闸：CONTENT 全是无效标记时层层剥完可能只剩空串——空气泡不推。
@@ -404,7 +406,7 @@ def try_push(text: str, settings: dict, thoughts: str = "", trigger: str = "",
         logerr("message 被抑制：剥完标记后为空")
         return False
     base = {"ts": now_ts, "time": pipeline.now_str(), "source": "wake", "action": "message",
-            "trigger": trigger, "thoughts": thoughts}
+            "trigger": trigger, "thoughts": thoughts, **(extra or {})}
     if stored:
         base["stored"] = stored   # 这次醒来存/改了什么记忆（Mind 展示 + "别重复存"清单）
     if browse:

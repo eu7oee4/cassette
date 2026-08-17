@@ -346,12 +346,20 @@ def do_cohabit_wake(cid: str, reasons: list[dict], _chain_no: int = 1,
     next_wake_at = (now_ts + p["next_min"] * 60) if p["next_min"] else None
     result = {**p, "trigger": trigger, "chain": _chain_no}
 
+    # 连发判定提到表达之前（计数本轮内不变，判早判晚等价），只为让日志说得出实话：
+    # 「他写了 MOVE、被闸拦了」必须落进 wake_log，不能只活在 stderr 里——不然事后
+    # （Mind 页/排查）看到的是"他说要去却没动"，像他自己犹豫。
+    move_stopped = bool(p["move"]) and not (
+        chain_allowed(cid) if chain_allowed is not None else _chain_no < N_CHAIN)
+    move_log = {"move": p["move"], **({"move_stopped": True} if move_stopped else {})} \
+        if p["move"] else {}
+
     # ① 表达（act / phone 二选一，解析处已互斥）
     if p["action"] == "act":
         loc = world.location_of(cid)
         entry = {"ts": now_ts, "time": pipeline.now_str(), "source": "wake",
                  "action": "act", "trigger": trigger, "thoughts": p["thoughts"],
-                 "room": loc}
+                 "room": loc, **move_log}
         if loc in (world.AWAY, world.HALLWAY):
             # 结构上到不了这儿的才怪：模型在走廊硬要 act。不落事件，如实记日志。
             logerr(f"cohabit：{cid} 在 {loc} 试图 act，无房间可写，丢弃")
@@ -395,10 +403,11 @@ def do_cohabit_wake(cid: str, reasons: list[dict], _chain_no: int = 1,
             next_wake_at=next_wake_at,
             next_wake_note=pipeline.next_wake_note(p["next_raw"], next_wake_at)
             if next_wake_at else "",
-            started_ts=now_ts, stored=stored, char_id=cid)
+            started_ts=now_ts, stored=stored, char_id=cid, extra=move_log)
     else:
         entry = {"ts": now_ts, "time": pipeline.now_str(), "source": "wake",
-                 "action": "none", "trigger": trigger, "thoughts": p["thoughts"]}
+                 "action": "none", "trigger": trigger, "thoughts": p["thoughts"],
+                 **move_log}
         if stored:
             entry["stored"] = stored
         if next_wake_at:
@@ -420,9 +429,9 @@ def do_cohabit_wake(cid: str, reasons: list[dict], _chain_no: int = 1,
 
     # ③ move（末位执行）+ 结果补醒：成功/失败同一条路，只是原因文本不同。
     if p["move"]:
-        allowed = chain_allowed(cid) if chain_allowed is not None else _chain_no < N_CHAIN
-        if not allowed:
-            # 表达照常落地了，只有 move 被停——写日志，别静默吞（排查"他为什么没走成"用）。
+        if move_stopped:
+            # 表达照常落地了，只有 move 被停——wake_log 已带 move_stopped，这里再记一条
+            # 带 cid 的 stderr（排查"他为什么没走成"用）。
             logerr(f"cohabit：{cid} 连锁醒来达到上限，MOVE 不执行")
             result["move_stopped"] = True
             return result
