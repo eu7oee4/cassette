@@ -119,8 +119,15 @@
   `_alone` 猫不算「别人」；`_append_experience` 跳过猫（信息通道的结构性封堵）；
   用户 `/world/move` 加 `carry` 参数（只放行宠物）。**团团实例未注册**——
   没脑子的猫不该先出现在屋里，注册随 P1 搬家一起。
-- **P1 猫引擎**：pet_store/pet_engine 移植改造（DeepSeek 接线走 env、迷你协议、
-  需求系统、快照维护、petlog/state 迁移脚本）。
+- **P1 猫引擎** ✅（2026-08-17）：`pet_store.py`（多宠物 `state/pets/<pid>/`、poke 摘除、
+  poop_pressure 惰性涨 + 吃饭加速、needs() 需求推导、姿态锚点）+ `pet_engine.py`
+  （接线 pet.json engine 段回落 DEEPSEEK_* env；注入=状态/需求/**当前房间**/petlog/
+  触发，别处对话结构性不进；迷你协议 reply/action/stats/sleep/move/pose/log 无说话
+  字段；确定性覆盖=拉屎限猫房+砂盆满拒用；enforce() 生存硬地板走真实物理）+
+  迁移脚本 `tools/import_tuantuan.py`（persona/state/petlog/.env 键，created_at 保留）。
+  引擎面 interact()/wake()/enforce() 建好未接线——触发是 P2、工具是 P3。
+  **迁移脚本未执行**：等 P2/P3 齐了上电时跑（先搬=屋里出现一只没脑子的猫，
+  且 mianmian 侧还活着会状态分裂）。测试 115 全绿（新增 13）。
 - **P2 触发与闸**：猫 worker（独立线程）、三路触发、发起者排除、猫连发上限、
   char 侧猫事件概率降权、猫事件不重置 char 连发。
 - **P3 照料入口**：pet MCP 四工具 + 工具菜单说明；用户侧 RoomPage 按钮组。
