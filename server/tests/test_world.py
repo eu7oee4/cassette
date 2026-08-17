@@ -234,10 +234,13 @@ class TestRoomState(WorldBase):
         self.assertIn("「把凉透的牛奶端走倒了」", r["event"]["text"])
         self.assertNotIn("清掉", r["event"]["text"])
 
-        # remove 不带叙事：退回老格式，交代清掉了什么
+        # remove 不带叙事＝静默清理（2026-08-17 机主拍板）：快照删掉，不落事件、不惊动在场者
         r = world.state_change(world.USER_ID, "mm_room", "add", text="窗台上一只纸飞机")
+        n_before = len(world.read_events("mm_room"))
         r = world.state_change(world.USER_ID, "mm_room", "remove", entry_id=r["entry"]["id"])
-        self.assertIn("清掉", r["event"]["text"])
+        self.assertIsNone(r["event"])
+        self.assertEqual(world.room_state("mm_room"), [])
+        self.assertEqual(len(world.read_events("mm_room")), n_before)
 
     def test_requires_presence_and_valid_entry(self):
         with self.assertRaises(world.NotPresent):

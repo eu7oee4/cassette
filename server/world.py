@@ -417,11 +417,12 @@ def state_change(entity: str, room_id: str, op: str,
                 entry.update(text=text, author=entity, since=int(time.time()))
             else:
                 entries.remove(entry)
-                # 没写叙事就退回老格式，别硬憋一句
-                notice = f"{name}「{text}」" if text else f"{name} 清掉了「{entry['text']}」"
+                # 没写叙事＝静默清理（机主 2026-08-17）：快照删掉就完了，**不落事件**
+                # ——在场者不被通知、不触发醒来。收拾东西值得说一嘴的才写叙事。
+                notice = f"{name}「{text}」" if text else None
         else:
             raise ValueError(f"不认识的操作：{op}")
         _write_json(REGISTRY_PATH, reg)
-        ev = append_event(room_id, "system", entity, notice, kind="state")
+        ev = append_event(room_id, "system", entity, notice, kind="state") if notice else None
         return {"entry": entry, "event": ev,
                 "over_cap": len(entries) > ROOM_STATE_SOFT_CAP}
