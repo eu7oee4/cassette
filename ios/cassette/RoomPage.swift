@@ -297,6 +297,8 @@ struct RoomPage: View {
         case "action":
             Text("*\(ev.text)*").italic()
                 .font(.footnote).foregroundStyle(idc)
+                // frame 只管整块靠哪边；折行后行内对齐要单独说，不然第二行起全回左边
+                .multilineTextAlignment(mine ? .trailing : .leading)
                 .frame(maxWidth: .infinity, alignment: mine ? .trailing : .leading)
         default:   // speech：气泡底 = 角色识别色（低透明度），谁说的靠颜色认；时间贴气泡内侧
             HStack(alignment: .bottom, spacing: 6) {
