@@ -24,10 +24,13 @@ import os
 import re
 import threading
 import urllib.request
+from datetime import datetime
 from typing import Optional
 
+import config
 import pets
 import pet_store
+import pipeline
 import world
 from notify import logerr
 
@@ -109,6 +112,15 @@ def _render_event(ev: dict, pid: str) -> str:
     return f"（{ev.get('text', '')}）"
 
 
+def _stamp(ts) -> str:
+    """事件/日志行的时间前缀。猫没有钟，但**它的记忆得有先后**——没有这个，
+    20 条 petlog 在模型眼里是一堆同时发生的事，于是刚趴下又「趴下晒太阳」。"""
+    try:
+        return pipeline.fmt_ts(int(ts))
+    except Exception:
+        return "??-?? ??:??"
+
+
 def _room_block(pid: str) -> str:
     loc = world.location_of(pid)
     r = world.room(loc)
@@ -116,7 +128,8 @@ def _room_block(pid: str) -> str:
     who = f"这里还有：{('、'.join(others))}。" if others else "现在这里只有你。"
     evs = world.visible_events(loc, pid, limit=ROOM_EVENTS_N)
     ev_block = ("你刚才看到/听到的：\n" +
-                "\n".join(f"- {_render_event(e, pid)}" for e in evs)) if evs else ""
+                "\n".join(f"- [{_stamp(e.get('ts'))}] {_render_event(e, pid)}"
+                          for e in evs)) if evs else ""
     return f"你在「{r.get('name', loc)}」。{who}\n{ev_block}".rstrip()
 
 
@@ -127,6 +140,16 @@ def _rooms_block(pid: str) -> str:
     return "\n".join(lines)
 
 
+def _time_block() -> str:
+    """时间感（口径同 pipeline.now_str：时段词免 24 小时制心算）+ 明写天色。
+    猫的世界里「几点」几乎只有一个用处——外面亮不亮；不写死这一句，模型会在
+    凌晨一点趴窗边晒太阳（2026-08-19 实录）。"""
+    hour = datetime.now(config.APP_TZ).hour
+    sky = ("外面天亮着，有太阳" if 6 <= hour < 18 else
+           "外面天是黑的——没有太阳可晒，屋里只有灯光和月光")
+    return f"现在是 {pipeline.now_str()}。{sky}。"
+
+
 def _build_prompt(pid: str, state: dict, trigger_lines: list[str]) -> str:
     stat = (f"饱腹 {state['satiety']} / 水分 {state['hydration']} / "
             f"精力 {state['energy']} / 心情 {state['mood']}")
@@ -135,10 +158,14 @@ def _build_prompt(pid: str, state: dict, trigger_lines: list[str]) -> str:
     nd = pet_store.needs(state)
     needs_block = "\n".join(f"- {n['text']}" for n in nd) if nd else "- （现在挺舒坦，没什么想要的）"
     log = pet_store.read_petlog(pid, limit=PETLOG_INJECT_N)
-    log_block = "\n".join(f"- {r.get('text', '')}" for r in log) if log else "（还没有记录）"
+    log_block = "\n".join(f"- [{_stamp(r.get('ts'))}] {r.get('text', '')}"
+                          for r in log) if log else "（还没有记录）"
     trig = "\n".join(f"- {t}" for t in trigger_lines if t) or "- （没什么特别的）"
 
-    return f"""【你现在的状态】
+    return f"""【现在几点】
+{_time_block()}
+
+【你现在的状态】
 {stat}（养到第 {state.get('day', 1)} 天）
 猫砂盆：{litter}；你{sleep}。
 
@@ -150,7 +177,7 @@ def _build_prompt(pid: str, state: dict, trigger_lines: list[str]) -> str:
 【你在哪、谁在、你看到了什么——你只知道这个房间的事】
 {_room_block(pid)}
 
-【最近的照料记录（旧→新）】
+【最近的照料记录（旧→新，方括号是时间）】
 {log_block}
 
 【这次发生了什么】
@@ -170,6 +197,9 @@ def _build_prompt(pid: str, state: dict, trigger_lines: list[str]) -> str:
   "log": "记进照料日志的一句（你干了啥，简短）"
 }}
 规则：stats 是四条的**新绝对值**(0-100)，按口径你自己判断；没被影响的维持原值。
+对上时间和天色：半夜没有太阳可晒，白天也别硬说月亮——你干的事得跟上面那句天色对得上。
+**别复读**：照料记录里最近几条你已经干过的事（尤其是刚过去一小时内的），
+这次换一件干——猫也会腻；实在没什么可干就写空 reply 待着，比重复一遍强。
 你是猫：reply 里只有动作和猫叫（喵/咕噜/嘶——），你说不出人话，也听不懂复杂的话，
 只对语气和熟悉的词有反应。拉屎只在猫房猫砂盆有效；砂盆满了你不会用。
 睡着时被戳可以继续装死（reply 空串、全部 null）。"""

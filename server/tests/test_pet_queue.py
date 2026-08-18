@@ -134,5 +134,40 @@ class TestTick(PetQueueBase):
         self.assertNotIn(self.pid, pq._pending)     # 冷却期不再入队
 
 
+class TestPaused(PetQueueBase):
+    """机主的暂停键管到猫身上（2026-08-19）：暂停只停执行，事件照常攒。"""
+
+    def setUp(self):
+        super().setUp()
+        import cohabit_queue
+        self.cq = cohabit_queue
+        self._paused_orig = cohabit_queue.paused()
+        cohabit_queue.set_paused(True)
+
+    def tearDown(self):
+        self.cq.set_paused(self._paused_orig)
+        super().tearDown()
+
+    def test_events_still_queue_but_drain_holds(self):
+        world.move("user", self.cat_room)
+        pq.on_room_event(self.cat_room, {"actor": "user", "type": "speech", "text": "小猫咪"})
+        self.assertIn(self.pid, pq._pending)      # 事件照常落，pending 照常合并
+        pq._drain()
+        self.assertEqual(self.wakes, [])          # 但不执行
+        self.cq.set_paused(False)
+        pq._drain()
+        self.assertTrue(self.wakes)               # 按开始一口气恢复
+
+    def test_tick_and_enforce_hold(self):
+        self.force_state(satiety=5.0)             # 又饿到硬地板又该溜达
+        world.move(self.pid, "living_room")
+        pq._tick(time.time())
+        self.assertEqual(self.wakes, [])
+        self.assertEqual(world.location_of(self.pid), "living_room")   # 硬地板也停着
+        self.cq.set_paused(False)
+        pq._tick(time.time())
+        self.assertEqual(world.location_of(self.pid), self.cat_room)   # 恢复后当轮补上
+
+
 if __name__ == "__main__":
     unittest.main()

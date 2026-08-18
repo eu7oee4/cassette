@@ -73,6 +73,17 @@ def initiator() -> Optional[str]:
     return _initiator["id"]
 
 
+def paused() -> bool:
+    """跟着机主那个暂停键走——**同一个键管全屋，猫也是屋里的一员**。
+    2026-08-19 实录：人按了暂停在打字，猫照样每分钟 tick、照样醒、照样往房间里
+    落事件。口径抄 cohabit：暂停只停**执行**（tick/冲队/硬地板），事件照常落盘、
+    pending 照常合并，按「开始」一口气恢复；直接互动（喂/撸）不受影响——那是人
+    自己的动作，不是 AI 在抢话。
+    函数内 import 断环：cohabit_queue 顶层 import 本模块。"""
+    import cohabit_queue
+    return cohabit_queue.paused()
+
+
 def external_for_pet(pid: str) -> None:
     """被直接互动 = 猫的外部输入：事件连发计数清零（pet_engine.interact 调）。"""
     with _lock:
@@ -135,6 +146,8 @@ def _wake(pid: str, reasons: list[str], autonomous: bool) -> None:
 
 def _drain() -> None:
     while True:
+        if paused():
+            return         # 暂停：pending 原地攒着（合并去重照常），按开始再冲
         with _lock:
             if not _pending:
                 return
@@ -143,6 +156,9 @@ def _drain() -> None:
 
 
 def _tick(now: float) -> None:
+    if paused():
+        return   # 连硬地板一起停：enforce 也是猫自己动（落进出+动作事件），暂停期
+                 # 间不该有任何 AI 侧的动静。阈值判定是无状态的，恢复后当轮就补上。
     for pid in pets.ids():
         try:
             if now < _cooldown.get(pid, 0):
