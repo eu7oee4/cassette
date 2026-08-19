@@ -88,6 +88,13 @@
   - 要开电脑的活：一期请示路线（拍板 4）。纯工具能干的产出走消息/Ombre；
     要写文件改代码的走 code 会话。
 - **T1 app 任务页**：机主的编辑入口（iOS：加/改/勾完成/删）。
+- **T2 长期任务栏**（2026-08-19 追加）：任务栏分两栏——短期（上面那套 5 条闸）+
+  **长期**。长期条目不占 5 条名额、没有 done、不参与淘汰。两种来源：
+  ① **插件套件声明**：plugin.json 加 `standing_task` 字段，插件启用（per 角色，
+  app 插件商店现成开关）即上长期栏、关了即消失，工具挂载同生同灭——第一个套件是
+  jobhunt（全套见 `PLAN_jobhunt.md`）；② 机主在 app 手建（无流水线，一条常驻惦记）。
+  模型对长期任务只能记进展：TASK 协议加 `note 条目id: 一句进展`（不能 done、不能删）。
+  duty 接线：长期任务给 duty 低火慢炖的底 + 有存货时抬升（由插件侧 duty hint 提供）。
 - **D1 接线**：cohabit worker 60s tick 里推进 desire；satisfy 挂点（try_push 成功 /
   act / browse / stored / galatea / 任务 done）；duty←任务栏派生；fatigue←劳动源；
   `/desire/state` 只读 API（**默认就能看**——透明先行，照原文「能观察、不动手」的
