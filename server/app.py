@@ -849,6 +849,10 @@ class RoomStateIn(BaseModel):
     text: Optional[str] = None
 
 
+class RoomEventDeleteIn(BaseModel):
+    id: str             # 这一轮里随便哪条事件的 id（服务端按 turn 收整组）
+
+
 class MoveIn(BaseModel):
     to: str             # 房间 id | "away"（出门开关）；走廊已摘除，不认识的一律 404
     carry: Optional[str] = None   # 抱着谁一起走：只放行宠物（id 或名字），抱人不存在
@@ -981,6 +985,19 @@ def post_room_act(room_id: str, body: RoomActIn,
         raise HTTPException(status_code=409, detail="你不在这个房间——先「去这里」再说话")
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e))
+
+
+@app.post("/rooms/{room_id}/events/delete")
+def post_room_event_delete(room_id: str, body: RoomEventDeleteIn,
+                           x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
+    """删掉一条记录所在的**那一轮**（房间视图左滑删除）：房间事件流 + 各角色经历流
+    同删，进出场留下（口径与理由见 world.delete_turn）。删完 AI 的注入立刻就变了。"""
+    verify_auth(x_auth)
+    try:
+        world.room(room_id)
+        return world.delete_turn(room_id, body.id)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
 
 
 @app.post("/rooms/{room_id}/state")

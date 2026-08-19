@@ -171,6 +171,18 @@ extension ChatService {
         _ = try await perform(authedRequest("POST", "/rooms/\(id)/act", jsonBody: body, timeout: 10))
     }
 
+    /// 删掉一条记录**所在的那一轮**（左滑删除）：服务端按 turn 收整组，房间事件流 +
+    /// 各角色的经历流同删，进出场那条留着（它是可见区间的骨架，删了 AI 反而看见更早的
+    /// 历史）。删完下次注入立刻就变了。返回真删掉的条数。
+    @discardableResult
+    func roomDeleteTurn(_ id: String, eventID: String) async throws -> Int {
+        let body = try JSONEncoder().encode(["id": eventID])
+        let data = try await perform(authedRequest("POST", "/rooms/\(id)/events/delete",
+                                                    jsonBody: body, timeout: 10))
+        struct Box: Decodable { let deleted: Int }
+        return (try? JSONDecoder().decode(Box.self, from: data).deleted) ?? 0
+    }
+
     /// 导演口：手写一段环境刺激（如「浴室传来水声」），点名让谁事件醒。
     /// 只入队醒因，不落房间事件——别的在场者不会「看见」这段旁白。
     func worldNudge(text: String, targets: [String]) async throws {

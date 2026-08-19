@@ -325,6 +325,79 @@ def visible_events(room_id: str, entity: str,
     return out[-limit:] if limit else out
 
 
+# ---------- 删除（机主的橡皮擦，2026-08-19）----------
+# 进出场是**可见区间的骨架**：visible_events 拿「最近一条自己的 enter」当起点，
+# 删掉它 AI 下次注入就往前多看见一大段本该看不见的旧事件——删记录反而让它记得更多。
+# 所以整轮删的时候这两类留下（机主拍板：保留骨架，只删内容）。
+PRESENCE_KINDS = ("enter", "leave")
+
+
+def _rewrite_jsonl(path: Path, drop: set) -> list[dict]:
+    """按 id 从 jsonl 里摘掉若干条，返回被摘掉的原对象。文件不存在/空 → 空列表。
+    读改写整份 + 原子替换（同 _write_json 的口径），调用方在 _LOCK 内。"""
+    if not path.exists():
+        return []
+    keep, gone = [], []
+    for ln in path.read_text("utf-8").splitlines():
+        ln = ln.strip()
+        if not ln:
+            continue
+        try:
+            obj = json.loads(ln)
+        except Exception:
+            keep.append(ln)   # 读不动的行原样留着，别顺手吃掉
+            continue
+        (gone if obj.get("id") in drop else keep).append(obj)
+    if not gone:
+        return []
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+    tmp.write_text("".join(
+        (ln if isinstance(ln, str) else json.dumps(ln, ensure_ascii=False)) + "\n"
+        for ln in keep), "utf-8")
+    tmp.replace(path)
+    return gone
+
+
+def delete_turn(room_id: str, event_id: str) -> dict:
+    """删掉 event_id **所在的那一轮**（同 turn 的全部事件；老事件没有 turn 就只删它
+    自己）。删两处——房间事件流 + 每个角色的经历流，这俩正好是注入的全部来源，
+    所以删完下一次醒来/聊天的上下文立刻就变了，不用等任何缓存过期。
+
+    留下的：enter/leave（见 PRESENCE_KINDS）。
+    不碰的：地点状态快照（registry 里的 state 是「现在这里有什么」的真相不是日志，
+    书还摊在沙发上就还摊着）、宠物的 petlog、wake_log。
+
+    删掉的原文追加进 state/rooms/<id>/events.deleted.jsonl —— UI 上没了、注入里没了，
+    但盘上还留着一份（append-only 的东西宁可留着，2026-08-19 机主要的是「不进上下文」）。
+    返回 {"deleted": n, "kept_presence": n, "ids": [...]}。"""
+    with _LOCK:
+        evs = read_events(room_id)
+        target = next((e for e in evs if e.get("id") == event_id), None)
+        if target is None:
+            raise KeyError(f"这条记录不在「{room_id}」里：{event_id}")
+        tid = target.get("turn")
+        group = [e for e in evs if e.get("turn") == tid] if tid else [target]
+        kept = [e for e in group if e.get("kind") in PRESENCE_KINDS]
+        drop = {e["id"] for e in group if e.get("kind") not in PRESENCE_KINDS}
+        if not drop:
+            return {"deleted": 0, "kept_presence": len(kept), "ids": []}
+
+        gone = _rewrite_jsonl(ROOMS_DIR / room_id / "events.jsonl", drop)
+        if gone:
+            p = ROOMS_DIR / room_id / "events.deleted.jsonl"
+            with p.open("a", encoding="utf-8") as f:
+                for ev in gone:
+                    f.write(json.dumps({**ev, "deleted_at": int(time.time())},
+                                       ensure_ascii=False) + "\n")
+        for cid in characters.ids():
+            try:
+                _rewrite_jsonl(state_store.char_state_dir(cid) / "experience.jsonl", drop)
+            except Exception as e:
+                # 经历流没删掉不该反噬事件流已经删掉的事实，但要有声（注入里会留残影）
+                print(f"[world] 经历流删除失败（{cid}，忽略）: {e}", flush=True)
+        return {"deleted": len(gone), "kept_presence": len(kept), "ids": sorted(drop)}
+
+
 # ---------- 物理引擎：move / act / 地点状态 ----------
 def can_enter(entity: str, room_id: str) -> tuple[bool, str]:
     r = room(room_id)

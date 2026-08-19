@@ -313,6 +313,57 @@ class TestExperience(WorldBase):
                              [e["text"] for e in world.read_experience(cid)])
 
 
+class TestDeleteTurn(WorldBase):
+    """机主的橡皮擦（2026-08-19）：整轮删，进出场留骨架，经历流同删。"""
+
+    def _turn_in_room(self):
+        world.move(self.c1, "living_room")
+        with world.turn():
+            world.move("user", "living_room")          # enter（骨架）
+            world.act_mixed("user", "living_room", "*坐下* 在忙吗")
+        return world.read_events("living_room")
+
+    def test_deletes_whole_turn_but_keeps_presence(self):
+        evs = self._turn_in_room()
+        speech = next(e for e in evs if e["type"] == "speech")
+        res = world.delete_turn("living_room", speech["id"])
+        self.assertEqual(res["deleted"], 2)            # 动作 + 说话
+        self.assertEqual(res["kept_presence"], 1)      # enter 留着
+        left = world.read_events("living_room")
+        self.assertEqual([e["kind"] for e in left if e.get("kind")], ["enter", "enter"])
+        self.assertNotIn("在忙吗", "".join(e["text"] for e in left))
+        # 可见区间的起点还在 → AI 不会因为删记录反而看见更早的历史
+        vis = world.visible_events("living_room", world.USER_ID)
+        self.assertEqual(vis[0]["kind"], "enter")
+
+    def test_experience_stream_deleted_too(self):
+        evs = self._turn_in_room()
+        speech = next(e for e in evs if e["type"] == "speech")
+        self.assertIn("在忙吗", [e["text"] for e in world.read_experience(self.c1)])
+        world.delete_turn("living_room", speech["id"])
+        self.assertNotIn("在忙吗", [e["text"] for e in world.read_experience(self.c1)])
+
+    def test_untagged_event_deletes_alone(self):
+        world.move("user", "living_room")
+        a = world.act("user", "living_room", speech="第一句")
+        world.act("user", "living_room", speech="第二句")
+        world.delete_turn("living_room", a["events"][0]["id"])
+        texts = [e["text"] for e in world.read_events("living_room")]
+        self.assertNotIn("第一句", texts)
+        self.assertIn("第二句", texts)      # 没有 turn 的老事件只删它自己
+
+    def test_deleted_lines_are_kept_on_disk(self):
+        evs = self._turn_in_room()
+        world.delete_turn("living_room", next(e for e in evs if e["type"] == "speech")["id"])
+        trash = (world.ROOMS_DIR / "living_room" / "events.deleted.jsonl").read_text("utf-8")
+        self.assertIn("在忙吗", trash)
+
+    def test_unknown_id_is_keyerror(self):
+        world.move("user", "living_room")
+        with self.assertRaises(KeyError):
+            world.delete_turn("living_room", "deadbeef")
+
+
 class TestVisibility(WorldBase):
     def test_presence_interval(self):
         # c1 先到客厅说了话；user 后进——离场期间的事件永远看不见
@@ -459,6 +510,23 @@ class TestRoutes(WorldBase):
         evs = self.client.get(f"/rooms/{self.c1_room}/events?scope=all",
                               headers=self.h).json()["events"]
         self.assertIsInstance(evs, list)
+
+    def test_delete_turn_via_http(self):
+        self.client.post("/world/move", json={"to": "living_room"}, headers=self.h)
+        self.client.post("/rooms/living_room/act", json={"text": "*挥手* 删我试试"},
+                         headers=self.h)
+        evs = self.client.get("/rooms/living_room/events", headers=self.h).json()["events"]
+        speech = next(e for e in evs if e["type"] == "speech")
+        r = self.client.post("/rooms/living_room/events/delete",
+                             json={"id": speech["id"]}, headers=self.h)
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json()["deleted"], 2)      # 动作 + 说话（一次发送 = 一轮）
+        left = self.client.get("/rooms/living_room/events", headers=self.h).json()["events"]
+        self.assertEqual([e["type"] for e in left], ["system"])   # 进出场留着
+        # 不认识的 id → 404
+        r = self.client.post("/rooms/living_room/events/delete",
+                             json={"id": "nope"}, headers=self.h)
+        self.assertEqual(r.status_code, 404)
 
     def test_act_elsewhere_is_409(self):
         r = self.client.post("/rooms/living_room/act", json={"speech": "喂"}, headers=self.h)

@@ -23,6 +23,8 @@ struct RoomPage: View {
     @State private var stateSheet: StateSheetMode?
     @State private var offerBusy = false               // 邀约应答进行中（防连点）
     @State private var petCare: PetCareTarget?         // 照顾面板（在场宠物）
+    @State private var swipedGroup: String?            // 左滑露出删除键的那一轮（一次只开一个）
+    @State private var deleteTarget: TurnGroup?        // 点了删除 → 确认弹窗（删了不可撤）
     @FocusState private var inputFocused: Bool         // 输入区聚焦（收键盘/自动触底用）
 
     struct PetCareTarget: Identifiable { let id: String }
@@ -72,6 +74,18 @@ struct RoomPage: View {
                 Button("清掉", role: .destructive) { stateDraft = ""; stateSheet = .remove(entry) }
                 Button("取消", role: .cancel) {}
             }
+        }
+        // 左滑删除的确认（删了不可撤：房间事件流和角色经历流一起没，AI 下次注入就看不见了）
+        .confirmationDialog("删掉这一轮的 \(deleteTarget?.deletable.count ?? 0) 条记录？",
+                            isPresented: Binding(
+            get: { deleteTarget != nil }, set: { if !$0 { deleteTarget = nil } }),
+            titleVisibility: .visible) {
+            if let g = deleteTarget {
+                Button("删除", role: .destructive) { deleteGroup(g) }
+                Button("取消", role: .cancel) { swipedGroup = nil }
+            }
+        } message: {
+            Text("大家的记忆里也会一起消失，下次醒来就看不见了。进出场那条会留着。")
         }
         .sheet(item: $stateSheet) { mode in stateEditor(mode) }
         .sheet(item: $petCare) { target in
@@ -330,13 +344,22 @@ struct RoomPage: View {
                             .font(.caption).foregroundStyle(Color.house.textSecondary)
                             .padding(.top, 30)
                     }
-                    let breaks = turnBreaks
-                    ForEach(events) { ev in
+                    let groups = turnGroups
+                    ForEach(Array(groups.enumerated()), id: \.element.id) { i, g in
                         VStack(spacing: 10) {
-                            if breaks.contains(ev.id) { turnDivider }
-                            eventRow(ev)
+                            if i > 0 && g.turn != groups[i - 1].turn { turnDivider }
+                            SwipeToDeleteRow(
+                                enabled: !g.deletable.isEmpty,
+                                isOpen: swipedGroup == g.id,
+                                onOpen: { swipedGroup = g.id },
+                                onClose: { if swipedGroup == g.id { swipedGroup = nil } },
+                                onDelete: { deleteTarget = g }
+                            ) {
+                                VStack(spacing: 10) {
+                                    ForEach(g.events) { ev in eventRow(ev).id(ev.id) }
+                                }
+                            }
                         }
-                        .id(ev.id)
                     }
                     // 正在回应：房间里谁的醒来在生成中（轮询带回来的）
                     if let reps = detail?.replying, !reps.isEmpty {
@@ -355,9 +378,9 @@ struct RoomPage: View {
                 }
                 .padding(.horizontal, 16).padding(.vertical, 10)
                 .frame(maxWidth: .infinity, minHeight: 44)
-                // 点事件区空白 = 收键盘（simultaneous：别抢气泡将来可能有的点击）
+                // 点事件区空白 = 收键盘 + 收起左滑露出来的删除键
                 .contentShape(Rectangle())
-                .onTapGesture { inputFocused = false }
+                .onTapGesture { inputFocused = false; swipedGroup = nil }
             }
             .scrollDismissesKeyboard(.interactively)
             .onChange(of: events) { _, evs in
@@ -373,14 +396,44 @@ struct RoomPage: View {
         }
     }
 
-    /// 该在哪几条事件前面画分轮横线：turn 变了就是新的一轮（一次醒来 / 一次发送）。
-    /// 两边都没 turn（老历史、同一次发送拆出来的多条）比出来相等，不画；第一条前面不画。
-    private var turnBreaks: Set<String> {
-        var out = Set<String>()
-        for (i, ev) in events.enumerated() where i > 0 && ev.turn != events[i - 1].turn {
-            out.insert(ev.id)
+    /// 一轮 = 分割线之间的一组（一次醒来 / 一次发送落下的全部事件）。左滑删除按组走，
+    /// 服务端也按 turn 收整组——两边同一个口径。
+    /// **没有 turn 的老历史各自成组**：服务端对无 turn 的事件只删它自己，UI 要是把连着
+    /// 的几条圈成一组，滑一下只会掉一条，看着像删漏了。分轮横线仍按 turn 比（nil != nil
+    /// 是 false，老历史之间照旧不画线）。
+    private struct TurnGroup: Identifiable {
+        let id: String            // 组内第一条的 id（删除时拿它去服务端认这一轮）
+        let turn: String?
+        let events: [RoomEvent]
+        /// 真能删的：进出场是可见区间的骨架，服务端留着不删（组里只剩它就别给删除键）
+        var deletable: [RoomEvent] {
+            events.filter { $0.kind != "enter" && $0.kind != "leave" }
+        }
+    }
+
+    private var turnGroups: [TurnGroup] {
+        var out: [TurnGroup] = []
+        for ev in events {
+            if let t = ev.turn, let last = out.last, last.turn == t {
+                out[out.count - 1] = TurnGroup(id: last.id, turn: t, events: last.events + [ev])
+            } else {
+                out.append(TurnGroup(id: ev.id, turn: ev.turn, events: [ev]))
+            }
         }
         return out
+    }
+
+    private func deleteGroup(_ g: TurnGroup) {
+        Task {
+            do {
+                try await service.roomDeleteTurn(roomID, eventID: g.id)
+                swipedGroup = nil
+                await refresh()
+            } catch {
+                errorText = error.localizedDescription
+                await refresh()   // 可能已经被别处删过了：以服务端为准
+            }
+        }
     }
 
     private var turnDivider: some View {
@@ -558,6 +611,59 @@ struct RoomPage: View {
         if s < 3600 { return "\(max(1, s / 60))分钟前" }
         if s < 86400 { return "\(s / 3600)小时前" }
         return "\(s / 86400)天前"
+    }
+}
+
+/// 左滑露出删除键（房间事件流按「一轮」删，2026-08-19）。
+/// 事件流是 LazyVStack 不是 List，没有 .swipeActions 可用——气泡样式不肯为一个删除键
+/// 让位，所以自己做一个：**横向位移大于纵向才认**，simultaneousGesture 挂着不抢
+/// ScrollView 的滚动；开合状态由父视图持有，保证一次只开一个。
+private struct SwipeToDeleteRow<Content: View>: View {
+    let enabled: Bool
+    let isOpen: Bool
+    let onOpen: () -> Void
+    let onClose: () -> Void
+    let onDelete: () -> Void
+    @ViewBuilder let content: () -> Content
+
+    private let revealed: CGFloat = 76
+    @GestureState private var drag: CGFloat = 0
+
+    var body: some View {
+        let offset = enabled
+            ? min(0, max(-revealed - 16, (isOpen ? -revealed : 0) + drag))
+            : 0
+        ZStack(alignment: .trailing) {
+            Button(role: .destructive, action: onDelete) {
+                Text("删除")
+                    .font(.footnote.bold())
+                    .foregroundStyle(.white)
+                    .frame(width: revealed - 8)
+                    .padding(.vertical, 10)
+                    .background(RoundedRectangle(cornerRadius: 10).fill(Color.red))
+            }
+            .opacity(offset < -12 ? 1 : 0)      // 没滑开就别让它抢点击
+            .allowsHitTesting(offset < -12)
+
+            content()
+                .frame(maxWidth: .infinity)
+                .background(Color.house.bg)     // 盖住底下的删除键（不然滑之前就透出来）
+                .offset(x: offset)
+        }
+        .animation(.snappy(duration: 0.2), value: isOpen)
+        .simultaneousGesture(
+            DragGesture(minimumDistance: 12)
+                .updating($drag) { v, state, _ in
+                    guard enabled,
+                          abs(v.translation.width) > abs(v.translation.height) else { return }
+                    state = v.translation.width
+                }
+                .onEnded { v in
+                    guard enabled,
+                          abs(v.translation.width) > abs(v.translation.height) else { return }
+                    let end = (isOpen ? -revealed : 0) + v.translation.width
+                    if end < -revealed / 2 { onOpen() } else { onClose() }
+                })
     }
 }
 
