@@ -113,7 +113,7 @@ def _event_text(ev: dict) -> str:
     name = world.entity_name(ev.get("actor", ""))
     t = ev.get("type")
     if t == "speech":
-        return f"{name}在旁边说话：「{ev.get('text', '')}」（你听不懂内容，只听语气和熟词）"
+        return f"{name}在旁边说话：「{world.strip_quotes(ev.get('text', ''))}」（你听不懂内容，只听语气和熟词）"
     if t == "action":
         return f"{name} *{ev.get('text', '')}*"
     return f"（{ev.get('text', '')}）"

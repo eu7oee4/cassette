@@ -137,7 +137,7 @@ def build_context_timeline(conv_items: list[dict], reflect_limit: int = 5,
             name = "你" if actor == char_id else world.entity_name(actor)
             t = ev.get("type")
             if t == "speech":
-                line = f"（{rn}）{name}：「{ev.get('text', '')}」"
+                line = f"（{rn}）{name}：「{world.strip_quotes(ev.get('text', ''))}」"
             elif t == "action":
                 line = f"（{rn}）{name} *{ev.get('text', '')}*"
             else:

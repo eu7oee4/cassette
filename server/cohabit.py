@@ -78,7 +78,9 @@ def _render_event(ev: dict, self_id: str) -> str:
     if ev.get("type") == "action":
         return f"[{t}] {name} *{text}*"
     if ev.get("type") == "speech":
-        return f"[{t}] {name}：「{text}」"
+        # strip_quotes：存量事件里有模型自己写进去的引号（新写的在数据层就剥了）。
+        # 渲染这层套一次就够——套两层它下一轮会照着学，越滚越多（2026-08-19 实录）。
+        return f"[{t}] {name}：「{world.strip_quotes(text)}」"
     return f"[{t}] （{text}）"   # system：进出 / 状态改动，事件文本自带人名
 
 
@@ -191,7 +193,7 @@ def cohabit_prompt(cid: str, reasons: list[dict], settings: dict) -> str:
 严格按下面格式回答（每个标签一行开头，英文+冒号，全部都要写，用不上的留空）：
 THOUGHTS: <你此刻真实的内心，几句话>
 ACTION: <none / act / phone，三选一。act=在你所在的房间里表达；phone=给{u}手机发消息，人在哪都行；一轮只能选一样>
-SAY: <ACTION=act 时你在房间里的动作和说话，全写这一行：动作用 *星号* 包起来，说话直接写，可以交错（如 "*拉开窗帘* 天亮了 *回头看她*"），会按顺序拆开上屏。同一个动作只写一遍；不表达留空>
+SAY: <ACTION=act 时你在房间里的动作和说话，全写这一行：动作用 *星号* 包起来，说话直接写、**别加引号**（上屏和别人看到的都会自动带），可以交错（如 "*拉开窗帘* 天亮了 *回头看她*"），会按顺序拆开上屏。同一个动作只写一遍；不表达留空>
 STATE: <ACTION=act 时顺手改这里的地点状态，每行一条、最多 {world.MAX_STATE_OPS_PER_ACT} 条：add: 文本 ／ edit 条目id: 新文本 ／ remove 条目id: 一句交代（如 "remove ab12cd34: 把凉透的牛奶端走倒了"，交代可省）。⚠️ 快照写的是**这里的东西和环境**（桌上剩了半杯牛奶、窗帘拉开了），你的身体姿势不进快照——你在干嘛用 SAY 表达；不改留空>
 PHONE: <ACTION=phone 时发给{u}的消息>
 MOVE: <想去哪就写上面清单里的房间 id；id 后可空格接一句进场的样子，如 "living_room 打着哈欠晃进来"；不动写 "无"。移动发生在这一轮的最后，走完下一轮会告诉你结果>

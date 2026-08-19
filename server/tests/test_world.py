@@ -313,6 +313,28 @@ class TestExperience(WorldBase):
                              [e["text"] for e in world.read_experience(cid)])
 
 
+class TestStripQuotes(unittest.TestCase):
+    """说话只存话本身（2026-08-19：小卡说了句「「「…」」」，引号越滚越多）。"""
+
+    def test_peels_every_layer(self):
+        self.assertEqual(world.strip_quotes("「「「今天够了。」」」"), "今天够了。")
+        self.assertEqual(world.strip_quotes("「在忙吗」"), "在忙吗")
+        self.assertEqual(world.strip_quotes(' "好啊" '), "好啊")
+        self.assertEqual(world.strip_quotes("『试试』"), "试试")
+
+    def test_keeps_quotes_inside(self):
+        # 整句没被裹住：首引号在中间就闭了，剥了会把「和」吃掉
+        self.assertEqual(world.strip_quotes("「甲」和「乙」"), "「甲」和「乙」")
+        # 裹住但里面还有引号：只剥外面那层，里面的是内容
+        self.assertEqual(world.strip_quotes("「他说「不」」"), "他说「不」")
+        self.assertEqual(world.strip_quotes("没有引号"), "没有引号")
+        self.assertEqual(world.strip_quotes(""), "")
+
+    def test_speech_events_store_bare_text(self):
+        segs = world.split_mixed("*站起来* 「我不走」")
+        self.assertEqual(segs, [("action", "站起来"), ("speech", "我不走")])
+
+
 class TestDeleteTurn(WorldBase):
     """机主的橡皮擦（2026-08-19）：整轮删，进出场留骨架，经历流同删。"""
 

@@ -108,7 +108,8 @@ def _render_event(ev: dict, pid: str) -> str:
     if ev.get("type") == "action":
         return f"{name} *{ev.get('text', '')}*"
     if ev.get("type") == "speech":
-        return f"{name}：「{ev.get('text', '')}」"
+        # 同 cohabit：渲染只套一层，存量里模型自己写的那层剥掉（不然猫也学着叠引号）
+        return f"{name}：「{world.strip_quotes(ev.get('text', ''))}」"
     return f"（{ev.get('text', '')}）"
 
 

@@ -459,7 +459,7 @@ def act(entity: str, room_id: str, action: str = "", speech: str = "") -> dict:
     只有在场才写得进——房间号和实际位置对不上就 NotPresent（防 UI 停留在旧页面、
     或 AI 的 ACTION 带着过时前提）。"""
     action = (action or "").strip()
-    speech = (speech or "").strip()
+    speech = strip_quotes(speech)   # 同 act_mixed：事件文本只存话本身
     if not action and not speech:
         raise ValueError("action 和 speech 至少要有一个")
     with _LOCK:
@@ -478,6 +478,46 @@ def act(entity: str, room_id: str, action: str = "", speech: str = "") -> dict:
 # 「*坐下* 今天好冷 *拉过毯子* 你也过来」→ action/speech/action/speech 四条。
 
 
+_QUOTE_PAIRS = [("「", "」"), ("『", "』"), ("“", "”"), ('"', '"')]
+
+
+def strip_quotes(text: str) -> str:
+    """剥掉整句外面裹着的引号（有几层剥几层）。
+
+    为什么必须有（2026-08-19 实录，小卡说了句「「「…」」」）：注入渲染给说话套一层
+    ——cohabit/pet 都是 `名字：「{text}」`。模型在 SAY 里**自己**又写了一层引号，
+    存进事件流原样带着，于是下一轮它在自己上下文里看到的是两层，照着学就写三层，
+    棘轮一样只增不减。断这个回路要在数据层剥：事件文本只存**说的话本身**，引号
+    是渲染的事。句中的引号（他说「不」）不动，只认整句被裹住的那种。"""
+    s = (text or "").strip()
+    while len(s) >= 2:
+        for lo, hi in _QUOTE_PAIRS:
+            if _wrapped(s, lo, hi):
+                s = s[1:-1].strip()
+                break
+        else:
+            break
+    return s
+
+
+def _wrapped(s: str, lo: str, hi: str) -> bool:
+    """整句是不是被这一对引号裹住的：开头那个引号得**正好在末尾闭合**。
+    「A」和「B」→ 首引号在中间就闭了，不算裹住（剥了会把中间的「和」吃掉）。"""
+    if not (s.startswith(lo) and s.endswith(hi)):
+        return False
+    if lo == hi:                      # 直引号没有方向，只能数个数
+        return s.count(lo) == 2
+    depth = 0
+    for i, ch in enumerate(s):
+        if ch == lo:
+            depth += 1
+        elif ch == hi:
+            depth -= 1
+            if depth == 0 and i != len(s) - 1:
+                return False
+    return depth == 0
+
+
 def split_mixed(text: str) -> list[tuple[str, str]]:
     """混写文本 → [(类型, 内容)]，类型 action|speech，保序、去空。纯解析无 IO，可独立测。
 
@@ -491,6 +531,8 @@ def split_mixed(text: str) -> list[tuple[str, str]]:
     out: list[tuple[str, str]] = []
     for i, seg in enumerate(parts):
         seg = " ".join(seg.split())
+        if i % 2 == 0:
+            seg = strip_quotes(seg)   # 说话只存话本身，外面那层引号是渲染的事
         if seg:
             out.append(("action" if i % 2 == 1 else "speech", seg))
     return out

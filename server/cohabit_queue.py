@@ -208,7 +208,7 @@ def _reason_text(room_name: str, ev: dict) -> str:
     name = world.entity_name(ev.get("actor", ""))
     t = ev.get("type")
     if t == "speech":
-        return f"「{room_name}」里，{name}说：「{ev.get('text', '')}」"
+        return f"「{room_name}」里，{name}说：「{world.strip_quotes(ev.get('text', ''))}」"
     if t == "action":
         return f"「{room_name}」里，{name} *{ev.get('text', '')}*"
     return f"「{room_name}」里：{ev.get('text', '')}"   # system 事件文本自带人名

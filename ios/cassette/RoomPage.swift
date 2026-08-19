@@ -26,6 +26,7 @@ struct RoomPage: View {
     @State private var swipedGroup: String?            // 左滑露出删除键的那一轮（一次只开一个）
     @State private var deleteTarget: TurnGroup?        // 点了删除 → 确认弹窗（删了不可撤）
     @State private var noticeText: String?             // 删完的实话（有一轮撤不回时说一声）
+    @State private var landedAtBottom = false          // 首批事件到了没：进门要落在最新一条
     @FocusState private var inputFocused: Bool         // 输入区聚焦（收键盘/自动触底用）
 
     struct PetCareTarget: Identifiable { let id: String }
@@ -388,8 +389,22 @@ struct RoomPage: View {
                 .onTapGesture { inputFocused = false; swipedGroup = nil }
             }
             .scrollDismissesKeyboard(.interactively)
+            // 进门就在最新那条（房间是「现在」，不是从头读的档案）。光靠 onChange 不够：
+            // 首帧 LazyVStack 还没把内容排完，那一脚滚了个寂寞——所以 defaultScrollAnchor
+            // 先把起点定在底，第一批数据到了再不带动画补一脚（带动画会看见它从头飞下来）。
+            .defaultScrollAnchor(.bottom)
             .onChange(of: events) { _, evs in
-                if let last = evs.last { withAnimation { proxy.scrollTo(last.id, anchor: .bottom) } }
+                guard let last = evs.last else { return }
+                if landedAtBottom {
+                    withAnimation { proxy.scrollTo(last.id, anchor: .bottom) }
+                } else {
+                    landedAtBottom = true
+                    proxy.scrollTo(last.id, anchor: .bottom)
+                    // 懒加载排完版可能晚半拍，补一脚兜底
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+                        proxy.scrollTo(last.id, anchor: .bottom)
+                    }
+                }
             }
             // 键盘弹出 → 底部自动触底（等键盘动画起来再滚，不然滚了个寂寞）
             .onChange(of: inputFocused) { _, focused in
@@ -487,7 +502,7 @@ struct RoomPage: View {
                     Spacer(minLength: 40)
                     timeLabel(ev.ts)
                 }
-                Text(ev.text)
+                Text(Self.stripQuotes(ev.text))
                     .font(.body)
                     .foregroundStyle(Color.house.textPrimary)
                     .padding(.horizontal, 12).padding(.vertical, 8)
@@ -523,6 +538,39 @@ struct RoomPage: View {
             }
         }
         return body.filter { $0 != "「" && $0 != "」" }
+    }
+
+    /// 气泡里不显示裹在整句外面的引号——气泡本身就是「这是说的话」。
+    /// 服务端从 2026-08-19 起写入时就剥了，这里管的是**存量**：之前模型自己写进去的
+    /// 那层（甚至三层，见小卡 8-19 那条）照样躺在事件流里。句中的引号不动。
+    private static func stripQuotes(_ text: String) -> String {
+        var s = text.trimmingCharacters(in: .whitespaces)
+        let pairs: [(Character, Character)] = [("「", "」"), ("『", "』"), ("“", "”"), ("\"", "\"")]
+        var peeled = true
+        while peeled, s.count >= 2 {
+            peeled = false
+            for (lo, hi) in pairs where s.first == lo && s.last == hi {
+                guard wrapped(s, lo, hi) else { continue }
+                s = String(s.dropFirst().dropLast()).trimmingCharacters(in: .whitespaces)
+                peeled = true
+                break
+            }
+        }
+        return s
+    }
+
+    /// 首引号是不是正好在末尾闭合（「甲」和「乙」不算裹住，剥了会吃掉中间的字）。
+    private static func wrapped(_ s: String, _ lo: Character, _ hi: Character) -> Bool {
+        if lo == hi { return s.filter { $0 == lo }.count == 2 }
+        var depth = 0
+        for (i, ch) in s.enumerated() {
+            if ch == lo { depth += 1 }
+            else if ch == hi {
+                depth -= 1
+                if depth == 0 && i != s.count - 1 { return false }
+            }
+        }
+        return depth == 0
     }
 
     private func actorName(_ eid: String) -> String {
@@ -638,7 +686,23 @@ private struct SwipeToDeleteRow<Content: View>: View {
     @ViewBuilder let content: () -> Content
 
     private let revealed: CGFloat = 76
+    /// 起手死区：手指先走够这些点，格子才开始跟着动。滑动列表时手指本来就会带点横向
+    /// 分量，死区小了就一路蹭出删除键来（机主 2026-08-19：太容易误触）。
+    private let deadZone: CGFloat = 30
+    /// 松手时超过这个距离才算「我要删」，否则弹回去。
+    private var openAt: CGFloat { revealed * 0.8 }
     @GestureState private var drag: CGFloat = 0
+
+    private func _horizontal(_ t: CGSize) -> Bool {
+        abs(t.width) > abs(t.height) * 1.5
+    }
+
+    /// 手指位移 → 格子位移：死区内不动，出了死区从 0 开始接着走（不跳一下）。
+    private func damped(_ dx: CGFloat) -> CGFloat {
+        if dx < -deadZone { return dx + deadZone }
+        if dx > deadZone { return dx - deadZone }
+        return 0
+    }
 
     var body: some View {
         let offset = enabled
@@ -662,18 +726,17 @@ private struct SwipeToDeleteRow<Content: View>: View {
                 .offset(x: offset)
         }
         .animation(.snappy(duration: 0.2), value: isOpen)
+        // 横向位移要**明显压过**纵向（1.5 倍）才认：滚动时的手抖不该滑出删除键。
         .simultaneousGesture(
-            DragGesture(minimumDistance: 12)
+            DragGesture(minimumDistance: deadZone)
                 .updating($drag) { v, state, _ in
-                    guard enabled,
-                          abs(v.translation.width) > abs(v.translation.height) else { return }
-                    state = v.translation.width
+                    guard enabled, _horizontal(v.translation) else { return }
+                    state = damped(v.translation.width)
                 }
                 .onEnded { v in
-                    guard enabled,
-                          abs(v.translation.width) > abs(v.translation.height) else { return }
-                    let end = (isOpen ? -revealed : 0) + v.translation.width
-                    if end < -revealed / 2 { onOpen() } else { onClose() }
+                    guard enabled, _horizontal(v.translation) else { return }
+                    let end = (isOpen ? -revealed : 0) + damped(v.translation.width)
+                    if end < -openAt { onOpen() } else { onClose() }
                 })
     }
 }
