@@ -86,6 +86,25 @@ class TestEventWake(PetQueueBase):
         pq.on_room_event(self.cat_room, self.ev())
         self.assertIn(self.pid, pq._pending)
 
+    def test_forget_events_drops_queued_reason(self):
+        """猫这边同理：删了事件，还没执行的醒因跟着撤。"""
+        world.move("user", self.cat_room)
+        ev = {"id": "e1", "actor": "user", "type": "speech", "text": "小猫咪"}
+        pq.on_room_event(self.cat_room, ev)
+        self.assertIn(self.pid, pq._pending)
+        self.assertEqual(pq.forget_events({"e1"}), 1)
+        self.assertNotIn(self.pid, pq._pending)
+        pq._drain()
+        self.assertEqual(self.wakes, [])          # 撤干净了，不会再醒
+
+    def test_drain_passes_texts_to_engine(self):
+        world.move("user", self.cat_room)
+        pq.on_room_event(self.cat_room, {"id": "e2", "actor": "user",
+                                         "type": "speech", "text": "小猫咪"})
+        pq._drain()
+        _, reasons = self.wakes[-1]
+        self.assertTrue(all(isinstance(r, str) for r in reasons))   # 引擎收的仍是文本
+
     def test_probability_gate(self):
         pq.random = types.SimpleNamespace(random=lambda: 0.9)   # > PET_EVENT_PROB
         pq.on_room_event(self.cat_room, self.ev())

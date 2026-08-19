@@ -25,6 +25,7 @@ struct RoomPage: View {
     @State private var petCare: PetCareTarget?         // 照顾面板（在场宠物）
     @State private var swipedGroup: String?            // 左滑露出删除键的那一轮（一次只开一个）
     @State private var deleteTarget: TurnGroup?        // 点了删除 → 确认弹窗（删了不可撤）
+    @State private var noticeText: String?             // 删完的实话（有一轮撤不回时说一声）
     @FocusState private var inputFocused: Bool         // 输入区聚焦（收键盘/自动触底用）
 
     struct PetCareTarget: Identifiable { let id: String }
@@ -65,6 +66,10 @@ struct RoomPage: View {
             get: { errorText != nil }, set: { if !$0 { errorText = nil } })) {
             Button("好", role: .cancel) {}
         } message: { Text(errorText ?? "") }
+        .alert("删了，有一条撤不回", isPresented: Binding(
+            get: { noticeText != nil }, set: { if !$0 { noticeText = nil } })) {
+            Button("知道了", role: .cancel) {}
+        } message: { Text(noticeText ?? "") }
         .confirmationDialog(editingEntry?.text ?? "", isPresented: Binding(
             get: { editingEntry != nil }, set: { if !$0 { editingEntry = nil } }),
             titleVisibility: .visible) {
@@ -426,8 +431,14 @@ struct RoomPage: View {
     private func deleteGroup(_ g: TurnGroup) {
         Task {
             do {
-                try await service.roomDeleteTurn(roomID, eventID: g.id)
+                let res = try await service.roomDeleteTurn(roomID, eventID: g.id)
                 swipedGroup = nil
+                // 正在生成的那一轮撤不回：注入在它开始时就组好了，删得再快也已经读进去
+                if let who = res.replying {
+                    noticeText = "删了，但 \(actorName(who)) 这一轮已经开始生成了——"
+                        + "它读到的是删之前的样子，这次的回应里可能还带着。"
+                        + "回头想清掉 TA 的那段内心，去心流日志删。"
+                }
                 await refresh()
             } catch {
                 errorText = error.localizedDescription

@@ -128,6 +128,15 @@ struct RoomEvent: Decodable, Identifiable, Equatable {
     let turn: String?         // 同一轮（一次醒来 / 一次发送）落下的事件共用；老历史没有
 }
 
+/// 删一轮的结果。deleted=真删掉几条；forgot=跟着撤掉几条还没执行的醒因；
+/// replying=**撤不回的那个人**：他这一轮的注入在开始生成时就组好了，删得再快也已经
+/// 读进去了（UI 要如实说一声，别让机主以为删干净了）。
+struct RoomDeleteResult: Decodable {
+    let deleted: Int
+    let forgot: Int?
+    let replying: String?
+}
+
 /// /world/move 的结果。门锁着不是错误：ok=false + text（「门锁着，没进去」）。
 struct MoveResult: Decodable {
     let ok: Bool
@@ -172,15 +181,14 @@ extension ChatService {
     }
 
     /// 删掉一条记录**所在的那一轮**（左滑删除）：服务端按 turn 收整组，房间事件流 +
-    /// 各角色的经历流同删，进出场那条留着（它是可见区间的骨架，删了 AI 反而看见更早的
-    /// 历史）。删完下次注入立刻就变了。返回真删掉的条数。
+    /// 各角色的经历流同删，还排在队列里没执行的醒因跟着撤，进出场那条留着（它是可见
+    /// 区间的骨架，删了 AI 反而看见更早的历史）。删完下次注入立刻就变了。
     @discardableResult
-    func roomDeleteTurn(_ id: String, eventID: String) async throws -> Int {
+    func roomDeleteTurn(_ id: String, eventID: String) async throws -> RoomDeleteResult {
         let body = try JSONEncoder().encode(["id": eventID])
         let data = try await perform(authedRequest("POST", "/rooms/\(id)/events/delete",
                                                     jsonBody: body, timeout: 10))
-        struct Box: Decodable { let deleted: Int }
-        return (try? JSONDecoder().decode(Box.self, from: data).deleted) ?? 0
+        return try JSONDecoder().decode(RoomDeleteResult.self, from: data)
     }
 
     /// 导演口：手写一段环境刺激（如「浴室传来水声」），点名让谁事件醒。

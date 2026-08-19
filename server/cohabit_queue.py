@@ -160,6 +160,34 @@ def _push(cid: str, reason: dict) -> None:
         _order.append(cid)
 
 
+def forget_events(ev_ids: set) -> int:
+    """机主删掉了这些事件 → 把还排在队列里、由它们生出来的醒因一起撤掉，返回撤了几条。
+
+    为什么必须有（2026-08-19 实录）：事件一落地，醒因的**文本拷贝**就进了 _pending
+    等着执行，删事件流里的原件动不到这份内存副本——机主按了暂停、删了「摇了摇头，
+    没让抱」，一按开始，那一轮的【这次发生了什么】里它照样在，AI 的心流里也就留下了
+    一条本该不存在的记录。删记录要连队列里的影子一起删。
+
+    撤不回的只剩一种：正在生成的那一轮（注入在执行开始时就组好了）——那个交给
+    调用方报给机主看，别假装删干净了。"""
+    if not ev_ids:
+        return 0
+    n = 0
+    with _lock:
+        for cid in list(_pending):
+            keep = [r for r in _pending[cid] if r.get("ev") not in ev_ids]
+            n += len(_pending[cid]) - len(keep)
+            if keep:
+                _pending[cid] = keep
+            else:
+                _pending.pop(cid, None)
+                if cid in _order:
+                    _order.remove(cid)
+    if n:
+        logerr(f"cohabit：机主删了事件，跟着撤掉 {n} 条还没执行的醒因")
+    return n
+
+
 def external_input() -> None:
     """有新外部输入（用户发言/动作/移动/状态编辑/手机消息）→ 连发计数全体清零。
     用户是这个世界唯一的外部输入源，粗粒度到"全体"就够了。"""
@@ -196,7 +224,9 @@ def _on_room_event(room_id: str, ev: dict) -> None:
         room_name = world.room(room_id).get("name", room_id)
     except KeyError:
         return
-    reason = {"kind": "event", "text": _reason_text(room_name, ev)}
+    # ev＝这条醒因是哪条事件生出来的：机主删掉那条事件时，还排在队列里的这份拷贝
+    # 要跟着撤（forget_events）——不然删的是原件，队列里的副本照样被组装进注入。
+    reason = {"kind": "event", "text": _reason_text(room_name, ev), "ev": ev.get("id")}
     # 作者排除 + 用户不是 AI + 宠物不走这条线（猫的醒来在 pet_queue，这个队列起的是
     # claude -p，把猫入队会在 characters.resolve 处炸）。
     targets = [e for e in world.occupants(room_id)

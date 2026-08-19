@@ -84,6 +84,24 @@ def paused() -> bool:
     return cohabit_queue.paused()
 
 
+def forget_events(ev_ids: set) -> int:
+    """机主删了事件 → 撤掉猫这边还没执行的对应醒因（口径同 cohabit_queue.forget_events）。"""
+    if not ev_ids:
+        return 0
+    n = 0
+    with _lock:
+        for pid in list(_pending):
+            keep = [r for r in _pending[pid] if r.get("ev") not in ev_ids]
+            n += len(_pending[pid]) - len(keep)
+            if keep:
+                _pending[pid] = keep
+            else:
+                _pending.pop(pid, None)
+    if n:
+        logerr(f"pet：机主删了事件，跟着撤掉 {n} 条还没执行的醒因")
+    return n
+
+
 def external_for_pet(pid: str) -> None:
     """被直接互动 = 猫的外部输入：事件连发计数清零（pet_engine.interact 调）。"""
     with _lock:
@@ -117,13 +135,14 @@ def on_room_event(room_id: str, ev: dict) -> None:
                 continue
         if random.random() >= PET_EVENT_PROB:
             continue
-        text = _event_text(ev)
+        # 存 {ev, text}：ev = 生出这条醒因的事件 id，机主删事件时跟着撤（forget_events）
+        reason = {"ev": ev.get("id"), "text": _event_text(ev)}
         with _lock:
             if pid in _pending:
-                if text not in _pending[pid]:
-                    _pending[pid].append(text)
+                if reason["text"] not in [r["text"] for r in _pending[pid]]:
+                    _pending[pid].append(reason)
             else:
-                _pending[pid] = [text]
+                _pending[pid] = [reason]
         _signal.set()
 
 
@@ -152,7 +171,7 @@ def _drain() -> None:
             if not _pending:
                 return
             pid, reasons = _pending.popitem()
-        _wake(pid, reasons, autonomous=False)
+        _wake(pid, [r["text"] for r in reasons], autonomous=False)
 
 
 def _tick(now: float) -> None:

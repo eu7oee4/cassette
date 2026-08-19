@@ -991,13 +991,25 @@ def post_room_act(room_id: str, body: RoomActIn,
 def post_room_event_delete(room_id: str, body: RoomEventDeleteIn,
                            x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
     """删掉一条记录所在的**那一轮**（房间视图左滑删除）：房间事件流 + 各角色经历流
-    同删，进出场留下（口径与理由见 world.delete_turn）。删完 AI 的注入立刻就变了。"""
+    同删，进出场留下（口径与理由见 world.delete_turn）。删完 AI 的注入立刻就变了。
+
+    三处影子一并处理（2026-08-19 实录：删完 AI 醒来照样念出被删的那句）：
+    - 排在队列里没执行的醒因 → 跟着撤（forget_events）：事件一落地，醒因的**文本
+      拷贝**就进了内存队列，删原件动不到它；
+    - 正在生成的那一轮 → 撤不回（注入在执行开始时就组好了），如实回 replying 给 UI，
+      别假装删干净了；
+    - 已经写进心流日志的旧内心 → 不动（那是 TA 想过的事，不是这次删的记录），
+      要删走 Mind 页那条路。"""
     verify_auth(x_auth)
     try:
         world.room(room_id)
-        return world.delete_turn(room_id, body.id)
+        res = world.delete_turn(room_id, body.id)
     except KeyError as e:
         raise HTTPException(status_code=404, detail=str(e))
+    ids = set(res.get("ids") or [])
+    res["forgot"] = cohabit_queue.forget_events(ids) + pet_queue.forget_events(ids)
+    res["replying"] = cohabit_queue.executing()
+    return res
 
 
 @app.post("/rooms/{room_id}/state")

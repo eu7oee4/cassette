@@ -126,6 +126,27 @@ class TestEventWake(QueueBase):
         self.assertIn("在忙吗", texts)
         self.assertIn("的房间", texts)          # 房间名进原因
 
+    def test_deleting_event_forgets_queued_reason(self):
+        """删事件要连队列里那份文本拷贝一起撤（2026-08-19 实录：删完 AI 醒来照样念）。"""
+        world.move("user", self.home)
+        self._reset_queue()
+        r = world.act("user", self.home, action="摇了摇头", speech="不要抱")
+        ids = {e["id"] for e in r["events"]}
+        self.assertIn("摇了摇头", "".join(x["text"] for x in cq._pending[self.cid]))
+        self.assertEqual(cq.forget_events(ids), 2)
+        self.assertNotIn(self.cid, cq._pending)       # 空了就从队列里摘掉
+        self.assertNotIn(self.cid, cq._order)
+        self.assertEqual(cq.forget_events(set()), 0)  # 没给 id 就什么都不动
+
+    def test_forget_keeps_unrelated_reasons(self):
+        world.move("user", self.home)
+        self._reset_queue()
+        r = world.act("user", self.home, speech="删这句")
+        cq.enqueue(self.cid, {"kind": "solo", "text": "自己醒的，跟事件无关"}, system=False)
+        cq.forget_events({e["id"] for e in r["events"]})
+        left = [x["text"] for x in cq._pending[self.cid]]
+        self.assertEqual(left, ["自己醒的，跟事件无关"])   # 自主醒来不该被误伤
+
     def test_pet_never_enqueued(self):
         # 宠物不走 claude 醒来队列（PLAN_pet P0）：在场有猫，事件只唤角色
         pid = self.register_pet()
