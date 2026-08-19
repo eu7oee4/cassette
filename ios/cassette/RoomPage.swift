@@ -505,6 +505,12 @@ struct RoomPage: View {
                 Text(Self.stripQuotes(ev.text))
                     .font(.body)
                     .foregroundStyle(Color.house.textPrimary)
+                    // 长句该折行，不该截成一行加 …（机主 2026-08-19 截图：最新那组的
+                    // 两句都被截了，上一组好好的）。原因是气泡在 HStack 里跟 Spacer
+                    // 抢宽度，赶上自动触底那一脚排版时会按「一行的理想宽度」量完截尾。
+                    // fixedSize 纵向放开＝要多高给多高；layoutPriority 让它先拿够宽度。
+                    .fixedSize(horizontal: false, vertical: true)
+                    .layoutPriority(1)
                     .padding(.horizontal, 12).padding(.vertical, 8)
                     .background(RoundedRectangle(cornerRadius: 16).fill(idc.opacity(0.26)))
                     .overlay(RoundedRectangle(cornerRadius: 16)
