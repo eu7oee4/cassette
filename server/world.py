@@ -51,6 +51,10 @@ AWAY = "away"
 ROOMS_DIR = state_store.STATE_DIR / "rooms"
 REGISTRY_PATH = ROOMS_DIR / "registry.json"
 WORLD_PATH = state_store.STATE_DIR / "world.json"
+# 小屋级旋钮（不随角色走，和 settings.json 的角色键分开）：目前只有经历流注入条数。
+HOUSE_SETTINGS_PATH = state_store.STATE_DIR / "house_settings.json"
+EXPERIENCE_LIMIT_DEFAULT = 40
+EXPERIENCE_LIMIT_RANGE = (10, 300)
 
 # 地点状态快照的软上限：超了不硬删，C1 注入时提醒收敛（防膨胀口径见 PLAN_cohabit）。
 ROOM_STATE_SOFT_CAP = 10
@@ -101,6 +105,33 @@ def _write_json(path: Path, data) -> None:
     tmp = path.with_name(f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
     tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), "utf-8")
     tmp.replace(path)
+
+
+# ---------- 小屋旋钮 ----------
+def _clamp_exp_limit(v) -> int:
+    lo, hi = EXPERIENCE_LIMIT_RANGE
+    return min(max(int(v), lo), hi)
+
+
+def experience_limit() -> int:
+    """经历流每轮注入条数（一条＝一个事件，不是一轮生成）。聊天路和同居醒来路共用，
+    每轮组 prompt 时现读——改完下一轮就生效，不用重启。入口在小屋铃铛弹层。"""
+    v = _read_json(HOUSE_SETTINGS_PATH, {}).get("experience_limit")
+    if v is None:
+        return EXPERIENCE_LIMIT_DEFAULT
+    try:
+        return _clamp_exp_limit(v)
+    except Exception:
+        return EXPERIENCE_LIMIT_DEFAULT
+
+
+def set_experience_limit(n) -> int:
+    n = _clamp_exp_limit(n)
+    with _LOCK:
+        d = _read_json(HOUSE_SETTINGS_PATH, {})
+        d["experience_limit"] = n
+        _write_json(HOUSE_SETTINGS_PATH, d)
+    return n
 
 
 # ---------- 实体 ----------

@@ -374,6 +374,9 @@ private struct NudgeSheet: View {
     @State private var picked: Set<String> = []
     @State private var sending = false
     @State private var errorText: String? = nil
+    // 经历流注入条数（小屋级旋钮，暂时寄居在铃铛里）：nil=还没从后端读到
+    @State private var expLimit: Int? = nil
+    @State private var expSaveTask: Task<Void, Never>? = nil
 
     /// 可点名的角色（user 之外的全部实体），按 id 稳定排序。
     private var chars: [(id: String, name: String)] {
@@ -413,10 +416,25 @@ private struct NudgeSheet: View {
                         }
                     }
                 }
+                Section {
+                    if let v = expLimit {
+                        Stepper("每轮注入 \(v) 条", value: Binding(
+                            get: { v },
+                            set: { nv in expLimit = nv; scheduleExpSave(nv) }
+                        ), in: 10...300, step: 10)
+                    } else {
+                        Text("读取中…").foregroundStyle(.secondary)
+                    }
+                } header: {
+                    Text("经历流窗口")
+                } footer: {
+                    Text("聊天和醒来注入的小屋经历条数（一条＝一句话/一个动作），改完下一轮就生效。")
+                }
                 if let errorText {
                     Text(errorText).font(.footnote).foregroundStyle(.red)
                 }
             }
+            .task { expLimit = try? await service.worldExperienceLimit() }
             .navigationTitle("环境动静")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -430,6 +448,20 @@ private struct NudgeSheet: View {
                                       || text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                     }
                 }
+            }
+        }
+    }
+
+    /// 连点 Stepper 会打出一串 POST，去抖 400ms 只发最后一个值（乱序会把旧值写回去）。
+    private func scheduleExpSave(_ n: Int) {
+        expSaveTask?.cancel()
+        expSaveTask = Task {
+            try? await Task.sleep(for: .milliseconds(400))
+            guard !Task.isCancelled else { return }
+            do { try await service.setWorldExperienceLimit(n) }
+            catch {
+                errorText = (error as? ChatServiceError)?.errorDescription
+                    ?? error.localizedDescription
             }
         }
     }

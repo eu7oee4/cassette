@@ -199,6 +199,20 @@ extension ChatService {
         _ = try await perform(authedRequest("POST", "/world/nudge", jsonBody: body, timeout: 8))
     }
 
+    /// 经历流每轮注入条数（小屋级旋钮，聊天/醒来共用；一条＝一个事件）。入口在铃铛弹层。
+    func worldExperienceLimit() async throws -> Int {
+        let data = try await perform(authedRequest("GET", "/world/experience_limit", timeout: 8))
+        struct Box: Decodable { let experience_limit: Int }
+        return try JSONDecoder().decode(Box.self, from: data).experience_limit
+    }
+
+    /// 改经历流注入条数：落盘即生效（后端每轮现读，不用重启）。
+    func setWorldExperienceLimit(_ n: Int) async throws {
+        let body = try JSONEncoder().encode(["experience_limit": n])
+        _ = try await perform(authedRequest("POST", "/world/experience_limit",
+                                            jsonBody: body, timeout: 8))
+    }
+
     /// 暂停/恢复醒来队列（正在生成的说完为止；恢复立即冲队）。
     func worldPause(_ on: Bool) async throws {
         let body = try JSONEncoder().encode(["on": on])

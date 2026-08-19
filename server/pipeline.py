@@ -103,8 +103,8 @@ def build_context_timeline(conv_items: list[dict], reflect_limit: int = 5,
 
     experience_limit > 0 时再并入第三路：小屋经历流（他在场看见的房间事件，跨房间、
     跨在场区间，world._append_experience 在发生那一刻定格的）——三路合出「第一人称
-    经历时间线」（PLAN_cohabit 定稿）。聊天路和同居醒来路都传 40（2026-08-16 起
-    两路同构，现场段只留快照不再单列事件）。"""
+    经历时间线」（PLAN_cohabit 定稿）。聊天路和同居醒来路都传 world.experience_limit()
+    （小屋级旋钮，默认 40；2026-08-16 起两路同构，现场段只留快照不再单列事件）。"""
     items: list[tuple[int, str]] = []
 
     for c in conv_items:
@@ -341,8 +341,13 @@ def build_prompt(messages: list[Message], catalog: Optional[list[dict]] = None,
     lines = extras + [""]
     # 合并时间线：历史对话 + 醒来内心 + 小屋经历流（同居开着时），按时间排。
     conv_items = [{"ts": m.ts, "role": m.role, "text": m.text} for m in history]
+    if config.COHABIT_ENABLED:
+        import world   # 延迟导入，同 build_context_timeline（防循环）
+        exp_n = world.experience_limit()   # 小屋级旋钮，默认 40，铃铛里可调
+    else:
+        exp_n = 0
     timeline = build_context_timeline(conv_items, char_id=char_id,
-                                      experience_limit=40 if config.COHABIT_ENABLED else 0)
+                                      experience_limit=exp_n)
     if timeline:
         if config.COHABIT_ENABLED:
             lines.append("【下面是最近发生的，按时间顺序——手机对话 / 你醒来时的内心 / "

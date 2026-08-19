@@ -872,6 +872,10 @@ class NudgeIn(BaseModel):
     targets: list[str] = []   # 点名醒谁（角色 id，可多个）
 
 
+class ExpLimitIn(BaseModel):
+    experience_limit: int   # 经历流每轮注入条数（夹 10~300，见 world.EXPERIENCE_LIMIT_RANGE）
+
+
 @app.get("/world")
 def get_world(x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
     """房子视图：全部房间（含在场者）+ 全部实体的位置。"""
@@ -924,6 +928,24 @@ def post_world_pause(body: PauseIn,
     verify_auth(x_auth)
     cohabit_queue.set_paused(body.on)
     return {"paused": cohabit_queue.paused()}
+
+
+@app.get("/world/experience_limit")
+def get_experience_limit(x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
+    """经历流每轮注入条数（小屋级旋钮，聊天路和醒来路共用；一条＝一个事件）。"""
+    verify_auth(x_auth)
+    return {"experience_limit": world.experience_limit()}
+
+
+@app.post("/world/experience_limit")
+def post_experience_limit(body: ExpLimitIn,
+                          x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
+    """改经历流注入条数：落盘即生效（每轮组 prompt 现读，不用重启）。入口在小屋铃铛。"""
+    verify_auth(x_auth)
+    lo, hi = world.EXPERIENCE_LIMIT_RANGE
+    if not (lo <= body.experience_limit <= hi):
+        raise HTTPException(status_code=400, detail=f"experience_limit 需在 {lo}~{hi}")
+    return {"experience_limit": world.set_experience_limit(body.experience_limit)}
 
 
 @app.post("/world/nudge")
