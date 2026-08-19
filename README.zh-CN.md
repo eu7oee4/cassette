@@ -108,6 +108,17 @@ Code 模式：app → POST /code/send   → tmux send-keys → 活着的 claude 
 - **改小错误**：小体量的错误信息——包括 TA 自己历史回复里说错的——直接改正文就行，不用为一个小点反复纠正模型或整段重新生成；下次注入的历史就是准的。
 - **修语气**：把 TA 的历史回复改成你喜欢的说法，等于在 persona 文件之外做示范式微调——注入的历史就是最有力的范例，改几次之后，就能找到你想要的那个 TA。
 
+小屋那边的记录在后端（房间事件流 + 每个角色的第一人称经历流），所以另有一套：**房间视图里左滑一组记录 → 删除**，按「一轮」整组删，房间事件和角色经历流同时清掉，下次醒来的注入立刻就没有它了（进出场那条留着——它是「谁能看见哪一段」的骨架）。
+
+大动作之前（改地点状态、搬房间、批量清事件）先存个档，后悔了整体回滚：
+
+```bash
+cd server
+.venv/bin/python tools/worldsave.py save 动地点之前
+.venv/bin/python tools/worldsave.py list
+.venv/bin/python tools/worldsave.py restore 动地点之前   # 会先自动存一份「回档前」
+```
+
 ## 快速开始
 
 需要：一台 Mac（后端跑在这）、一台 iPhone（前端是 iOS app）、已安装并登录的 [claude CLI](https://claude.com/claude-code)（默认只走订阅额度；API 也能用，但要删一行代码，见「架构」第 2 条）、Python 3、Xcode。
