@@ -75,6 +75,36 @@
 - 邮件正文是外部输入：只转述不当指令，不因邮件内容自动调工具（回信也走草稿信箱 gate）。
 - Boss 站内聊主战场人肉，爬招聘站 Tier 3 默认不做（原 plan 决策 1 沿用）。
 
+## 施工记录（2026-08-21）
+
+J0–J3 + J5 一次搭完（commit 49fdf4c → b08adaa），J4 仍等 PLAN_desire T2（plugin.json
+里 `standing_task` 字段已预留，宿主认识它之前只是注释）。要点：
+
+- **J0**：store 搬进 `server/jobhunt_store.py`；outbox/SMTP/poke 整段退役；状态机做实
+  （mianmian 时代只是注释，16 条 JD 全卡 scored）；数据已迁（mail_seen 游标没迁，
+  applications 的 outbox_id 改名 id）。Chrome 用 browser 插件装的 Playwright Chromium。
+- **J1**：插件仓 `~/cassette-plugin-jobhunt`（12 工具 HTTP 转发壳，铁律进 docstring），
+  照 galatea 成例先手放 `server/plugins/jobhunt/` 开发副本，**还没进 REGISTRY**，跑稳
+  再开仓钉 commit。醒来策略有意落「照挂」档（工具面没有对外动作）。菜单块在
+  tool_menu.example.md。接线：`.env` 的 `CASSETTE_JOBHUNT_CHANNEL_CHAR=cass`。
+- **J2**：email_draft 落**通道角色**的草稿信箱（谁起草都从这个号发）；发信换
+  EmailMessage（附件 + Message-ID）；台账在 draft_send 真发出那刻写、经手人从草稿带；
+  Bark 落箱即提醒；DraftsPage 附件行 + QuickLook（PDF 下载到本地再预览，没走 ?key=）。
+- **J3**：三分类进 `mail_bridge.watch_tick`（信头多抓 In-Reply-To/References），只挂
+  通道角色且 jobhunt 插件启用的拍；硬醒走 cohabit 队列（HR 回信算新外部输入），
+  cohabit 没开/被闸 → Bark 兜底。**mianmian 的 poller 还没 unload**（见下）。
+- **J5**：JobhuntPage 五段分组 + 详情（全文/打分/投递记录/回信摘要/标不投）；
+  全局一份不挂切人按钮。xcodebuild 全量构建过；服务端 33 个单测、全仓 184 全绿。
+
+### 上线前的真机清单（待机主）
+
+1. 插件商店（Cass 名下）把「求职流水线」拨开——工具面 + watcher 三分类都吃这个开关。
+2. 真机过一遍：JD 库页、草稿信箱附件预览；让 Cass 起草一封发给机主自己的测试投递，
+   确认 Bark 到、附件对、点发送后台账/JD 状态走到 sent。
+3. 验证通过后 `launchctl bootout gui/$(id -u)/com.mianmian.jobhunt-poller`——**不切会双跑**：
+   旧 poller 还在把订阅邮件写进 mianmian 的 jds.jsonl 并戳旧 app。切之前这段时间两边
+  数据会岔开，切时如有新增，重跑一次迁移脚本的 jds 段（幂等，整表覆盖）即可。
+
 ## 留着以后再说
 
 - 面试日程进日历；回信自动起草回复（同走草稿信箱 gate）；独立求职信箱（与 Cass 私人
