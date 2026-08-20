@@ -231,6 +231,9 @@ struct ContentView: View {
             })
         case .drafts:
             charSwitchable(DraftsPage())
+        case .jobhunt:
+            // JD 库/台账是全局一份的流水线（谁经手记在条目上），不分角色 → 不挂切人按钮
+            JobhuntPage()
         case .game:
             GamePage()
         case .plugins:

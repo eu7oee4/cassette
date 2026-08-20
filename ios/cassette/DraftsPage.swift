@@ -68,7 +68,8 @@ struct PdfPreviewItem: Identifiable {
     let url: URL
 }
 
-private struct QuickLookPreview: UIViewControllerRepresentable {
+// internal：JD 库页（JobhuntPage）预览关联简历也用它
+struct QuickLookPreview: UIViewControllerRepresentable {
     let url: URL
 
     func makeUIViewController(context: Context) -> QLPreviewController {
