@@ -36,8 +36,8 @@ import threading
 import uuid
 from datetime import datetime, timedelta
 from email.header import Header
-from email.mime.text import MIMEText
-from email.utils import formataddr, getaddresses, parsedate_to_datetime
+from email.message import EmailMessage        # MIMEText 已退役：发信统一走 EmailMessage
+from email.utils import formataddr, getaddresses, make_msgid, parsedate_to_datetime
 from pathlib import Path
 
 import config
@@ -500,22 +500,39 @@ def _append_sent_log(entry: dict, char_id=None) -> None:
         f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
 
-def _smtp_send(cfg: dict, to: str, subject: str, body: str, char_id=None) -> None:
+def _smtp_send(cfg: dict, to: str, subject: str, body: str, char_id=None,
+               attachment: Path | None = None, attach_name: str = "") -> str:
+    """发出并返回 Message-ID（jobhunt 台账存它，回信按 In-Reply-To/References 精确匹配）。
+    attachment 只能是 server 侧自己解析出的路径（简历 PDF）——工具面不收任意路径。
+
+    2026-08-21 从 MIMEText 换成 EmailMessage：附件要 add_attachment，且要拿得到
+    Message-ID。unicode 信头交给默认 policy 编码，行为不变。"""
+    msg = EmailMessage()
     # From 必须就是登录账号（163 硬性要求，否则 DT:SPM 退信）；显示名用发信这位的名字。
-    msg = MIMEText(body, "plain", "utf-8")
     # 从前这里是 display_name(owner_of("mailbox"))——那时候信箱是独占资源、全机只有一个。
     # 现在一人一个号，署名当然是**这封信是谁发的**，不然 Cass 发的信落款会是 TA 的名字。
     import characters
     msg["From"] = formataddr((str(Header(characters.display_name(_cid(char_id)),
                                          "utf-8")), cfg["address"]))
     msg["To"] = to
-    msg["Subject"] = Header(subject or "（无主题）", "utf-8")
+    msg["Subject"] = subject or "（无主题）"
+    mid = make_msgid(domain=cfg["address"].split("@", 1)[1] if "@" in cfg["address"] else None)
+    msg["Message-ID"] = mid
+    msg.set_content(body)
+    if attachment is not None:
+        # 附件名 HR 那头看得懂（email_draft 传的 attach_name），不带 .pdf 自动补
+        name = attach_name.strip() or attachment.name
+        if not name.lower().endswith(".pdf"):
+            name += ".pdf"
+        msg.add_attachment(attachment.read_bytes(), maintype="application",
+                           subtype="pdf", filename=name)
     try:
         with smtplib.SMTP_SSL(cfg["smtp_host"], 465, timeout=30) as s:
             s.login(cfg["address"], cfg["auth_code"])
-            s.sendmail(cfg["address"], [to], msg.as_string())
+            s.send_message(msg)
     except Exception as e:
         raise MailError(f"发送失败（{cfg['smtp_host']}）：{e}") from e
+    return mid
 
 
 def _check_to(to: str) -> str:
@@ -545,12 +562,60 @@ def send(to: str, subject: str, body: str, origin: str = "chat", char_id=None) -
 
 
 # ---------- 草稿信箱（白名单外的信在这排队，机主 app 里过目才发）----------
-def _draft_new(to: str, subject: str, body: str, origin: str, char_id=None) -> dict:
+def _draft_new(to: str, subject: str, body: str, origin: str, char_id=None,
+               extra: dict | None = None) -> dict:
     d = {"id": uuid.uuid4().hex[:12], "to": to, "subject": subject or "",
          "body": body, "ts": _now().isoformat(), "origin": origin}
+    if extra:
+        d.update(extra)   # jobhunt 草稿的附加字段（resume_id/jd_id/attach_name/char_id…）
     _atomic_write(_drafts_dir(char_id) / f"{d['id']}.json",
                   json.dumps(d, ensure_ascii=False, indent=2))
     return d
+
+
+def jobhunt_draft(to: str, subject: str, body: str, resume_id: str,
+                  jd_id: str = "", attach_name: str = "", by_char: str = "") -> dict:
+    """jobhunt 的 email_draft 入口（PLAN_jobhunt 拍板 1/3）：草稿落**求职通道角色**的
+    草稿信箱（不管起草的是谁——发送物理上走那个号），附件记 resume_id 不记路径，
+    draft_send 时 server 侧现场解析 pdf/<id>.pdf。落箱即 Bark 提醒机主。
+    by_char = 经手人（HR 回信硬醒就醒 TA）。"""
+    import jobhunt_store
+    channel = jobhunt_store.channel_char()
+    to_addr = _check_to(to)
+    if not (subject or "").strip() or not (body or "").strip():
+        raise MailError("主题/正文不能为空")
+    # 附件必须来自简历库且已渲染（不收任意路径；这也是"附件来源白名单"的全部实现）
+    if not jobhunt_store.pdf_path(resume_id):
+        raise MailError(f"简历「{resume_id}」还没渲染成 PDF——先 resume_render 再起草")
+    company, title = "", ""
+    if jd_id:
+        try:
+            jd = jobhunt_store.jd_read(jd_id)
+            company, title = jd.get("company", ""), jd.get("title", "")
+        except KeyError:
+            raise MailError(f"岗位不存在：{jd_id}（jd_list 里现查一下 id）")
+    d = _draft_new(to_addr, subject, body, "jobhunt", channel, extra={
+        "resume_id": resume_id, "jd_id": jd_id,
+        "attach_name": (attach_name or "").strip() or f"简历-{resume_id}.pdf",
+        "char_id": by_char, "company": company, "title": title})
+    if jd_id:
+        try:
+            jobhunt_store._jd_set_status(jd_id, "drafted", by_char)
+        except (KeyError, ValueError):
+            pass   # 草稿是主体，JD 状态跟不上不拦起草
+    # Bark 丢线程发（同步调会拖长 MCP 那头的等待；code-stop 那次踩过 hook 超时的坑）
+    import characters
+    from notify import bark_push
+    who = characters.display_name(by_char) if by_char else "TA"
+    target = f"{company}·{title}" if (company or title) else to_addr
+    threading.Thread(target=bark_push,
+                     args=(f"{who}起草了投递 {target}，去草稿信箱确认",
+                           characters.display_name(channel)),
+                     daemon=True).start()
+    return {"drafted": True, "draft_id": d["id"], "to": to_addr,
+            "attach_name": d["attach_name"],
+            "note": f"已落草稿信箱（{characters.display_name(channel)}的号）等机主确认，"
+                    "已 Bark 提醒。你没有发送能力，别答应「我这就发出去」。"}
 
 
 _DRAFT_ID_RE = re.compile(r"^[0-9a-f]{12}$")
@@ -585,9 +650,24 @@ def draft_send(draft_id: str, char_id=None) -> dict:
         raise MailError("这份草稿不在了（可能已经发过或删了）")
     if _sent_last_hour(char_id) >= cfg["hourly_cap"]:
         raise MailError(f"这小时发太多了（上限 {cfg['hourly_cap']} 封），缓缓再发")
-    _smtp_send(cfg, d["to"], d.get("subject", ""), d.get("body", ""), char_id)
+    # jobhunt 草稿带附件：resume_id 现场解析成 PDF 路径（草稿里从不存路径）
+    attachment = None
+    if d.get("resume_id"):
+        import jobhunt_store
+        attachment = jobhunt_store.pdf_path(d["resume_id"])
+        if attachment is None:
+            raise MailError(f"简历 PDF 不在了（{d['resume_id']}）——让 TA 重新渲染再寄")
+    mid = _smtp_send(cfg, d["to"], d.get("subject", ""), d.get("body", ""), char_id,
+                     attachment=attachment, attach_name=d.get("attach_name", ""))
     _append_sent_log({"ts": _now().isoformat(), "to": d["to"],
                       "subject": d.get("subject", ""), "origin": "draft_confirm"}, char_id)
+    if d.get("origin") == "jobhunt":
+        # 投递台账在**真发出**这一刻落（sent 态第一次有人写）；经手人从草稿里带
+        import jobhunt_store
+        jobhunt_store.application_add(draft_id, d.get("jd_id", ""), d["to"],
+                                      d.get("resume_id", ""), mid,
+                                      char_id=d.get("char_id", ""),
+                                      subject=d.get("subject", ""))
     with _LOCK:
         path.unlink(missing_ok=True)
     return {"sent": True, "to": d["to"]}

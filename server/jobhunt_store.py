@@ -407,7 +407,7 @@ def _append_jsonl(path: Path, row: dict) -> None:
 # 搬迁时把它做实）。archived=机主标「不投」，从 sent 之外任何态都能进；unarchive 回
 # 打过分就 scored、没打过就 new。
 _JD_FLOW: dict[str, set[str]] = {
-    "new": {"scored", "archived"},
+    "new": {"scored", "drafted", "archived"},   # 不打分直接起草不拦（纪律归 prompt 管）
     "scored": {"scored", "drafted", "archived"},   # scored→scored = override 重打分
     "drafted": {"drafted", "sent", "archived"},    # drafted→drafted = 草稿拟重复，不算事故
     "sent": {"sent"},                              # 发出即终态（重复投递结构上不存在）

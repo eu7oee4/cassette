@@ -1,3 +1,4 @@
+import QuickLook
 import SwiftUI
 
 // MARK: - 数据模型（对齐后端 /mail/drafts）
@@ -10,7 +11,13 @@ struct MailDraft: Decodable, Identifiable {
     let subject: String
     let body: String
     let ts: String                // ISO 时间串（后端 isoformat）
-    let origin: String?           // chat / wake（哪条路写下的）
+    let origin: String?           // chat / wake / jobhunt（哪条路写下的）
+    // jobhunt 投递草稿的附加字段（mail_bridge.jobhunt_draft；普通草稿没有）
+    let resume_id: String?        // 附件=简历库里的这份 PDF（草稿不存路径，寄时后端解析）
+    let attach_name: String?      // HR 看到的附件文件名
+    let company: String?          // 关联岗位（展示用）
+    let title: String?
+    let char_id: String?          // 经手人（谁起草的）
 
     /// "2026-08-11T15:20:33.…+08:00" → "08-11 15:20"（展示够用，不动时区解析）
     var dateText: String {
@@ -40,6 +47,47 @@ extension ChatService {
     func deleteMailDraft(id: String) async throws {
         _ = try await perform(authedRequest("POST", "/mail/drafts/\(id)/delete"))
     }
+
+    /// 下载简历 PDF 到临时目录（QuickLook 只吃本地文件；文件名用 HR 会看到的附件名，
+    /// 预览标题才对得上寄出去的样子）。简历 id 允许中文，进路径必须转义。
+    func downloadJobhuntPdf(resumeId: String, fileName: String) async throws -> URL {
+        let encoded = resumeId.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? resumeId
+        let data = try await perform(authedRequest("GET", "/jobhunt/pdf/\(encoded)", timeout: 30))
+        var name = fileName.isEmpty ? "\(resumeId).pdf" : fileName
+        if !name.lowercased().hasSuffix(".pdf") { name += ".pdf" }
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent(name)
+        try data.write(to: url, options: .atomic)
+        return url
+    }
+}
+
+// MARK: - PDF 预览（QuickLook；附件只可能是简历库的 PDF）
+
+struct PdfPreviewItem: Identifiable {
+    let id = UUID()
+    let url: URL
+}
+
+private struct QuickLookPreview: UIViewControllerRepresentable {
+    let url: URL
+
+    func makeUIViewController(context: Context) -> QLPreviewController {
+        let ql = QLPreviewController()
+        ql.dataSource = context.coordinator
+        return ql
+    }
+
+    func updateUIViewController(_ controller: QLPreviewController, context: Context) {}
+
+    func makeCoordinator() -> Coordinator { Coordinator(url: url) }
+
+    final class Coordinator: NSObject, QLPreviewControllerDataSource {
+        let url: URL
+        init(url: URL) { self.url = url }
+        func numberOfPreviewItems(in controller: QLPreviewController) -> Int { 1 }
+        func previewController(_ controller: QLPreviewController,
+                               previewItemAt index: Int) -> QLPreviewItem { url as NSURL }
+    }
 }
 
 // MARK: - 草稿信箱页（抽屉 → push）
@@ -55,6 +103,8 @@ struct DraftsPage: View {
     @State private var sendTarget: MailDraft? = nil    // 确认寄出
     @State private var deleteTarget: MailDraft? = nil  // 确认删除
     @State private var busy = false
+    @State private var pdfBusy = false                 // 附件下载中
+    @State private var pdfPreview: PdfPreviewItem? = nil
     @State private var opError: String? = nil          // 操作失败 alert
     @State private var noteText: String? = nil         // 成功短提示（2.5s 自动消失）
     @State private var noteSeq = 0
@@ -147,6 +197,14 @@ struct DraftsPage: View {
                     .font(.subheadline).foregroundStyle(.primary)
                 Text(d.body)
                     .font(.footnote).foregroundStyle(.secondary).lineLimit(2)
+                if let attach = d.attach_name, d.resume_id != nil {
+                    HStack(spacing: 4) {
+                        Image(systemName: "paperclip")
+                        Text(attach).lineLimit(1)
+                    }
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                }
             }
             .contentShape(Rectangle())
         }
@@ -166,6 +224,26 @@ struct DraftsPage: View {
                 VStack(alignment: .leading, spacing: 12) {
                     LabeledContent("收件人") { Text(d.to).textSelection(.enabled) }
                     LabeledContent("时间") { Text(d.dateText) }
+                    if let company = d.company, let title = d.title, !(company + title).isEmpty {
+                        LabeledContent("岗位") {
+                            Text([company, title].filter { !$0.isEmpty }.joined(separator: "·"))
+                        }
+                    }
+                    if let rid = d.resume_id {
+                        // 附件行：寄出去的就是这份 PDF——点开 QuickLook 过目再按寄出
+                        LabeledContent("附件") {
+                            Button {
+                                Task { await openPdf(resumeId: rid, name: d.attach_name ?? "") }
+                            } label: {
+                                HStack(spacing: 4) {
+                                    if pdfBusy { ProgressView().controlSize(.small) }
+                                    Image(systemName: "doc.richtext")
+                                    Text(d.attach_name ?? "\(rid).pdf").lineLimit(1)
+                                }
+                            }
+                            .disabled(pdfBusy)
+                        }
+                    }
                     Divider()
                     Text(d.body)
                         .textSelection(.enabled)
@@ -175,6 +253,8 @@ struct DraftsPage: View {
             }
             .navigationTitle(d.subject.isEmpty ? "（无主题）" : d.subject)
             .navigationBarTitleDisplayMode(.inline)
+            // 挂在详情 sheet 内部：挂外层的话详情开着时二层 sheet 弹不出来
+            .sheet(item: $pdfPreview) { item in QuickLookPreview(url: item.url) }
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("关闭") { detail = nil }
@@ -235,6 +315,17 @@ struct DraftsPage: View {
             opError = (error as? ChatServiceError)?.errorDescription ?? "删除失败"
         }
         await load()
+    }
+
+    private func openPdf(resumeId: String, name: String) async {
+        pdfBusy = true
+        do {
+            let url = try await service.downloadJobhuntPdf(resumeId: resumeId, fileName: name)
+            pdfPreview = PdfPreviewItem(url: url)
+        } catch {
+            opError = (error as? ChatServiceError)?.errorDescription ?? "附件下载失败"
+        }
+        pdfBusy = false
     }
 
     private func showNote(_ text: String) {

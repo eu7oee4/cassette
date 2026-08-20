@@ -1895,6 +1895,30 @@ def jobhunt_jd_unarchive(jd_id: str,
         raise HTTPException(status_code=404, detail=str(e))
 
 
+class JobhuntDraftIn(BaseModel):
+    to: str
+    subject: str
+    body: str
+    resume_id: str
+    jd_id: str = ""
+    attach_name: str = ""
+
+
+@app.post("/jobhunt/draft")
+def jobhunt_draft(body: JobhuntDraftIn, char: Optional[str] = None,
+                  x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
+    """email_draft 的落点：草稿进求职通道角色的草稿信箱（发送只有机主手点一条路）。
+    ?char= 是经手人（MCP 壳带 CASSETTE_CHAR_ID 来），进草稿和台账，回信硬醒就醒 TA。"""
+    verify_auth(x_auth)
+    try:
+        return mail_bridge.jobhunt_draft(body.to, body.subject, body.body,
+                                         body.resume_id, jd_id=body.jd_id,
+                                         attach_name=body.attach_name,
+                                         by_char=_resolve_char(char))
+    except mail_bridge.MailError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
 @app.get("/jobhunt/applications")
 def jobhunt_applications(status: Optional[str] = None, limit: int = 50,
                          x_auth: Optional[str] = Header(default=None, alias="X-Auth")):

@@ -202,6 +202,90 @@ class TestApplications(JobhuntBase):
         self.assertEqual(store.applications_list()[0]["company"], "")
 
 
+class TestDraftFlow(JobhuntBase):
+    """J2：email_draft → 通道角色草稿信箱 → 机主点发送 → 台账 + jd→sent。
+    SMTP/Bark 全 mock，角色 state 指临时区（草稿别落进真信箱）。"""
+
+    def setUp(self):
+        super().setUp()
+        import state_store
+        import mail_bridge
+        self._csr = state_store.CHAR_STATE_ROOT
+        state_store.CHAR_STATE_ROOT = self.tmp / "chars"
+        self.mb = mail_bridge
+
+    def tearDown(self):
+        import state_store
+        state_store.CHAR_STATE_ROOT = self._csr
+        super().tearDown()
+
+    def _fake_pdf(self, rid="测试版"):
+        (store.PDF_DIR / f"{rid}.pdf").write_bytes(b"%PDF-1.4 fake")
+        return rid
+
+    def test_draft_requires_rendered_pdf(self):
+        with self.assertRaises(self.mb.MailError):
+            self.mb.jobhunt_draft("hr@x.com", "应聘", "你好", "没渲染过的", by_char="cass")
+
+    def test_draft_lands_in_channel_and_send_writes_ledger(self):
+        from unittest import mock
+        rid = self._fake_pdf()
+        jid = store.jd_save("测试", "某厂", "iOS", "JD", char_id="cass")["id"]
+        with mock.patch("notify.bark_push") as bark:
+            r = self.mb.jobhunt_draft("hr@x.com", "应聘iOS", "您好", rid,
+                                      jd_id=jid, by_char="cass")
+        self.assertTrue(r["drafted"])
+        self.assertEqual(store.jd_read(jid)["status"], "drafted")
+        channel = store.channel_char()
+        drafts = self.mb.drafts_list(channel)
+        self.assertEqual(len(drafts), 1)
+        d = drafts[0]
+        self.assertEqual((d["origin"], d["resume_id"], d["char_id"], d["company"]),
+                         ("jobhunt", rid, "cass", "某厂"))
+        self.assertEqual(d["attach_name"], f"简历-{rid}.pdf")
+        # Bark 是丢线程发的，等那口气
+        import time
+        for _ in range(50):
+            if bark.called:
+                break
+            time.sleep(0.02)
+        self.assertTrue(bark.called)
+        # 机主点发送（mock 掉 SMTP 和邮箱配置）
+        cfg = {"address": "ch@163.com", "auth_code": "x", "imap_host": "", "smtp_host": "",
+               "allow_to": set(), "hourly_cap": 5}
+        with mock.patch.object(self.mb, "_cfg", return_value=cfg), \
+             mock.patch.object(self.mb, "_smtp_send", return_value="<mid@163.com>") as ss:
+            res = self.mb.draft_send(d["id"], channel)
+        self.assertTrue(res["sent"])
+        # 附件路径是 server 侧现场解析的 PDF，附件名从草稿带
+        _, kwargs = ss.call_args
+        self.assertEqual(kwargs["attachment"], store.pdf_path(rid))
+        self.assertEqual(kwargs["attach_name"], f"简历-{rid}.pdf")
+        # 台账落了、经手人对、jd 走到 sent、草稿删了
+        apps = store.applications_list()
+        self.assertEqual(len(apps), 1)
+        self.assertEqual((apps[0]["id"], apps[0]["char_id"], apps[0]["message_id"]),
+                         (d["id"], "cass", "<mid@163.com>"))
+        self.assertEqual(store.jd_read(jid)["status"], "sent")
+        self.assertEqual(self.mb.drafts_list(channel), [])
+
+    def test_send_refuses_when_pdf_gone(self):
+        from unittest import mock
+        rid = self._fake_pdf()
+        with mock.patch("notify.bark_push"):
+            self.mb.jobhunt_draft("hr@x.com", "应聘", "您好", rid, by_char="cass")
+        (store.PDF_DIR / f"{rid}.pdf").unlink()
+        channel = store.channel_char()
+        d = self.mb.drafts_list(channel)[0]
+        cfg = {"address": "ch@163.com", "auth_code": "x", "imap_host": "", "smtp_host": "",
+               "allow_to": set(), "hourly_cap": 5}
+        with mock.patch.object(self.mb, "_cfg", return_value=cfg):
+            with self.assertRaises(self.mb.MailError):
+                self.mb.draft_send(d["id"], channel)
+        # 草稿还在（没发出去就不删）
+        self.assertEqual(len(self.mb.drafts_list(channel)), 1)
+
+
 class TestRender(JobhuntBase):
     @unittest.skipUnless(store._find_chrome(), "机器上没有 Chrome/Chromium")
     def test_render_pdf(self):
