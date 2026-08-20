@@ -286,6 +286,122 @@ class TestDraftFlow(JobhuntBase):
         self.assertEqual(len(self.mb.drafts_list(channel)), 1)
 
 
+class TestMailClassify(JobhuntBase):
+    """J3：watcher 三分类。IMAP 用假连接，硬醒用 mock——只验分类和路由逻辑。"""
+
+    class FakeConn:
+        def __init__(self, raw: bytes):
+            self.raw = raw
+
+        def uid(self, cmd, uid, spec):
+            return ("OK", [(b"x", self.raw)])
+
+    def setUp(self):
+        super().setUp()
+        import mail_bridge
+        self.mb = mail_bridge
+
+    def _msg(self, headers: dict):
+        import email
+        import email.policy
+        raw = "".join(f"{k}: {v}\r\n" for k, v in headers.items()).encode()
+        return email.message_from_bytes(raw + b"\r\n", policy=email.policy.compat32)
+
+    def _jh(self):
+        apps = store.applications_open()
+        return {"store": store,
+                "by_addr": {a["to"].lower(): a for a in apps if a.get("to")},
+                "by_mid": {a["message_id"]: a for a in apps if a.get("message_id")}}
+
+    def _seed_app(self):
+        store.application_add("dr1", "", "hr@x.com", "AI全栈-通用版",
+                              "<mid123@163.com>", char_id="cass", subject="应聘iOS")
+
+    def test_reply_by_exact_addr(self):
+        from unittest import mock
+        self._seed_app()
+        conn = self.FakeConn(b"From: hr@x.com\r\nSubject: Re: hi\r\n\r\nnext tuesday ok?")
+        msg = self._msg({"From": "hr@x.com", "Subject": "Re: hi"})
+        with mock.patch.object(self.mb, "_jobhunt_wake") as jw:
+            handled = self.mb._jobhunt_classify(conn, 5, msg, {"hr@x.com"}, self._jh(), "cass")
+        self.assertTrue(handled)
+        row = store.applications_list()[0]
+        self.assertTrue(row["has_reply"])
+        self.assertIn("tuesday", row["reply_snippet"])
+        handler, cid, note = jw.call_args[0]
+        self.assertEqual(handler, "cass")
+        self.assertIn("只转述给机主", note)
+        self.assertIn("hr@x.com", note)
+
+    def test_reply_by_message_id_refs(self):
+        from unittest import mock
+        self._seed_app()
+        # HR 换了个地址回（求职者邮箱→个人邮箱），靠 In-Reply-To 命中
+        conn = self.FakeConn(b"From: hr2@qq.com\r\nSubject: Re: x\r\n\r\nok")
+        msg = self._msg({"From": "hr2@qq.com", "Subject": "Re: x",
+                         "In-Reply-To": "<mid123@163.com>"})
+        with mock.patch.object(self.mb, "_jobhunt_wake") as jw:
+            handled = self.mb._jobhunt_classify(conn, 6, msg, {"hr2@qq.com"}, self._jh(), "cass")
+        self.assertTrue(handled)
+        self.assertTrue(store.applications_list()[0]["has_reply"])
+        self.assertTrue(jw.called)
+
+    def test_recruit_mail_saved_not_woken(self):
+        from unittest import mock
+        conn = self.FakeConn(b"From: n@zhipin.com\r\nSubject: 3 jobs\r\n\r\njd body " + b"x" * 5000)
+        msg = self._msg({"From": "n@zhipin.com", "Subject": "3 jobs"})
+        with mock.patch.object(self.mb, "_jobhunt_wake") as jw:
+            handled = self.mb._jobhunt_classify(conn, 7, msg, {"n@zhipin.com"}, self._jh(), "cass")
+        self.assertTrue(handled)
+        self.assertFalse(jw.called)
+        jds = store.jd_list(status="new")
+        self.assertEqual(len(jds), 1)
+        self.assertIn("邮件订阅", jds[0]["source"])
+        # 正文截 3000
+        self.assertLessEqual(len(store.jd_read(jds[0]["id"])["text"]), 3000)
+
+    def test_other_mail_untouched(self):
+        conn = self.FakeConn(b"")
+        msg = self._msg({"From": "friend@qq.com", "Subject": "hi"})
+        self.assertFalse(self.mb._jobhunt_classify(conn, 8, msg, {"friend@qq.com"},
+                                                   self._jh(), "cass"))
+
+    def test_watch_gate_only_channel_char(self):
+        # default 不是通道角色（.env 钉的是 cass）→ 不挂三分类
+        self.assertIsNone(self.mb._jobhunt_watch("default"))
+
+    def test_wake_fallback_barks_when_cohabit_off(self):
+        from unittest import mock
+        import time
+        with mock.patch("cohabit_queue.external_input"), \
+             mock.patch("cohabit_queue.enqueue", return_value=False), \
+             mock.patch("notify.bark_push") as bark:
+            self.mb._jobhunt_wake("cass", "cass", "note")
+            for _ in range(50):
+                if bark.called:
+                    break
+                time.sleep(0.02)
+            self.assertTrue(bark.called)
+
+    def test_wake_enqueues_handler(self):
+        from unittest import mock
+        with mock.patch("cohabit_queue.external_input"), \
+             mock.patch("cohabit_queue.enqueue", return_value=True) as enq, \
+             mock.patch("notify.bark_push") as bark:
+            self.mb._jobhunt_wake("cass", "cass", "有回信")
+            args = enq.call_args[0]
+            self.assertEqual(args[0], "cass")
+            self.assertEqual(args[1]["kind"], "event")
+            self.assertFalse(bark.called)
+
+    def test_wake_unknown_handler_falls_back_to_channel(self):
+        from unittest import mock
+        with mock.patch("cohabit_queue.external_input"), \
+             mock.patch("cohabit_queue.enqueue", return_value=True) as enq:
+            self.mb._jobhunt_wake("没这人", "cass", "note")
+            self.assertEqual(enq.call_args[0][0], "cass")
+
+
 class TestRender(JobhuntBase):
     @unittest.skipUnless(store._find_chrome(), "机器上没有 Chrome/Chromium")
     def test_render_pdf(self):
