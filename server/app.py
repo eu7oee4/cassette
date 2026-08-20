@@ -53,6 +53,7 @@ import cohabit
 import cohabit_queue
 import config
 import game_bridge
+import jobhunt_store
 import mail_bridge
 import offers
 import ombre_rest
@@ -1732,6 +1733,173 @@ def mail_draft_delete(draft_id: str, char: Optional[str] = None,
         return mail_bridge.draft_delete(draft_id, _resolve_char(char))
     except mail_bridge.MailError as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+
+# ---------- jobhunt（求职流水线：jobhunt 插件的宿主侧，PLAN_jobhunt）----------
+# 数据全局一份（JD 库/简历库/台账不分角色），所以这批端点大多不吃 ?char=——
+# 例外是「谁干的活」：jd_save / score / draft 用 ?char= 记经手人（MCP 壳带 CASSETTE_CHAR_ID
+# 过来），不是数据隔离。发送不在这批端点里：email_draft 落草稿信箱，走 /mail/drafts 确认。
+
+
+class JobhuntProfileIn(BaseModel):
+    text: str
+
+
+class JobhuntResumeIn(BaseModel):
+    content: str
+    resume_id: Optional[str] = None
+    jd_id: str = ""
+    note: str = ""
+    overwrite: bool = False
+
+
+class JobhuntRenderIn(BaseModel):
+    resume_id: str = "master"
+
+
+class JobhuntJdIn(BaseModel):
+    source: str
+    company: str
+    title: str
+    text: str
+
+
+class JobhuntScoreIn(BaseModel):
+    score: float
+    reason: str
+    override: bool = False
+
+
+@app.get("/jobhunt/profile")
+def jobhunt_profile_get(x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
+    verify_auth(x_auth)
+    return {"text": jobhunt_store.profile_get()}
+
+
+@app.post("/jobhunt/profile")
+def jobhunt_profile_set(body: JobhuntProfileIn,
+                        x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
+    verify_auth(x_auth)
+    return jobhunt_store.profile_set(body.text)
+
+
+@app.get("/jobhunt/resumes")
+def jobhunt_resumes(x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
+    verify_auth(x_auth)
+    return {"items": jobhunt_store.resume_list()}
+
+
+@app.get("/jobhunt/resume")
+def jobhunt_resume_read(id: str = "master",
+                        x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
+    verify_auth(x_auth)
+    try:
+        return jobhunt_store.resume_read(id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
+@app.post("/jobhunt/resume")
+def jobhunt_resume_save(body: JobhuntResumeIn,
+                        x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
+    verify_auth(x_auth)
+    try:
+        return jobhunt_store.resume_save(body.content, rid=body.resume_id,
+                                         jd_id=body.jd_id, note=body.note,
+                                         overwrite=body.overwrite)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/jobhunt/resume/render")
+def jobhunt_resume_render(body: JobhuntRenderIn,
+                          x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
+    """同步渲染（sync def → FastAPI 自动进线程池，Chrome 跑几秒不卡事件循环）。"""
+    verify_auth(x_auth)
+    try:
+        return jobhunt_store.resume_render(body.resume_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.get("/jobhunt/pdf/{resume_id}")
+def jobhunt_pdf(resume_id: str,
+                x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
+    """带鉴权的简历 PDF（草稿信箱附件预览 / JD 库页用；app 下载到本地再 QuickLook）。"""
+    verify_auth(x_auth)
+    p = jobhunt_store.pdf_path(resume_id)
+    if not p:
+        raise HTTPException(status_code=404, detail=f"简历 {resume_id} 还没渲染成 PDF")
+    from fastapi.responses import FileResponse
+    return FileResponse(p, media_type="application/pdf", filename=p.name)
+
+
+@app.get("/jobhunt/jds")
+def jobhunt_jds(status: Optional[str] = None, limit: int = 30,
+                x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
+    verify_auth(x_auth)
+    return {"items": jobhunt_store.jd_list(status=status, limit=limit)}
+
+
+@app.post("/jobhunt/jds")
+def jobhunt_jd_save(body: JobhuntJdIn, char: Optional[str] = None,
+                    x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
+    verify_auth(x_auth)
+    return jobhunt_store.jd_save(body.source, body.company, body.title, body.text,
+                                 char_id=_resolve_char(char))
+
+
+@app.get("/jobhunt/jds/{jd_id}")
+def jobhunt_jd_read(jd_id: str,
+                    x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
+    verify_auth(x_auth)
+    try:
+        return jobhunt_store.jd_read(jd_id)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
+@app.post("/jobhunt/jds/{jd_id}/score")
+def jobhunt_jd_score(jd_id: str, body: JobhuntScoreIn, char: Optional[str] = None,
+                     x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
+    verify_auth(x_auth)
+    try:
+        return jobhunt_store.jd_score(jd_id, body.score, body.reason,
+                                      char_id=_resolve_char(char), override=body.override)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
+@app.post("/jobhunt/jds/{jd_id}/archive")
+def jobhunt_jd_archive(jd_id: str,
+                       x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
+    """机主标「不投」（JD 库页的开关；sent 了的拦下——已经投出去了）。"""
+    verify_auth(x_auth)
+    try:
+        return jobhunt_store.jd_archive(jd_id)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+
+
+@app.post("/jobhunt/jds/{jd_id}/unarchive")
+def jobhunt_jd_unarchive(jd_id: str,
+                         x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
+    verify_auth(x_auth)
+    try:
+        return jobhunt_store.jd_unarchive(jd_id)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
+@app.get("/jobhunt/applications")
+def jobhunt_applications(status: Optional[str] = None, limit: int = 50,
+                         x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
+    verify_auth(x_auth)
+    return {"items": jobhunt_store.applications_list(status=status, limit=limit)}
 
 
 # ---------- Game 模式（game_bridge：任务引擎 + 剧情会话的共用底座）----------

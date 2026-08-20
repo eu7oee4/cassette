@@ -380,6 +380,13 @@ REGISTRY: dict[str, dict] = {
         "display_name": "游戏剧情-通用版",
         "description": "TA 自己切去玩游戏看剧情：常驻会话里本人盲操（截图→坐标→点按），边玩边把见闻转播进聊天。默认为《如鸢》调校，换别的二游要自己改守则——装前先看 README 的风险须知（含反自动化处罚）。需 MuMu 模拟器 + 后端开 GAME_MODE_ENABLED",
     },
+    # ⚠️ jobhunt（求职流水线）**故意还不在这儿**：2026-08-20 先以本地开发副本跑
+    # （server/plugins/jobhunt/，源码仓在 ~/cassette-plugin-jobhunt），跑稳再开仓钉 commit。
+    # 醒来策略是**有意落在「照挂」那一档**（不进 NO_WAKE_PLUGINS / WAKE_TOGGLEABLE）：
+    # 全部工具都是起草/整理类，email_draft 出不了门（落草稿信箱等机主手点）、附件只认
+    # 简历库——对外动作在结构上就没有，凌晨三点的进程拿着它也发不出一封信。
+    # 宿主侧接线：.env 的 CASSETTE_JOBHUNT_CHANNEL_CHAR（求职通道走谁的信箱）。
+    #
     # ⚠️ galatea（Galatea 花园）**故意还不在这儿**：2026-08-15 先以本地开发副本跑
     # （server/plugins/galatea/，手放的目录商店里照样列出、开关和挂载都正常，只是
     # 装不了也更新不了）。跑稳了再开仓、进 registry 钉 commit 发版。
