@@ -279,15 +279,31 @@ class TestExecute(CohabitBase):
         self.assertEqual(world.read_events(self.home)[-1].get("kind"), "carry_result")
         self.assertEqual(self.offer_reasons[-1][1]["kind"], "carry_declined")
 
-    def test_offer_sweep_timeout_voids(self):
+    def test_offer_sweep_timeout_defaults_to_accept(self):
+        # 超时没反应 = 默认答应（2026-08-23 机主拍板）：move+carry 照走，
+        # 补醒原因写明是没等到回应抱的，不再作废。
         world.move("user", self.home)
         r = self.wake_once(out("none", move="living_room",
                                carry=world.entity_name("user")))
         offers.sweep(now=time.time() + offers.OFFER_TTL_SEC + 1)
         self.assertIsNone(offers.api_view())
-        self.assertEqual(self.offer_reasons[-1][1]["kind"], "carry_void")
+        self.assertEqual(world.location_of(self.cid), "living_room")
+        self.assertEqual(world.location_of("user"), "living_room")
+        cid, reason = self.offer_reasons[-1]
+        self.assertEqual(cid, self.cid)
+        self.assertIn("没说不要", reason["text"])
         with self.assertRaises(ValueError):               # 扫掉之后按钮白按了得有声
             offers.respond(r["carry_offer"]["id"], True)
+
+    def test_offer_sweep_user_gone_still_voids(self):
+        # 超时前人先走散：照旧作废，不能隔空硬抱
+        world.move("user", self.home)
+        self.wake_once(out("none", move="living_room",
+                           carry=world.entity_name("user")))
+        world.move("user", "mm_room")
+        offers.sweep(now=time.time() + offers.OFFER_TTL_SEC + 1)
+        self.assertEqual(self.offer_reasons[-1][1]["kind"], "carry_void")
+        self.assertEqual(world.location_of(self.cid), self.home)
 
     def test_carry_pet_moves_without_offer(self):
         # 抱猫不用先问（PLAN_pet P0）：同屋直接抱走，move+carry 当轮执行、无邀约

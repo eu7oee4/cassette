@@ -9,7 +9,8 @@ open/超时 → 敲门人收结果）与这里同形，落地时复用这条路�
 - 用户在 app 里应答（POST /world/carry_offer）：答应 → 这时才 world.move(carry)，
   发起人收 move_result 补醒（锁着的门照旧可能失败，成功失败同一条路）；
   拒绝 → 落「没让抱」系统事件 + 拒绝补醒；
-- 没反应（OFFER_TTL_SEC 超时，worker 每轮顺手扫）/ 任一方先挪了地方 → 作废补醒。
+- 没反应（OFFER_TTL_SEC 超时，worker 每轮顺手扫）→ 默认当答应（2026-08-23 机主拍板）：
+  move+carry 照走，补醒原因写明是没等到回应抱的；任一方先挪了地方 → 作废补醒。
 
 状态在内存（口径同 cohabit_queue 的 pending：重启即清——丢邀约不丢事实，
 人都还在原地，再抱一次就是了）。被抱的只有用户一个人 → 全局至多一个 pending。
@@ -26,7 +27,7 @@ from typing import Optional
 import world
 from notify import logerr
 
-OFFER_TTL_SEC = 120     # 回应窗口：超时 = 没反应（机主可能压根没在看手机）
+OFFER_TTL_SEC = 120     # 回应窗口：超时 = 没反应，默认当答应（机主可能压根没在看手机）
 
 _lock = threading.Lock()
 _offer: Optional[dict] = None   # {id, actor, to, room, move_motion, deadline}
@@ -113,11 +114,20 @@ def respond(offer_id: str, accept: bool) -> dict:
                          "text": f"{u_name}摇头没让抱——你还在原地。"
                                  f"独自过去、留下、或者说点别的，都行。"})
         return {"ok": True, "accepted": False}
+    return _land_accept(o)
+
+
+def _land_accept(o: dict, via_timeout: bool = False) -> dict:
+    """答应落地：move+carry + 进场动作 + 发起人补醒。respond(accept=True) 与
+    超时默认答应共用；调用时邀约已摘下，锁外执行。失手 → 作废补醒 + ValueError。"""
+    import cohabit
+    actor, u = o["actor"], world.USER_ID
+    u_name = world.entity_name(u)
     with world.turn():   # 抱着走这一下（进出场 + 进场动作）算一轮，UI 才不跟前后糊在一起
         try:
             mv = world.move(actor, o["to"], carry=u)
         except ValueError as e:
-            # 上面刚验过同屋还失手 = 并发缝里世界又变了：作废，别把用户的点击变成 500。
+            # 刚验过同屋还失手 = 并发缝里世界又变了：作废，别把用户的点击变成 500。
             logerr(f"carry 邀约落地失手（{e}），作废")
             _enqueue(actor, _void_reason(o, "落地那一下世界刚好变了"))
             raise ValueError("没抱成——世界刚好变了")
@@ -129,13 +139,17 @@ def respond(offer_id: str, accept: bool) -> dict:
                 logerr(f"carry 邀约进场动作没写上（忽略）: {e}")
     reason = cohabit.move_result_reason(mv)
     if mv["ok"]:
-        reason["text"] = f"{u_name}答应了让你抱。" + reason["text"]
+        reason["text"] = ((f"{u_name}没说不要，你等了一会儿，就这么把人抱起来了。"
+                           if via_timeout else f"{u_name}答应了让你抱。")
+                          + reason["text"])
     _enqueue(actor, reason)
     return {"ok": True, "accepted": bool(mv["ok"]), "move": mv}
 
 
 def sweep(now: Optional[float] = None) -> None:
-    """worker 每轮顺手扫：超时 / 任一方先挪了地方 → 作废 + 发起人补醒。"""
+    """worker 每轮顺手扫：任一方先挪了地方 → 作废 + 发起人补醒；超时没反应 →
+    默认当答应（2026-08-23 机主拍板），move+carry 照走。位置先于超时判：
+    人都走散了还硬抱是鬼故事。"""
     global _offer
     now = now or time.time()
     with _lock:
@@ -143,18 +157,24 @@ def sweep(now: Optional[float] = None) -> None:
         if not o:
             return
         why = None
-        if now > o["deadline"]:
-            why = f"{world.entity_name(world.USER_ID)}一直没反应"
-        else:
-            try:
-                if world.location_of(o["actor"]) != o["room"]:
-                    why = "你自己先挪了地方"
-                elif world.location_of(world.USER_ID) != o["room"]:
-                    why = f"没等到回应，{world.entity_name(world.USER_ID)}就先走开了"
-            except Exception as e:
-                logerr(f"carry 邀约扫除时探位置失败（作废处理）: {e}")
-                why = "世界变了"
-        if why is None:
+        timed_out = False
+        try:
+            if world.location_of(o["actor"]) != o["room"]:
+                why = "你自己先挪了地方"
+            elif world.location_of(world.USER_ID) != o["room"]:
+                why = f"没等到回应，{world.entity_name(world.USER_ID)}就先走开了"
+            elif now > o["deadline"]:
+                timed_out = True
+        except Exception as e:
+            logerr(f"carry 邀约扫除时探位置失败（作废处理）: {e}")
+            why = "世界变了"
+        if why is None and not timed_out:
             return
         _offer = None
+    if timed_out:
+        try:
+            _land_accept(o, via_timeout=True)
+        except ValueError:
+            pass   # 作废补醒已在 _land_accept 里发出，worker 别带着异常走
+        return
     _enqueue(o["actor"], _void_reason(o, why))
