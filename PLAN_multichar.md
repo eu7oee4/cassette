@@ -89,9 +89,10 @@
   - 真的只有一份：`maayuan`（机主的《如鸢》账号，**不是"MuMu 只有一台"**——模拟器能开
     多实例，卡住的是账号）、`beacon`（一装置一卡）。
   - **暂时**只有一份（是我们自己限的，将来每人一份，做成之后就从 EXCLUSIVE 里删掉）：
-    `mailbox` ← 最该做，邮箱是身份不是设备，共用一个意味着 A 会读到写给 B 的信；
-    `chrome` ← 端口和 profile 目录本来就是参数，卡在宿主侧（mounted 不给插件传 env、
-    keeper 是单例）；`tmux` ← 留到三期工作群（每人一台"自己的 MacBook"）。
+    ~~`mailbox`~~ ✅ 2026-08-15 做掉了（一人一个信箱，接线 characters.mail_conf）；
+    ~~`chrome`~~ ✅ 2026-08-24 做掉了（一人一个浏览器：characters.browser_conf +
+    keeper 全线收 char_id + PLUGIN_GATE 没接线不挂载；当年写的「mounted 不给插件传
+    env」那半句早已不成立）；`tmux` ← 留到三期工作群（每人一台"自己的 MacBook"）。
 
 **wake 调度多角色**
 - 仍是一个 `scheduler_loop`，每 tick 遍历角色：各自 next_wake_at / 概率 / 预算。

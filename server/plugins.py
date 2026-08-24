@@ -91,12 +91,14 @@ def _mcp_config_path(context: str, char_id=None):
 #            state 各落 state/characters/<id>/mail/，mail_bridge 全线收 char_id，
 #            _mail_watcher 遍历角色各查各的号。插件本体一行没改：mounted() 给 stdio
 #            server 下发 CASSETTE_CHAR_ID，mail_bridge._cid() 读它认人。
-#   chrome   带登录态的浏览器。playwright-mcp 的端口和 --user-data-dir 本来就是
-#            参数，Chrome 多实例原生支持；卡住的是宿主侧——browser_keeper 是单例
-#            （MCP_URL 和 pgrep 特征都钉死一份）。⚠️ 原来这里还写着"mounted() 不给
-#            插件传 env"，那一半**已经不成立**（见 mounted 里的 env 下发，2026-08-15
-#            实测 config 的 env 是合并进子进程且盖得过继承值）——按角色下发
-#            CASSETTE_BROWSER_MCP_URL 这条路现在通了，剩下的只有 keeper 单例。
+#   ~~chrome~~ ✅ 2026-08-24 做掉了，已从 EXCLUSIVE 移除——**一人一个浏览器**。
+#            接线走 characters.browser_conf（默认角色 .env/3002 兜底；**其他角色只认
+#            char.json 的 browser.mcp_url，没配就不挂载**——见 PLUGIN_GATE，兜底到
+#            别人的端口=静默共用别人的登录身份）。browser_keeper 全线收 char_id，
+#            profile/状态各落 state/characters/<id>/，每角色一套 playwright-mcp 服务
+#            （launchd label 带角色名）。runtime（node 包+Chromium 二进制）仍全局一份
+#            ——那是设备不是身份。插件本体一行没改：壳本来就读 CASSETTE_BROWSER_MCP_URL，
+#            mounted() 按角色下发（PLUGIN_ENV）。
 #   tmux     code/game 会话。code_bridge.start() 起会话前杀光所有档案，同一时刻
 #            全机只有一个会话（当初为"意识体唯一连续"有意这么设计）。每人一台
 #            "自己的 MacBook"是能做的，留到三期工作群：会话名带角色、session.json
@@ -107,7 +109,6 @@ EXCLUSIVE: dict[str, list[str]] = {
     "game-maayuan": ["maayuan"],
     "game-story":   ["maayuan", "tmux"],
     "codemode":     ["tmux"],
-    "browser":      ["chrome"],
     "beacon":       ["beacon"],
 }
 
@@ -115,7 +116,6 @@ EXCLUSIVE: dict[str, list[str]] = {
 RESOURCE_LABEL: dict[str, str] = {
     "maayuan": "《如鸢》游戏账号",
     "tmux": "电脑上的会话",
-    "chrome": "带登录态的浏览器",
     "beacon": "Beacon 卡",
 }
 
@@ -645,6 +645,11 @@ def _galatea_env(cid: str) -> dict:
     return {"GALATEA_MCP_ENDPOINT": g["ENDPOINT"], "GALATEA_MCP_TOKEN": g["TOKEN"]}
 
 
+def _browser_env(cid: str) -> dict:
+    import characters
+    return {"CASSETTE_BROWSER_MCP_URL": characters.browser_conf(cid)["MCP_URL"]}
+
+
 # 插件专属接线：按角色下发给它的 stdio 子进程（插件名 → 一个 cid ↦ env 的函数）。
 #
 # 什么该进这儿：**账号/身份类的接线**——同一个插件替不同角色干活时，用的是不同的号。
@@ -654,7 +659,14 @@ def _galatea_env(cid: str) -> dict:
 # ⚠️ **值为空也要照发**：config 里的 env 是**合并且盖得过**继承值（2026-08-15 实测两轮），
 # 而 .env 会被 dotenv 灌进后端进程环境、一路继承给每个插件子进程。不发空串的话，
 # 一个没配花园的角色会**静默继承 .env 里别人的 token** —— 那正是这个钩子要防的事。
-PLUGIN_ENV: dict = {"galatea": _galatea_env}
+PLUGIN_ENV: dict = {"galatea": _galatea_env, "browser": _browser_env}
+
+# 插件的按角色**挂载前提**（比归属更细的一道门）：钩子返回 False 就整个不挂。
+# browser：接线是空串的角色（char.json 没写 browser.mcp_url 的非默认角色）不挂——
+# 壳拿到空 env 会退到它自己的默认 3002，那等于**静默用别人的浏览器身份**上网，
+# 正是一人一个要拆掉的事故面。宁可工具不出现（商店开关开着也不挂，同独占插件
+# 不归属时的行为），也别让它带着别人的登录态出门。
+PLUGIN_GATE: dict = {"browser": lambda cid: bool(_browser_env(cid)["CASSETTE_BROWSER_MCP_URL"])}
 
 
 def mounted(context: str = "chat", char_id=None) -> tuple[Optional[str], list[str]]:
@@ -684,6 +696,14 @@ def mounted(context: str = "chat", char_id=None) -> tuple[Optional[str], list[st
             continue
         if not plugin_owned_by(name, me):
             continue
+        gate = PLUGIN_GATE.get(name)
+        if gate:
+            try:
+                if not gate(me):
+                    continue   # 按角色前提不满足（如 browser 没接线）→ 整个不挂
+            except Exception as e:
+                logerr(f"插件 {name} 的挂载前提算不出来（这轮不挂）: {e}")
+                continue
         m = _read_manifest(name)
         if m is None:
             continue

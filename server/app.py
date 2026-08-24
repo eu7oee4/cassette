@@ -110,15 +110,20 @@ def _require_session_owner(char: Optional[str]) -> None:
 
 
 def _browser_keeper_watchdog() -> None:
-    """浏览器幽灵看门狗：Chrome（cassette profile 那只）一在跑就搭伙占会话，轮末按
+    """浏览器幽灵看门狗：Chrome（某个角色 profile 的那只）一在跑就搭伙占会话，轮末按
     [[browser:keep/close]] 标记结算去留（browser_keeper.py）。wake/非流式是 subprocess
-    跑完才解析、轮中没有钩子，这个线程是唯一全覆盖的口子。Chrome 没跑时一拍就是一次
-    pgrep，便宜，不用按插件开关做门。"""
+    跑完才解析、轮中没有钩子，这个线程是唯一全覆盖的口子。
+
+    一人一个浏览器后逐角色拍：只拍配了浏览器的角色（configured 是热读 char.json，
+    接线改了不用重启）。Chrome 没跑时一拍就是一次 pgrep，几个角色也便宜，
+    不用按插件开关做门。"""
     while True:
-        try:
-            browser_keeper.watchdog_tick()
-        except Exception:
-            pass
+        for cid in characters.ids():
+            try:
+                if browser_keeper.configured(cid):
+                    browser_keeper.watchdog_tick(cid)
+            except Exception:
+                pass
         time.sleep(2)
 
 
@@ -460,7 +465,7 @@ def finalize_chat_reply(reply: str, stored: list[dict], req: ChatRequest,
 
     # 轮末结算浏览器去留：默认这轮浏览过就关窗口；keep=粘住（窗口留着）；close=明确关。
     # 没浏览也没标记的轮不碰 keeper（apply_choice 内部口径）——别误关并行 wake 轮的窗口。
-    browser_keeper.apply_choice(browser_choice, browsed=bool(browse_urls))
+    browser_keeper.apply_choice(browser_choice, browsed=bool(browse_urls), char_id=char_id)
 
     # 这轮他自己调工具切进了 code 模式：剥出来置标志（控制信号，不是记忆产物，不进 Mind），
     # app 收到 code_started 就翻 codeMode，后续消息改道 tmux 会话。

@@ -161,6 +161,23 @@ def mail_conf(char_id: Optional[str] = None) -> dict:
     return out
 
 
+# char.json 的 browser 段（一人一个浏览器，2026-08-24；每角色一套 playwright-mcp 服务）：
+#     {"mcp_url": "http://localhost:3003/mcp"}
+def browser_conf(char_id: Optional[str] = None) -> dict:
+    """角色的浏览器接线：{MCP_URL}。浏览器是**带登录态的身份**不是设备（口径同
+    galatea_conf），所以**非默认角色不吃 env 兜底**：char.json 没写 browser.mcp_url
+    就是空串 = 这个角色没有自己的浏览器——插件不挂载（plugins.PLUGIN_GATE）、keeper
+    不看它。要是兜底到别人的端口，就是静默共用别人的登录身份，正是这次拆的事故面。
+    默认角色保持零配置旧行为：.env 的 CASSETTE_BROWSER_MCP_URL，再兜 3002。"""
+    cid = resolve(char_id)
+    b = meta(cid).get("browser") or {}
+    url = "" if b.get("mcp_url") is None else str(b.get("mcp_url")).strip()
+    if not url and cid == DEFAULT_ID:
+        url = (os.environ.get("CASSETTE_BROWSER_MCP_URL") or "").strip() \
+            or "http://localhost:3002/mcp"
+    return {"MCP_URL": url}
+
+
 # char.json 的 galatea 段（键名 = .env 里 GALATEA_MCP_* 去掉前缀再小写）：
 #     {"endpoint": "https://galatea.abysslumina.com/mcp", "token": "gg_..."}
 _GALATEA_KEYS = ("ENDPOINT", "TOKEN")

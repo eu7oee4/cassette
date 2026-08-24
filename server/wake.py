@@ -518,7 +518,7 @@ def do_wake_sync(settings: dict, trigger: str, force: bool = False, note: str = 
     choice = None
     if raw:
         raw, choice = pipeline.parse_browser_markers(raw)
-    browser_keeper.apply_choice(choice, browsed=bool(browse_urls))
+    browser_keeper.apply_choice(choice, browsed=bool(browse_urls), char_id=char_id)
     # 非记忆类操作不进日志（用 chat 侧同一份常量，别再写字面量——漏一个就会有控制信号
     # 混进心流日志和"别重复存"清单里，当成记忆产物）
     stored = [s for s in (stored or []) if s.get("tool") not in pipeline.NON_MEMORY_TOOLS]
