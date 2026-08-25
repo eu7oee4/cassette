@@ -213,6 +213,20 @@ extension ChatService {
                                             jsonBody: body, timeout: 8))
     }
 
+    /// 被抱超时的默认口径（小屋级开关）：true=默认答应，false=当没反应作废。入口在铃铛弹层。
+    func worldCarryTimeoutAccept() async throws -> Bool {
+        let data = try await perform(authedRequest("GET", "/world/carry_timeout", timeout: 8))
+        struct Box: Decodable { let accept: Bool }
+        return try JSONDecoder().decode(Box.self, from: data).accept
+    }
+
+    /// 拨被抱超时开关：落盘即生效（后端每轮现读，不用重启）。
+    func setWorldCarryTimeoutAccept(_ accept: Bool) async throws {
+        let body = try JSONEncoder().encode(["accept": accept])
+        _ = try await perform(authedRequest("POST", "/world/carry_timeout",
+                                            jsonBody: body, timeout: 8))
+    }
+
     /// 暂停/恢复醒来队列（正在生成的说完为止；恢复立即冲队）。
     func worldPause(_ on: Bool) async throws {
         let body = try JSONEncoder().encode(["on": on])

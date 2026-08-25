@@ -9,8 +9,9 @@ open/超时 → 敲门人收结果）与这里同形，落地时复用这条路�
 - 用户在 app 里应答（POST /world/carry_offer）：答应 → 这时才 world.move(carry)，
   发起人收 move_result 补醒（锁着的门照旧可能失败，成功失败同一条路）；
   拒绝 → 落「没让抱」系统事件 + 拒绝补醒；
-- 没反应（OFFER_TTL_SEC 超时，worker 每轮顺手扫）→ 默认当答应（2026-08-23 机主拍板）：
-  move+carry 照走，补醒原因写明是没等到回应抱的；任一方先挪了地方 → 作废补醒。
+- 没反应（OFFER_TTL_SEC 超时，worker 每轮顺手扫）→ 看铃铛开关（/world/carry_timeout，
+  默认答应，2026-08-23 机主拍板）：开=move+carry 照走，补醒原因写明是没等到回应抱的；
+  关=当没反应作废（回 2026-08-17 的老口径）。任一方先挪了地方 → 一律作废补醒。
 
 状态在内存（口径同 cohabit_queue 的 pending：重启即清——丢邀约不丢事实，
 人都还在原地，再抱一次就是了）。被抱的只有用户一个人 → 全局至多一个 pending。
@@ -148,8 +149,8 @@ def _land_accept(o: dict, via_timeout: bool = False) -> dict:
 
 def sweep(now: Optional[float] = None) -> None:
     """worker 每轮顺手扫：任一方先挪了地方 → 作废 + 发起人补醒；超时没反应 →
-    默认当答应（2026-08-23 机主拍板），move+carry 照走。位置先于超时判：
-    人都走散了还硬抱是鬼故事。"""
+    看铃铛开关（world.carry_timeout_accept，现读）：开=默认当答应，move+carry 照走；
+    关=当没反应作废。位置先于超时判：人都走散了还硬抱是鬼故事。"""
     global _offer
     now = now or time.time()
     with _lock:
@@ -164,7 +165,10 @@ def sweep(now: Optional[float] = None) -> None:
             elif world.location_of(world.USER_ID) != o["room"]:
                 why = f"没等到回应，{world.entity_name(world.USER_ID)}就先走开了"
             elif now > o["deadline"]:
-                timed_out = True
+                if world.carry_timeout_accept():
+                    timed_out = True
+                else:
+                    why = f"{world.entity_name(world.USER_ID)}一直没反应"
         except Exception as e:
             logerr(f"carry 邀约扫除时探位置失败（作废处理）: {e}")
             why = "世界变了"

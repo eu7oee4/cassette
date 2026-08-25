@@ -882,6 +882,10 @@ class ExpLimitIn(BaseModel):
     experience_limit: int   # 经历流每轮注入条数（夹 10~300，见 world.EXPERIENCE_LIMIT_RANGE）
 
 
+class CarryTimeoutIn(BaseModel):
+    accept: bool    # true=被抱超时默认答应（抱走）；false=超时当没反应作废（留在原地）
+
+
 @app.get("/world")
 def get_world(x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
     """房子视图：全部房间（含在场者）+ 全部实体的位置。"""
@@ -952,6 +956,21 @@ def post_experience_limit(body: ExpLimitIn,
     if not (lo <= body.experience_limit <= hi):
         raise HTTPException(status_code=400, detail=f"experience_limit 需在 {lo}~{hi}")
     return {"experience_limit": world.set_experience_limit(body.experience_limit)}
+
+
+@app.get("/world/carry_timeout")
+def get_carry_timeout(x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
+    """被抱邀约超时没反应的默认口径（小屋级开关，入口在铃铛）。"""
+    verify_auth(x_auth)
+    return {"accept": world.carry_timeout_accept()}
+
+
+@app.post("/world/carry_timeout")
+def post_carry_timeout(body: CarryTimeoutIn,
+                       x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
+    """拨被抱超时开关：落盘即生效（offers.sweep 每轮现读，不用重启）。"""
+    verify_auth(x_auth)
+    return {"accept": world.set_carry_timeout_accept(body.accept)}
 
 
 @app.post("/world/nudge")

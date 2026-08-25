@@ -39,10 +39,12 @@ class CohabitBase(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp(prefix="cohabit_test_"))
         # world → 临时目录
-        self._world_orig = (world.ROOMS_DIR, world.REGISTRY_PATH, world.WORLD_PATH)
+        self._world_orig = (world.ROOMS_DIR, world.REGISTRY_PATH, world.WORLD_PATH,
+                            world.HOUSE_SETTINGS_PATH)
         world.ROOMS_DIR = self.tmp / "rooms"
         world.REGISTRY_PATH = world.ROOMS_DIR / "registry.json"
         world.WORLD_PATH = self.tmp / "world.json"
+        world.HOUSE_SETTINGS_PATH = self.tmp / "house_settings.json"
         world.ensure_world()
         # 角色状态（wake_log/schedule/窗口）+ outbox → 临时目录
         self._ss_orig = (state_store.CHAR_STATE_ROOT, state_store.OUTBOX_PATH)
@@ -79,7 +81,8 @@ class CohabitBase(unittest.TestCase):
         offers._enqueue = lambda cid, reason: self.offer_reasons.append((cid, reason))
 
     def tearDown(self):
-        world.ROOMS_DIR, world.REGISTRY_PATH, world.WORLD_PATH = self._world_orig
+        (world.ROOMS_DIR, world.REGISTRY_PATH, world.WORLD_PATH,
+         world.HOUSE_SETTINGS_PATH) = self._world_orig
         state_store.CHAR_STATE_ROOT, state_store.OUTBOX_PATH = self._ss_orig
         wake.bark_push, pipeline.tool_menu_block = self._bark_orig, self._menu_orig
         cohabit.coding_char = self._coding_orig
@@ -294,6 +297,18 @@ class TestExecute(CohabitBase):
         self.assertIn("没说不要", reason["text"])
         with self.assertRaises(ValueError):               # 扫掉之后按钮白按了得有声
             offers.respond(r["carry_offer"]["id"], True)
+
+    def test_offer_sweep_timeout_voids_when_toggled_off(self):
+        # 铃铛开关拨到「默认拒绝」：超时回老口径作废——谁都不动，发起人收「一直没反应」
+        world.set_carry_timeout_accept(False)
+        world.move("user", self.home)
+        self.wake_once(out("none", move="living_room",
+                           carry=world.entity_name("user")))
+        offers.sweep(now=time.time() + offers.OFFER_TTL_SEC + 1)
+        self.assertEqual(self.offer_reasons[-1][1]["kind"], "carry_void")
+        self.assertIn("一直没反应", self.offer_reasons[-1][1]["text"])
+        self.assertEqual(world.location_of(self.cid), self.home)
+        self.assertEqual(world.location_of("user"), self.home)
 
     def test_offer_sweep_user_gone_still_voids(self):
         # 超时前人先走散：照旧作废，不能隔空硬抱

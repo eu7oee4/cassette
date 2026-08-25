@@ -377,6 +377,8 @@ private struct NudgeSheet: View {
     // 经历流注入条数（小屋级旋钮，暂时寄居在铃铛里）：nil=还没从后端读到
     @State private var expLimit: Int? = nil
     @State private var expSaveTask: Task<Void, Never>? = nil
+    // 被抱超时默认答应/拒绝（小屋级开关，同样寄居铃铛）：nil=还没读到
+    @State private var carryAccept: Bool? = nil
 
     /// 可点名的角色（user 之外的全部实体），按 id 稳定排序。
     private var chars: [(id: String, name: String)] {
@@ -430,11 +432,29 @@ private struct NudgeSheet: View {
                 } footer: {
                     Text("聊天和醒来注入的小屋经历条数（一条＝一句话/一个动作），改完下一轮就生效。")
                 }
+                Section {
+                    if let on = carryAccept {
+                        Toggle("被抱超时默认答应", isOn: Binding(
+                            get: { on },
+                            set: { nv in carryAccept = nv; saveCarryAccept(nv) }
+                        ))
+                        .tint(Color.house.accent)
+                    } else {
+                        Text("读取中…").foregroundStyle(.secondary)
+                    }
+                } header: {
+                    Text("被抱邀约")
+                } footer: {
+                    Text("TA 想抱你走、你两分钟没作声时：开=当你愿意，直接抱走；关=当没反应，这次不抱。拨完立刻生效。")
+                }
                 if let errorText {
                     Text(errorText).font(.footnote).foregroundStyle(.red)
                 }
             }
-            .task { expLimit = try? await service.worldExperienceLimit() }
+            .task {
+                expLimit = try? await service.worldExperienceLimit()
+                carryAccept = try? await service.worldCarryTimeoutAccept()
+            }
             .navigationTitle("环境动静")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -462,6 +482,18 @@ private struct NudgeSheet: View {
             catch {
                 errorText = (error as? ChatServiceError)?.errorDescription
                     ?? error.localizedDescription
+            }
+        }
+    }
+
+    /// 开关不用去抖：一次点击一个 POST，失手就把错误摆出来并回读真值。
+    private func saveCarryAccept(_ on: Bool) {
+        Task {
+            do { try await service.setWorldCarryTimeoutAccept(on) }
+            catch {
+                errorText = (error as? ChatServiceError)?.errorDescription
+                    ?? error.localizedDescription
+                carryAccept = try? await service.worldCarryTimeoutAccept()
             }
         }
     }

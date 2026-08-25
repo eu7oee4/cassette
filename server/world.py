@@ -134,6 +134,20 @@ def set_experience_limit(n) -> int:
     return n
 
 
+def carry_timeout_accept() -> bool:
+    """被抱邀约超时没反应算不算答应（默认算，2026-08-23 机主拍板；开关 2026-08-25 加）。
+    offers.sweep 每轮现读——铃铛里拨完立刻生效，不用重启。"""
+    return bool(_read_json(HOUSE_SETTINGS_PATH, {}).get("carry_timeout_accept", True))
+
+
+def set_carry_timeout_accept(on: bool) -> bool:
+    with _LOCK:
+        d = _read_json(HOUSE_SETTINGS_PATH, {})
+        d["carry_timeout_accept"] = bool(on)
+        _write_json(HOUSE_SETTINGS_PATH, d)
+    return bool(on)
+
+
 # ---------- 实体 ----------
 def entity_ids() -> list[str]:
     """用户 + 全部角色 + 全部宠物（PLAN_pet P0：pet 是第三类实体）。"""
