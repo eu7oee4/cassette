@@ -172,18 +172,31 @@ async def translate_events(events, finalize):
     yield sse(payload)
 
 
+async def _watch_bp(events):
+    """透传事件流，顺手盯住「缓存断点超限」那个 400——一发现就关掉断点，下一条消息起自动
+    降级（只是变慢变贵，不再报错）。
+
+    流式这条路**故意不原地重试**：响应头早发出去了，重起子进程会把已经上屏的字打乱，
+    为一个只在 CLI 升级那一刻出现一次的故障冒这个险不划算。代价是眠眠会看到一次
+    「神游了」、重发一遍就好；日志里有明确的一行说清是什么事。
+    非流式那条路（pipeline._call_claude）响应还没开始，照旧原地重试，上层无感。"""
+    async for ev in events:
+        if (ev.get("type") == "result" and ev.get("api_error_status") == 400
+                and pipeline.bp_limit_hit(ev.get("result"))):
+            pipeline.disable_cache_bp("流式")
+        yield ev
+
+
 async def stream_claude(prompt: str, translate, images: list | None = None,
                         file_blocks: list | None = None, char_id: str | None = None):
     """通用流式：起 claude 子进程 → 把 stream-json 事件交给 translate(events) 翻成 SSE 字节块。
     安全约定同 pipeline.call_claude：base_claude_args + 删 ANTHROPIC_API_KEY。
-    带图/文件 → stdin 换成 stream-json 的多模态 user 消息（模型真看到），其余不变。"""
+    stdin 一律走 stream-json 的 user 消息（原来只有带图才走）：缓存断点得能拆 content
+    block 才打得上，纯文本 stdin 给不了这个。模型看到的字节不变，只是投递方式变了。"""
     args = pipeline.base_claude_args(char_id=char_id) + \
-        ["--output-format", "stream-json", "--verbose", "--include-partial-messages"]
-    if images or file_blocks:
-        args += ["--input-format", "stream-json"]
-        stdin_payload = pipeline.multimodal_stdin(prompt, images or [], file_blocks)
-    else:
-        stdin_payload = prompt
+        ["--input-format", "stream-json", "--output-format", "stream-json",
+         "--verbose", "--include-partial-messages"]
+    stdin_payload = pipeline.stdin_payload(prompt, images, file_blocks)
 
     proc = await asyncio.create_subprocess_exec(
         *args,
@@ -210,7 +223,7 @@ async def stream_claude(prompt: str, translate, images: list | None = None,
     proc.stdin.close()
 
     try:
-        async for chunk in translate(read_stream_events(proc)):
+        async for chunk in translate(_watch_bp(read_stream_events(proc))):
             yield chunk
     finally:
         stderr_task.cancel()

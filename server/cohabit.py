@@ -151,7 +151,8 @@ def cohabit_prompt(cid: str, reasons: list[dict], settings: dict) -> str:
         experience_limit=world.experience_limit()) or "（最近没什么经历）"
 
     menu = pipeline.tool_menu_block("wake", cid)
-    menu_section = f"\n{menu}\n" if menu else ""
+    # 菜单提到整段最前面当缓存前缀（口径同 wake.wake_prompt，见 pipeline.SplitPrompt）。
+    stable = f"{menu}\n\n" if menu else ""
 
     # 近 12h 已存清单（与老醒来路共用一份，见 wake.stored_block 的注释——
     # 上电初期漏了这段，cassette 同一件事存了三遍）。
@@ -176,7 +177,7 @@ def cohabit_prompt(cid: str, reasons: list[dict], settings: dict) -> str:
     pnames = "、".join(pets.display_name(p) for p in pets.ids())
     carry_pets = f"抱{pnames}不用先问，同屋直接写名字就行。" if pnames else ""
 
-    return f"""【这是一次你自己的醒来，不是{u}发来的消息】
+    return pipeline.SplitPrompt(stable, f"""【这是一次你自己的醒来，不是{u}发来的消息】
 现在是 {pipeline.now_str()}。
 {pipeline.pronoun_hint()}
 {_WORLDVIEW}
@@ -187,7 +188,7 @@ def cohabit_prompt(cid: str, reasons: list[dict], settings: dict) -> str:
 
 【你最近的经历，按时间顺序——手机对话 / 你醒来时的内心 / 你在屋里看见的（带（房间名）前缀）。手机和房间是两个通道，看前缀别搞混】
 {timeline}
-{menu_section}{stored_section}{blocked_section}{code_section}
+{stored_section}{blocked_section}{code_section}
 【这次为什么醒】
 {reason_lines or '- （无特别原因，就是醒了）'}
 
@@ -201,7 +202,7 @@ PHONE: <ACTION=phone 时发给{u}的消息>
 MOVE: <想去哪就写上面清单里的房间 id；id 后可空格接一句进场的样子，如 "living_room 打着哈欠晃进来"；不动写 "无"。移动发生在这一轮的最后，走完下一轮会告诉你结果>
 CARRY: <配合 MOVE：想抱着{u}一起走就写「{u}」（前提是{u}此刻和你同屋）。抱人要{u}愿意：写了这项，这轮的 MOVE 不会立刻发生——先问{u}，答应了才一起过去；答应、拒绝还是没反应，之后都会告诉你。{carry_pets}不带人写 "无">
 NEXT: <你希望多久后再自主醒来，如 "90分钟" 或 "3小时"；没想法写 "无">
-"""
+""")
 
 
 def house_context_for_chat(char_id) -> str:

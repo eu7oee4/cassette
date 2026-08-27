@@ -221,7 +221,10 @@ def wake_prompt(settings: dict, forced: bool = False, note: str = "",
     # context='wake' 不能省：过滤链会自动摘掉醒来不挂的块（codemode 硬禁、「醒来能用」
     # 开关没打开的插件），needs 里缺任一个工具的块整块不提。
     menu = pipeline.tool_menu_block("wake", char_id)
-    menu_section = f"\n{menu}\n" if menu else ""
+    # 菜单从时间线后面提到**整段最前面**，当缓存前缀用（见 pipeline.SplitPrompt）：
+    # 醒来这条路的可缓存前缀统共才 4,550 token（工具走 ToolSearch 延迟，schema 不在场），
+    # 每轮却要重建两万——菜单是这两万里唯一逐轮不变的大块。
+    stable = f"{menu}\n\n" if menu else ""
 
     # 近 12h 已存清单：菜单里没有这东西，得单独留着。
     sb_stored = stored_block(char_id)
@@ -259,13 +262,13 @@ def wake_prompt(settings: dict, forced: bool = False, note: str = "",
 
     note_section = f"\n【这次为什么醒】{note}\n" if note else ""
 
-    return f"""【这是一次你自己的醒来，不是{u}发来的消息】
+    return pipeline.SplitPrompt(stable, f"""【这是一次你自己的醒来，不是{u}发来的消息】
 现在是 {now_str}。{gap_line}
 {pipeline.pronoun_hint()}{note_section}
 
 【最近发生的，按时间顺序——对话 / 你自己醒来时的内心，看时间戳别搞混先后】
 {timeline_block}
-{menu_section}{stored_section}{unsent_section}{sticker_section}{budget_section}{code_section}{blocked_section}
+{stored_section}{unsent_section}{sticker_section}{budget_section}{code_section}{blocked_section}
 想清楚这次要不要做点什么。想{u}了、有话想说就发消息；没什么可说的就安静醒着，不用硬找话。
 你还可以自己定下次醒来的时间（NEXT）：写了我保证到那个点把你醒一次；这中间你照样可能随机醒来，不受影响。范围 5 分钟~12 小时；没特别想法就写"无"（不定这个点，纯随机节奏）。{u}现在设的活跃频率偏好是「{freq_cn}」，你定 NEXT 时可以参考。
 严格按下面格式回答（四段都要，标签用英文、后跟冒号）：
@@ -273,7 +276,7 @@ THOUGHTS: <你此刻真实的内心，几句话>
 ACTION: <none / message，二选一>
 CONTENT: <ACTION=message 就写要发给{u}的话；=none 留空>
 NEXT: <你希望多久后再醒来，如 "90分钟" 或 "3小时"；没想法写 "无">
-"""
+""")
 
 
 def parse_wake_output(text: str) -> tuple[str, str, str, Optional[int], str]:
@@ -318,17 +321,27 @@ _OVERLOAD_RE = re.compile(r'"api_error_status"\s*:\s*529|529\s+Overloaded', re.I
 def _run_claude_wake_once(prompt: str, char_id: Optional[str]) \
         -> tuple[Optional[str], list[dict], bool]:
     """跑一次，返回 (raw, stored, 是否过载)。过载时 raw 必为 None。"""
+    # stdin 走 stream-json（原来是纯文本）：缓存断点要能拆 content block 才打得上。
     args = (pipeline.base_claude_args(context="wake", char_id=char_id)
-            + ["--output-format", "stream-json", "--verbose"])
-    try:
-        proc = subprocess.run(args, input=prompt, capture_output=True, text=True,
-                              env=pipeline._subprocess_env("wake"),
-                              cwd=pipeline.neutral_cwd(),
-                              timeout=config.CLAUDE_TIMEOUT_SEC)
-    except subprocess.TimeoutExpired:
-        logerr("醒来调用超时")
-        return None, [], False
-    if proc.returncode != 0:
+            + ["--input-format", "stream-json", "--output-format", "stream-json", "--verbose"])
+    proc = None
+    for attempt in (1, 2):
+        use_bp = pipeline.cache_bp_on()
+        try:
+            proc = subprocess.run(args, input=pipeline.stdin_payload(prompt, use_bp=use_bp),
+                                  capture_output=True, text=True,
+                                  env=pipeline._subprocess_env("wake"),
+                                  cwd=pipeline.neutral_cwd(),
+                                  timeout=config.CLAUDE_TIMEOUT_SEC)
+        except subprocess.TimeoutExpired:
+            logerr("醒来调用超时")
+            return None, [], False
+        if proc.returncode == 0:
+            break
+        # 断点名额被 CLI 吃满 → 关掉断点原样重跑一次（这一轮对上层无感）。
+        if attempt == 1 and use_bp and pipeline.bp_limit_hit(proc.stdout):
+            pipeline.disable_cache_bp("醒来")
+            continue
         # stderr 常是空的（stream-json 模式报错走 stdout）——两头都记，排障不绕路。
         logerr(f"醒来进程出错 rc={proc.returncode}: stderr={proc.stderr[:200]!r} stdout尾={proc.stdout[-300:]!r}")
         return None, [], bool(_OVERLOAD_RE.search(proc.stdout or ""))

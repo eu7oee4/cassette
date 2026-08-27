@@ -310,6 +310,63 @@ def parse_chat_move(reply: str) -> tuple[str, Optional[str]]:
     return reply.strip(), (found[-1] if found else None)
 
 
+# ---------- 缓存断点 ----------
+# prompt 的稳定段（能力菜单）单独切成一个 content block 打上 cache_control，让它跨轮命中
+# 缓存，不再每轮重建。实测（2026-08-27，聊天配置 83 个工具）：稳定块 7,657 token，
+# 第二轮 cache_read 命中、cache_creation 从 9,758 掉到 60。
+#
+# ⚠️ ttl 必须写 "1h"。CLI 自己那三个断点（tools / system / 消息末尾，都已实测定位过）
+# 全是 1h，而 API 规定 1h 的块不能排在 5m 的块后面——用默认 5m 会直接 400，且报错文案
+# 只说排序不说 ttl，很难往这儿想。
+#
+# ⚠️ 名额只有一个。API 上限是 4 个 cache_control 块，CLI 占了 3 个（`--tools ""` 也照占：
+# 断点标记跟里面装没装东西无关）。这里**只能打一个**，多打一个就是
+# "A maximum of 4 blocks with cache_control may be provided. Found 5." 的 400。
+# 也就是说 CLI 哪天升级自己多打一个，我们这个断点会把每一轮都顶成 400 ——
+# 所以下面那道自动降级不是锦上添花，是这刀敢上线的前提。
+CACHE_BP_TTL = "1h"
+_BP_LIMIT_RE = re.compile(r"maximum of \d+ blocks with cache_control", re.I)
+_bp_enabled = True
+
+
+def cache_bp_on() -> bool:
+    return _bp_enabled
+
+
+def disable_cache_bp(where: str) -> None:
+    """断点名额被 CLI 吃满了 → 本进程之后一律不打断点。
+    降级之后只是变慢变贵，不再报错——**所以必须往日志里喊**，否则这事没有任何症状。"""
+    global _bp_enabled
+    if _bp_enabled:
+        _bp_enabled = False
+        logerr(f"缓存断点被拒（{where}）：claude CLI 自己的 cache_control 块变多了，"
+               f"本进程起不再打断点。prompt 缓存失效、聊天和醒来会变慢变贵——查 CLI 版本。")
+
+
+def bp_limit_hit(text: str) -> bool:
+    """这坨 stdout / 这条 result 文案是不是「断点超限」那个 400。"""
+    return bool(text and _BP_LIMIT_RE.search(str(text)))
+
+
+class SplitPrompt(str):
+    """带缓存切点的 prompt。**本体就是完整字符串**——所有老调用点、日志、测试断言一个字
+    都不用改，只有 stdin_payload 会去看 cut。
+
+    cut = 稳定段的长度：[:cut] 逐轮不变（能力菜单），[cut:] 每轮都变（时间线/时间/新消息）。
+
+    切点为什么只能切在菜单后面：时间线是**滑动窗口**（app 只发最近 sendHistoryCap 条），
+    每轮一问一答两条，窗口起点跟着往后挪——切在它后面前缀每轮都不一样，缓存永远不命中。
+    要把时间线也纳进来，得先把窗口锚定住（起点和切点都吸附到格子上），那是另一刀。
+
+    ⚠️ 切片/拼接会退化成普通 str（cut 丢失）——要改内容就重新构造一个，别在中途变换。"""
+    cut: int
+
+    def __new__(cls, stable: str, volatile: str):
+        o = super().__new__(cls, stable + volatile)
+        o.cut = len(stable)
+        return o
+
+
 # ---------- prompt ----------
 def build_prompt(messages: list[Message], catalog: Optional[list[dict]] = None,
                  char_id: Optional[str] = None,
@@ -317,7 +374,10 @@ def build_prompt(messages: list[Message], catalog: Optional[list[dict]] = None,
     """把 app 传来的完整历史拼成一次性提示词。人设在系统提示词里，这里只有对话本身。
     时间感（当前时间+时段词、距上一条的间隔）注入在**末尾、紧贴新消息**——放顶部会被
     长对话淹掉，prompt 末尾是 recency 权重最高的位置。恒为 1~2 行、不随历史增长。
-    extra_hints＝调用方按场景附加的提示段（如同居世界的 [[move:]] 提示），排进 extras。"""
+    extra_hints＝调用方按场景附加的提示段（如同居世界的 [[move:]] 提示），排进 extras。
+
+    返回 SplitPrompt：本体是完整字符串（调用方当普通 str 用就行），额外带一个缓存切点，
+    切在能力菜单之后——菜单前面那段逐轮不变，能当缓存前缀。"""
     *history, last = messages
 
     time_lines = [f"【现在是 {now_str()}】"]
@@ -325,18 +385,21 @@ def build_prompt(messages: list[Message], catalog: Optional[list[dict]] = None,
     if gap:
         time_lines.append(f"【距离上一条消息，过了 {gap}】")
 
-    extras = [pronoun_hint(), _chat_next_hint()] + [h for h in (extra_hints or []) if h]
     # 能力菜单取代了原来写死的 memory_block（内容搬进 tool_menu.example.md）：
     # 一份可编辑的文件、按本轮实际挂载过滤，聊天和醒来共用同一份来源。
+    # 位置从 extras 中间提到**整段最前面**：它是这份 prompt 里唯一逐轮不变的大块，
+    # 只有排在最前才当得了缓存前缀（见 SplitPrompt）。菜单是参考资料不是叮嘱，
+    # 放最前不吃 recency 的亏。
     mb = tool_menu_block("chat", char_id)
-    if mb:
-        extras.append(mb)
+    stable = f"{mb}\n\n" if mb else ""
+
+    extras = [pronoun_hint(), _chat_next_hint()] + [h for h in (extra_hints or []) if h]
     sb = sticker_block(catalog)
     if sb:
         extras += ["", sb]
 
     if not history:
-        return "\n".join(extras + [""] + time_lines + ["", last.text])
+        return SplitPrompt(stable, "\n".join(extras + [""] + time_lines + ["", last.text]))
 
     lines = extras + [""]
     # 合并时间线：历史对话 + 醒来内心 + 小屋经历流（同居开着时），按时间排。
@@ -366,7 +429,7 @@ def build_prompt(messages: list[Message], catalog: Optional[list[dict]] = None,
     lines.append("")
     lines.append("【回下面这条。按这句的份量和情绪回：随口就随口，别硬凑长，一句话或一个词也可以。】")
     lines.append(f"{config.user_name()}：{last.text}")
-    return "\n".join(lines)
+    return SplitPrompt(stable, "\n".join(lines))
 
 
 # ---------- 人设渲染 ----------
@@ -1029,12 +1092,28 @@ def parse_claude_stream(stdout: str, collect_all_text: bool = False) -> tuple[Op
     return (result_text.strip() if result_text else None), collector.items
 
 
-def multimodal_stdin(prompt: str, images: list, file_blocks: Optional[list[dict]] = None) -> str:
-    """带图/文件调用的 stdin 载荷：一条含 [text, image, document...] 的 user 消息
-    （stream-json 输入格式）。images 元素带 .data(base64)/.media_type（app.py 的
-    ImageInput）；file_blocks 是 app.py _file_to_block 转好的 document block。"""
-    content: list[dict] = [{"type": "text", "text": prompt}]
-    for img in images:
+def stdin_payload(prompt: str, images: Optional[list] = None,
+                  file_blocks: Optional[list[dict]] = None,
+                  use_bp: bool = True) -> str:
+    """一条 stream-json user 消息——**所有 claude 调用统一走这里**，纯文本 stdin 那条路
+    已经退役（要打缓存断点就必须能拆 content block，纯文本给不了这个）。
+
+    prompt 是 SplitPrompt 且允许打断点时切成两块：[稳定块(带 cache_control), 易变块]；
+    否则整段一块，模型看到的字节跟以前逐字相同——**拆块只改投递方式，不改内容**。
+
+    images 元素带 .data(base64)/.media_type（app.py 的 ImageInput）；file_blocks 是
+    app.py _file_to_block 转好的 document block。两者都追在最后：它们跟着新消息走，
+    本来就在易变的那一侧。"""
+    cut = getattr(prompt, "cut", 0) if (use_bp and cache_bp_on()) else 0
+    if cut > 0:
+        content: list[dict] = [
+            {"type": "text", "text": prompt[:cut],
+             "cache_control": {"type": "ephemeral", "ttl": CACHE_BP_TTL}},
+            {"type": "text", "text": prompt[cut:]},
+        ]
+    else:
+        content = [{"type": "text", "text": str(prompt)}]
+    for img in (images or []):
         content.append({"type": "image",
                         "source": {"type": "base64", "media_type": img.media_type,
                                    "data": img.data}})
@@ -1043,46 +1122,46 @@ def multimodal_stdin(prompt: str, images: list, file_blocks: Optional[list[dict]
                        "message": {"role": "user", "content": content}}) + "\n"
 
 
+def _call_claude(prompt: str, images: Optional[list] = None,
+                 file_blocks: Optional[list[dict]] = None,
+                 char_id: Optional[str] = None) -> tuple[str, list[dict]]:
+    """起一次性 claude -p 子进程（stdin 读到 EOF 才开始），返回 (回复, stored)。
+    断点被 CLI 吃满而 400 → 关掉断点原样重跑一次，这一轮对上层完全无感。"""
+    args = base_claude_args(char_id=char_id) + ["--input-format", "stream-json",
+                                                "--output-format", "stream-json", "--verbose"]
+    proc = None
+    for attempt in (1, 2):
+        use_bp = cache_bp_on()
+        try:
+            proc = subprocess.run(
+                args, input=stdin_payload(prompt, images, file_blocks, use_bp=use_bp),
+                capture_output=True, text=True, cwd=neutral_cwd(),
+                env=_subprocess_env(), timeout=config.CLAUDE_TIMEOUT_SEC,
+            )
+        except subprocess.TimeoutExpired:
+            raise HTTPException(status_code=504, detail="claude 超时未返回")
+        if proc.returncode == 0:
+            break
+        if attempt == 1 and use_bp and bp_limit_hit(proc.stdout):
+            disable_cache_bp("一次性调用")
+            continue
+        raise HTTPException(status_code=502, detail=f"claude 进程出错: {proc.stderr[:500]}")
+    reply, stored = parse_claude_stream(proc.stdout)
+    if reply is None:
+        raise HTTPException(status_code=502, detail="claude 未返回结果")
+    return reply, stored
+
+
 def call_claude_multimodal(prompt: str, images: list,
                            file_blocks: Optional[list[dict]] = None,
                            char_id: Optional[str] = None) -> tuple[str, list[dict]]:
-    """带图/文件的一次性调用（非流式回退路）：stream-json 输入让模型真正看到。
-    其余与 call_claude 完全同款（参数/env/解析）。"""
-    args = base_claude_args(char_id=char_id) + ["--input-format", "stream-json",
-                                                "--output-format", "stream-json", "--verbose"]
-    try:
-        proc = subprocess.run(
-            args, input=multimodal_stdin(prompt, images, file_blocks),
-            capture_output=True, text=True, cwd=neutral_cwd(),
-            env=_subprocess_env(), timeout=config.CLAUDE_TIMEOUT_SEC,
-        )
-    except subprocess.TimeoutExpired:
-        raise HTTPException(status_code=504, detail="claude 超时未返回")
-    if proc.returncode != 0:
-        raise HTTPException(status_code=502, detail=f"claude 进程出错: {proc.stderr[:500]}")
-    reply, stored = parse_claude_stream(proc.stdout)
-    if reply is None:
-        raise HTTPException(status_code=502, detail="claude 未返回结果")
-    return reply, stored
+    """带图/文件的一次性调用（非流式回退路）。"""
+    return _call_claude(prompt, images, file_blocks, char_id)
 
 
 def call_claude(prompt: str, char_id: Optional[str] = None) -> tuple[str, list[dict]]:
-    """起一次性 claude -p 子进程（prompt 走 stdin，读到 EOF 才开始），返回 (回复, stored)。"""
-    args = base_claude_args(char_id=char_id) + ["--output-format", "stream-json", "--verbose"]
-    try:
-        proc = subprocess.run(
-            args, input=prompt, capture_output=True, text=True,
-            cwd=neutral_cwd(),
-            env=_subprocess_env(), timeout=config.CLAUDE_TIMEOUT_SEC,
-        )
-    except subprocess.TimeoutExpired:
-        raise HTTPException(status_code=504, detail="claude 超时未返回")
-    if proc.returncode != 0:
-        raise HTTPException(status_code=502, detail=f"claude 进程出错: {proc.stderr[:500]}")
-    reply, stored = parse_claude_stream(proc.stdout)
-    if reply is None:
-        raise HTTPException(status_code=502, detail="claude 未返回结果")
-    return reply, stored
+    """纯文本的一次性调用。"""
+    return _call_claude(prompt, char_id=char_id)
 
 
 # ---------- 内部标记 ----------
