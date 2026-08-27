@@ -280,18 +280,19 @@ struct ChatService {
 
     // MARK: - 主动消息设置
 
-    /// 拉后端当前的主动消息设置。
-    func getSettings() async throws -> ProactiveSettings {
-        let data = try await perform(authedRequest("GET", "/settings"))
+    /// 拉某个角色当前的主动消息设置（char 缺省＝当前角色）。
+    func getSettings(char: String? = nil) async throws -> ProactiveSettings {
+        let data = try await perform(authedRequest("GET", "/settings", char: char))
         do { return try JSONDecoder().decode(ProactiveSettings.self, from: data) }
         catch { throw ChatServiceError.badResponse }
     }
 
-    /// 覆盖保存主动消息设置，返回后端确认后的值。
+    /// 覆盖保存某个角色的主动消息设置，返回后端确认后的值。**char 是这份设置属于谁**，
+    /// 不是「现在在看谁」——调用方必须把值和角色成对传进来（见 authedRequest 的注释）。
     @discardableResult
-    func saveSettings(_ s: ProactiveSettings) async throws -> ProactiveSettings {
+    func saveSettings(_ s: ProactiveSettings, char: String? = nil) async throws -> ProactiveSettings {
         let body = try JSONEncoder().encode(s)
-        let data = try await perform(authedRequest("POST", "/settings", jsonBody: body))
+        let data = try await perform(authedRequest("POST", "/settings", jsonBody: body, char: char))
         do { return try JSONDecoder().decode(ProactiveSettings.self, from: data) }
         catch { throw ChatServiceError.badResponse }
     }
@@ -454,10 +455,16 @@ struct ChatService {
     // internal：MemoryPage 等功能页的服务扩展也走这两个（统一鉴权/错误翻译，别另起一套）
     // 统一追加当前角色（?char=）：设置/心流/记忆/插件这些角色态端点一处全覆盖；
     // 全局端点（/pending /code/* 等）后端不声明该参数、FastAPI 直接忽略，无害。
+    //
+    // char 显式传＝**这一发认哪个角色**，缺省才回落全局 CurrentCharacter。手上握着
+    // 「属于某个角色的一份数据」的调用方（设置回写就是）必须显式传：全局是会在飞行途中
+    // 变的（设置页右上角就挂着切人按钮），拿它贴标签＝把 A 的数据写进 B（08-28 事故：
+    // default 的整份设置落进 cass，Cassius 被覆盖成 cassette）。
     func authedRequest(_ method: String, _ path: String, jsonBody: Data? = nil,
-                       timeout: TimeInterval = 20) throws -> URLRequest {
+                       timeout: TimeInterval = 20, char: String? = nil) throws -> URLRequest {
         let sep = path.contains("?") ? "&" : "?"
-        guard let url = URL(string: BackendConfig.baseURL + path + sep + "char=" + CurrentCharacter.id)
+        guard let url = URL(string: BackendConfig.baseURL + path + sep
+                            + "char=" + (char ?? CurrentCharacter.id))
         else { throw ChatServiceError.badURL }
         var req = URLRequest(url: url)
         req.httpMethod = method

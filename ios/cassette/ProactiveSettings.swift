@@ -58,22 +58,36 @@ struct ProactiveSettings: Codable, Equatable {
 }
 
 /// 主动消息设置的本地持有者：本地即时读（UserDefaults），进页面与后端对齐，改动回写后端（后端才是执行者）。
+///
+/// **手里这份设置属于谁（charID）跟着值一起走**，不认全局 CurrentCharacter——设置页
+/// 右上角就挂着切人按钮，「拉取在飞」和「回写防抖中」这两个窗口里全局都可能已经变了。
+/// 2026-08-28 事故就是这么来的：default 的整份设置被 POST 进 cass，agent_name 把
+/// char.json 的 Cassius 覆盖成了 cassette，两个角色显示同名。所以：
+///   - 拉取带上请求时的角色，回来发现人已经换了就丢弃（不是当前这份，别覆盖）；
+///   - 回写把 (值, 角色) 成对快照，防抖期间切人照样写回它原本属于的那个角色；
+///   - 装载引起的 settings 变化不算「用户改了设置」，不触发回写。
 @MainActor
 final class ProactiveSettingsStore: ObservableObject {
     @Published var settings: ProactiveSettings
+    /// settings 属于哪个角色（存盘/回写都认它）。
+    private(set) var charID: String
+    /// 正在装载（切人/拉后端对齐）：这期间 settings 的变化不是用户改的。
+    @Published private(set) var loading = false
 
-    // 本地缓存按角色分 key（默认角色沿用老 key，零迁移）；后端请求经 authedRequest
-    // 自动带当前角色。切会话后调 reloadForCurrentCharacter()。
-    private var key: String {
-        let id = CurrentCharacter.id
-        return id == "default" ? "proactive_settings" : "proactive_settings_\(id)"
-    }
     private let service = ChatService()
+    private var pushTask: Task<Void, Never>? = nil
+    /// 已排期、还没落地的回写快照（角色 + 值）。
+    private var pending: (char: String, value: ProactiveSettings)? = nil
+
+    // 本地缓存按角色分 key（默认角色沿用老 key，零迁移）。
+    private static func key(_ id: String) -> String {
+        id == "default" ? "proactive_settings" : "proactive_settings_\(id)"
+    }
 
     init() {
-        settings = Self.loadLocal(key: CurrentCharacter.id == "default"
-                                  ? "proactive_settings"
-                                  : "proactive_settings_\(CurrentCharacter.id)")
+        let id = CurrentCharacter.id
+        charID = id
+        settings = Self.loadLocal(key: Self.key(id))
     }
 
     private static func loadLocal(key: String) -> ProactiveSettings {
@@ -81,32 +95,72 @@ final class ProactiveSettingsStore: ObservableObject {
            let s = try? JSONDecoder().decode(ProactiveSettings.self, from: data) {
             return s
         }
-        return ProactiveSettings()
+        // 没缓存时**不要**替这个角色编一个名字：空＝后端按 char.json / 兜底默认取名。
+        // 给了 "cassette" 的话，缓存缺席的角色一旦被回写就会被按上默认角色的名字。
+        return ProactiveSettings(agentName: "")
     }
 
     /// 切会话后：先上本地缓存的该角色设置（即时），再找后端对齐。
     func reloadForCurrentCharacter() async {
-        settings = Self.loadLocal(key: key)
+        flushPending()          // 上一位还没落地的改动先送走（带它自己的角色）
+        let id = CurrentCharacter.id
+        loading = true
+        charID = id
+        settings = Self.loadLocal(key: Self.key(id))
         await refreshFromServer()
+        loading = false
     }
 
-    private func saveLocal() {
-        if let d = try? JSONEncoder().encode(settings) {
-            UserDefaults.standard.set(d, forKey: key)
+    private func saveLocal(_ value: ProactiveSettings, char: String) {
+        if let d = try? JSONEncoder().encode(value) {
+            UserDefaults.standard.set(d, forKey: Self.key(char))
         }
     }
 
-    /// 进设置页时拉后端当前值对齐（后端是执行的真相）。连不上就保留本地值。
+    /// 进页面拉后端当前值对齐（后端是执行的真相）。连不上就保留本地值。
+    /// 在飞期间切了人 → 这份是上一位的，丢掉。
     func refreshFromServer() async {
-        if let s = try? await service.getSettings() {
+        let id = charID
+        let outer = loading
+        loading = true
+        defer { loading = outer }
+        if let s = try? await service.getSettings(char: id), charID == id {
             settings = s
-            saveLocal()
+            saveLocal(s, char: id)
         }
     }
 
-    /// 用户改了设置：先存本地，再同步给后端。
+    /// 用户改了设置：600ms 防抖后回写（打字类改动别每个字一发）。
+    /// 快照连角色一起捕获——防抖期间切人，这一发照样落在它本来那个角色头上。
+    func schedulePush(debounceMs: Int = 600) {
+        guard !loading else { return }   // 装载引起的变化不是用户改的
+        if let p = pending, p.char != charID { flushPending() }
+        let snapshot = settings, id = charID
+        pending = (id, snapshot)
+        saveLocal(snapshot, char: id)
+        pushTask?.cancel()
+        pushTask = Task { [service] in
+            try? await Task.sleep(for: .milliseconds(debounceMs))
+            guard !Task.isCancelled else { return }
+            _ = try? await service.saveSettings(snapshot, char: id)
+            if self.pending?.char == id { self.pending = nil }
+        }
+    }
+
+    /// 立即回写（不防抖）：给「输入框提交 / 改昵称 / 引导收尾」这类一次性动作用。
     func pushToServer() async {
-        saveLocal()
-        _ = try? await service.saveSettings(settings)
+        pushTask?.cancel()
+        let snapshot = settings, id = charID
+        pending = nil
+        saveLocal(snapshot, char: id)
+        _ = try? await service.saveSettings(snapshot, char: id)
+    }
+
+    /// 把排期中的回写立刻送出去（切人前用）：不等防抖，也不管现在在看谁。
+    private func flushPending() {
+        pushTask?.cancel()
+        guard let p = pending else { return }
+        pending = nil
+        Task { [service] in _ = try? await service.saveSettings(p.value, char: p.char) }
     }
 }

@@ -4,7 +4,6 @@ import SwiftUI
 struct ProactiveSettingsView: View {
     @ObservedObject var store: ProactiveSettingsStore
     @State private var loading = true
-    @State private var pushTask: Task<Void, Never>? = nil   // 回写防抖（昵称每敲一字都触发 onChange）
     // 「小屋当首页」是纯本机的界面偏好，不进后端设置——直接落 AppStorage。
     @AppStorage("houseAsRoot") private var houseAsRoot = false
 
@@ -97,13 +96,9 @@ struct ProactiveSettingsView: View {
         }
         .onChange(of: store.settings) { _, _ in
             guard !loading else { return }   // 拉取对齐时的变化不回写
-            // 防抖 600ms：打字类改动别每个字都 POST 一次。
-            pushTask?.cancel()
-            pushTask = Task {
-                try? await Task.sleep(for: .milliseconds(600))
-                guard !Task.isCancelled else { return }
-                await store.pushToServer()
-            }
+            // 防抖和「这份设置属于谁」都在 store 里（见那边的注释）：这页右上角挂着
+            // 切人按钮，防抖计时不能寄在会被重建的 @State 上，否则那一发落到新角色头上。
+            store.schedulePush()
         }
     }
 
