@@ -209,8 +209,9 @@ def house_context_for_chat(char_id) -> str:
     """手机聊天注入的小屋现场快照（你在哪/这里有谁/地点状态）。
     房间事件**原文不在这儿**——经历流已按时间并进聊天时间线
     （build_context_timeline 的 experience_limit 路，2026-08-16 机主拍板 B 案），
-    这里再摆一遍就是重复注入，只留现场快照 + 通道框定。开关关着返回空串。"""
-    if not config.COHABIT_ENABLED:
+    这里再摆一遍就是重复注入，只留现场快照 + 通道框定。开关关着返回空串
+    （含小屋总开关：休眠中没有「现场」可言）。"""
+    if not world.house_active():
         return ""
     cid = characters.resolve(char_id)
     return ("【小屋现场——你此刻真实待在这里；你在屋里看见过的对话和动作"

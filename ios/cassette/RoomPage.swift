@@ -47,6 +47,10 @@ struct RoomPage: View {
     /// 「我」还在这个房间吗（在场才有输入区；偷看永远没有）。
     private var present: Bool { detail?.occupants.contains("user") ?? !peek }
 
+    /// 小屋休眠中（总开关关着）：房间只读——能看，不能说话/改状态/摸猫
+    /// （服务端 409 是真闸，这里把入口一并收掉，别让人按了才碰壁）。
+    private var frozen: Bool { detail?.enabled == false }
+
     var body: some View {
         ZStack {
             Color.house.bg.ignoresSafeArea()
@@ -54,12 +58,13 @@ struct RoomPage: View {
                 header
                 if peek { peekBanner }
                 else if detail != nil && !present { goneBanner }
+                if frozen { frozenBanner }
                 if let err = detail?.queue_error { queueErrorBanner(err) }
                 presenceBar
                 stateSection
                 carryOfferCard
                 eventList
-                if !peek && present { inputBar }
+                if !peek && present && !frozen { inputBar }
             }
         }
         .toolbar(.hidden, for: .navigationBar)
@@ -160,17 +165,20 @@ struct RoomPage: View {
             Spacer()
             // 暂停/开始：按住场面好插嘴——正在生成的说完为止，之后队列攒着，
             // 恢复一口气补（偷看模式也给：旁观他们对话时同样用得上）。
-            Button {
-                let target = !(detail?.paused ?? false)
-                Task { try? await service.worldPause(target); await refresh() }
-            } label: {
-                let isPaused = detail?.paused ?? false
-                Label(isPaused ? "开始" : "暂停",
-                      systemImage: isPaused ? "play.fill" : "pause.fill")
-                    .font(.footnote.bold())
-                    .foregroundStyle(isPaused ? Color.house.onAccent : Color.house.accent)
-                    .padding(.horizontal, 12).padding(.vertical, 7)
-                    .background(Capsule().fill(isPaused ? Color.house.accent : Color.house.surface))
+            // 休眠中不给：总开关冻的是全部，暂停键在玻璃罩里没有意义。
+            if !frozen {
+                Button {
+                    let target = !(detail?.paused ?? false)
+                    Task { try? await service.worldPause(target); await refresh() }
+                } label: {
+                    let isPaused = detail?.paused ?? false
+                    Label(isPaused ? "开始" : "暂停",
+                          systemImage: isPaused ? "play.fill" : "pause.fill")
+                        .font(.footnote.bold())
+                        .foregroundStyle(isPaused ? Color.house.onAccent : Color.house.accent)
+                        .padding(.horizontal, 12).padding(.vertical, 7)
+                        .background(Capsule().fill(isPaused ? Color.house.accent : Color.house.surface))
+                }
             }
             // 没有「离开」按钮：返回只是收起页面，人还留在房间——移动只发生在
             // 地图上点「去这里 / 出门 / 回家」（机主 2026-08-16 拍板，走廊概念从用户侧移除）。
@@ -189,6 +197,14 @@ struct RoomPage: View {
     /// 「你最后一段在场区间」，只读；你走之后发生的事不在里面（那才要偷看）。
     private var goneBanner: some View {
         Text("你已不在这个房间——这是你在场时看到的")
+            .font(.caption2).foregroundStyle(Color.house.textSecondary)
+            .frame(maxWidth: .infinity).padding(.vertical, 5)
+            .background(Color.house.surfaceHi)
+    }
+
+    /// 小屋休眠（总开关关着）：冻结的最后一帧，只能看。开关在小屋页的铃铛里。
+    private var frozenBanner: some View {
+        Label("小屋休眠中——一切都静止着，只能看", systemImage: "moon.zzz.fill")
             .font(.caption2).foregroundStyle(Color.house.textSecondary)
             .frame(maxWidth: .infinity).padding(.vertical, 5)
             .background(Color.house.surfaceHi)
@@ -222,8 +238,9 @@ struct RoomPage: View {
                     Text(d.occupants.isEmpty ? "现在没人" : "")
                         .font(.caption).foregroundStyle(Color.house.textSecondary)
                     Spacer()
-                    // 照顾入口：宠物在场且我也在场才摸得着（偷看是上帝视角，摸不着猫）
-                    if !peek, present, let pet = d.pets?.first {
+                    // 照顾入口：宠物在场且我也在场才摸得着（偷看是上帝视角，摸不着猫；
+                    // 休眠中猫在冬眠，同样摸不着）
+                    if !peek, present, !frozen, let pet = d.pets?.first {
                         Button { petCare = PetCareTarget(id: pet) } label: {
                             Image(systemName: "pawprint.fill")
                                 .font(.system(size: 15))
@@ -243,7 +260,7 @@ struct RoomPage: View {
     @ViewBuilder
     private func stateRow(_ entry: RoomStateEntry) -> some View {
         Button {
-            if !peek && present { editingEntry = entry }
+            if !peek && present && !frozen { editingEntry = entry }
         } label: {
             HStack(alignment: .top, spacing: 6) {
                 Text("·").foregroundStyle(Color.house.accent)
@@ -264,7 +281,7 @@ struct RoomPage: View {
             VStack(alignment: .leading, spacing: 6) {
                 HStack {
                     Spacer()
-                    if !peek && present {
+                    if !peek && present && !frozen {
                         Button { stateDraft = ""; stateSheet = .add } label: {
                             Image(systemName: "plus.circle.fill")
                                 .foregroundStyle(Color.house.accent)

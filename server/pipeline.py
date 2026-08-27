@@ -404,15 +404,13 @@ def build_prompt(messages: list[Message], catalog: Optional[list[dict]] = None,
     lines = extras + [""]
     # 合并时间线：历史对话 + 醒来内心 + 小屋经历流（同居开着时），按时间排。
     conv_items = [{"ts": m.ts, "role": m.role, "text": m.text} for m in history]
-    if config.COHABIT_ENABLED:
-        import world   # 延迟导入，同 build_context_timeline（防循环）
-        exp_n = world.experience_limit()   # 小屋级旋钮，默认 40，铃铛里可调
-    else:
-        exp_n = 0
+    import world   # 延迟导入，同 build_context_timeline（防循环）
+    house_on = world.house_active()   # 总开关热读：休眠中经历流不再并入（没有现场）
+    exp_n = world.experience_limit() if house_on else 0
     timeline = build_context_timeline(conv_items, char_id=char_id,
                                       experience_limit=exp_n)
     if timeline:
-        if config.COHABIT_ENABLED:
+        if house_on:
             lines.append("【下面是最近发生的，按时间顺序——手机对话 / 你醒来时的内心 / "
                          "你在小屋里看见的（带（房间名）前缀），看时间戳别搞混先后】")
         else:
@@ -489,8 +487,10 @@ PET_MCP_TOOLS = [f"mcp__pets__{t}"
 
 
 def _pet_mcp_mounted(char_id: Optional[str] = None) -> bool:
+    # 总开关关着不挂：猫在冬眠，喂猫工具在 TA 眼里不该存在（端点侧另有 409 兜底）。
     import pets
-    return bool(config.COHABIT_ENABLED and pets.ids())
+    import world
+    return bool(world.house_active() and pets.ids())
 
 
 def _pet_mcp_config(char_id: Optional[str] = None) -> Path:

@@ -8,6 +8,7 @@ struct WorldSnapshot: Decodable {
     let rooms: [WorldRoom]
     let entities: [String: WorldEntity]
     let carry_offer: CarryOffer?      // 有人想抱你去别的房间（答应了才会一起移动）
+    let enabled: Bool?                // 小屋总开关：false=休眠（全冻，玻璃罩）；老后端没有=开
     let paused: Bool?                 // 醒来队列暂停中
     let queue_error: String?          // 队列被按停的原因（模型过载）；按「开始」即清
 
@@ -52,6 +53,7 @@ struct RoomDetail: Decodable {
     let owner: String?
     let state: [RoomStateEntry]
     let occupants: [String]
+    let enabled: Bool?        // 小屋总开关：false=休眠（房间只读）；老后端没有=开
     let replying: [String]?   // 正在生成醒来回应的在场角色（「正在回应…」动画）
     let paused: Bool?         // 醒来队列暂停中（用户按住场面好插嘴）
     let queue_error: String?  // 队列被按停的原因（模型过载）；按「开始」即清
@@ -224,6 +226,21 @@ extension ChatService {
     func setWorldCarryTimeoutAccept(_ accept: Bool) async throws {
         let body = try JSONEncoder().encode(["accept": accept])
         _ = try await perform(authedRequest("POST", "/world/carry_timeout",
+                                            jsonBody: body, timeout: 8))
+    }
+
+    /// 小屋总开关（PLAN_house_switch）。false=全冻：活动停、状态冻结、团团冬眠，
+    /// 角色醒来只剩手机；true=恢复流动（后端顺手落一条「醒了」事件唤醒在场者）。
+    func worldEnabled() async throws -> Bool {
+        let data = try await perform(authedRequest("GET", "/world/enabled", timeout: 8))
+        struct Box: Decodable { let enabled: Bool }
+        return try JSONDecoder().decode(Box.self, from: data).enabled
+    }
+
+    /// 拨小屋总开关：落盘即生效（冻结/解冻的收尾在后端 switch_house 一把做完）。
+    func setWorldEnabled(_ on: Bool) async throws {
+        let body = try JSONEncoder().encode(["enabled": on])
+        _ = try await perform(authedRequest("POST", "/world/enabled",
                                             jsonBody: body, timeout: 8))
     }
 

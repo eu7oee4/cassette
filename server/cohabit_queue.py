@@ -19,8 +19,11 @@
   执行时也**不计数、反而清零**：它不是任何链条的延续，计数它等于让睡着的机主把 AI
   锁死在原地（见 _pop_next）。
 
-总开关 config.COHABIT_ENABLED（默认关）：关着时 install 不挂钩子、worker 不启动、
-所有入口一进来就返回——C2 全部接好线但不上电，上电是 C4 的事。
+开关两层（PLAN_house_switch，2026-08-27）：env config.COHABIT_ENABLED 是装载闸
+（关着时 install 不挂钩子、worker 不启动——功能不存在）；world.house_enabled() 是
+运行时总开关（json 热读，铃铛里拨）——关=全冻：入口全拒、worker 空转、角色退回
+老 wake 路只能发手机消息。活动判点统一走 world.house_active()（两者的与）。
+拨闸的冻结/解冻收尾在 switch_house()。
 
 计数器/队列都在内存里：重启即清零。丢 pending 不丢事实——事件在盘上，下一个触发
 自然再来；连发计数清零最坏多聊几轮，比落盘状态机简单得多。
@@ -36,6 +39,7 @@ import cohabit
 import config
 import offers
 import pet_queue
+import pet_store
 import pets
 import pipeline
 import state_store
@@ -118,7 +122,7 @@ def enqueue(cid: str, reason: dict, system: bool = True, force: bool = False) ->
     （2026-08-17：三次点名全被冷却静默吞掉，机主那头只看到弹窗关了）。
     force 不只是绕过，是**把这条冷却解除**：不然这轮醒来里的 MOVE 补醒会被同一条
     冷却拦掉，人瞬移过去就哑了。再失败的话 _drain 会重新压 30 分钟，自愈。"""
-    if not config.COHABIT_ENABLED:
+    if not world.house_active():
         return False
     if system:
         # 错误冷却：模型持续失败时别对着事件流每条都硬起一次注定失败的子进程。
@@ -203,6 +207,81 @@ def _may_chain(cid: str) -> bool:
         return _syswake_run.get(cid, 0) < config.COHABIT_CHAIN_N
 
 
+def clear_pending() -> None:
+    """清空醒来队列（小屋总开关关的瞬间调）。丢 pending 不丢事实——事件在盘上；
+    冻结期间的醒因语境已失效，解冻后攒着兑现只会说胡话（PLAN_house_switch 拍板）。"""
+    with _lock:
+        n = sum(len(v) for v in _pending.values())
+        _pending.clear()
+        _order.clear()
+    if n:
+        logerr(f"小屋休眠：丢弃 {n} 条还没执行的醒因")
+
+
+def _clear_next_wakes() -> None:
+    """撤掉所有角色自己定的 NEXT（关的瞬间调）：关着期间不兑现，解冻时它早过期，
+    立刻醒来只会对着失效的语境说胡话——干脆清掉，醒来交给解冻事件和新触发。"""
+    for cid in characters.ids():
+        with state_store.SCHEDULE_LOCK:
+            sched = state_store.read_schedule(cid)
+            if sched.get("next_wake_at"):
+                sched.pop("next_wake_at", None)
+                state_store.write_schedule(sched, cid)
+
+
+def _announce_house(text: str) -> None:
+    """开关落痕：给每个**有角色在场**的房间落一条系统事件——空屋没人记得，不落。
+    关的那条落在旗子拨下之后（钩子已歇业，不会唤醒任何人，但进各自的经历流，
+    解冻后他们看得见「为什么这段时间没记忆」）；开的那条落在旗子拨上之后
+    （钩子活了，事件醒来顺势把在场的人叫起来——重开的第一口气）。"""
+    try:
+        snap = world.world_snapshot()
+        char_ids = set(characters.ids())
+        for rid in world.load_registry():
+            if any(e in char_ids and v["location"] == rid for e, v in snap.items()):
+                world.append_event(rid, "system", world.USER_ID, text, kind="house_switch")
+    except Exception as e:
+        logerr(f"小屋开关落痕失败（忽略）: {e}")
+
+
+def switch_house(on: bool) -> bool:
+    """小屋总开关的拨闸（PLAN_house_switch，2026-08-27）。world.set_house_enabled
+    只落盘，冻结/解冻的收尾全在这里，顺序有讲究：
+
+    关：先给猫结账（衰减物化到关的时刻——**必须在拨旗之前**：旗一下猫钟就停了，
+        settle 会变成空操作，最后一段流逝丢账）→ 拨旗（enqueue 从这刻起全拒，
+        后面的清理不会被并发事件重新塞进队列）→ 清醒来队列（cohabit+pet）→
+        撤 NEXT → 邀约静默作废 → 落「睡下了」事件（没人会被它唤醒）。
+    开：先给猫对表（updated_at=now，**也在拨旗之前**——旗一上 pet worker 下一拍
+        就会读状态，晚一步就是整段冻结时长的一次性补扣）→ 拨旗 → 连发计数清零
+        （冻结前的链不算数）→ 落「醒了」事件（这条会把在场的人叫起来）。
+
+    正在生成的那轮醒来照常说完（口径同暂停键）；它落的事件不再触发任何人，
+    它写的 NEXT 认了——解冻时兑现一次，无害。幂等：状态没变什么都不做。"""
+    on = bool(on)
+    if world.house_enabled() == on:
+        return on
+    if on:
+        for pid in pets.ids():
+            pet_store.resume_clock(pid)
+        world.set_house_enabled(True)
+        external_input()
+        _announce_house("小屋从休眠中醒了过来，屋里的时间重新开始流动")
+        _signal.set()
+        logerr("小屋总开关：开（猫钟已对表）")
+    else:
+        for pid in pets.ids():
+            pet_store.settle(pid)
+        world.set_house_enabled(False)
+        clear_pending()
+        pet_queue.clear_pending()
+        offers.clear()
+        _clear_next_wakes()
+        _announce_house("小屋沉入了休眠，屋里的一切都静止了")
+        logerr("小屋总开关：关（猫已结账、队列已清、NEXT 已撤、邀约已作废）")
+    return on
+
+
 # ---------- 事件醒来（world.event_hook）----------
 def _reason_text(room_name: str, ev: dict) -> str:
     name = world.entity_name(ev.get("actor", ""))
@@ -217,7 +296,7 @@ def _reason_text(room_name: str, ev: dict) -> str:
 def _on_room_event(room_id: str, ev: dict) -> None:
     """world.append_event 的钩子。世界锁内被调：只做在场判定 + 入队，快进快出。
     系统通知与发言/动作先都触发（PLAN：观察 token 后再考虑给通知类降概率）。"""
-    if not config.COHABIT_ENABLED:
+    if not world.house_active():
         return
     actor = ev.get("actor")
     try:
@@ -260,7 +339,7 @@ def uninstall() -> None:
 def chat_move(char_id: Optional[str], target: str) -> Optional[dict]:
     """聊天回复带了 [[move:X]]：轮末执行移动，结果补醒入队（成功/失败同一条路）。
     开关关着 / 目的地不认识 → 当没写（标记反正已被剥掉，不影响聊天）。"""
-    if not config.COHABIT_ENABLED:
+    if not world.house_active():
         return None
     cid = characters.resolve(char_id)
     try:
@@ -278,7 +357,7 @@ def chat_move(char_id: Optional[str], target: str) -> Optional[dict]:
 def chat_move_hint(char_id: Optional[str]) -> str:
     """聊天 prompt 的可选提示（app._prepare_chat 注入）。开关关着返回空串。
     只报房间 id/名字，不带里面有谁——认知边界在聊天路同样从源头执行。"""
-    if not config.COHABIT_ENABLED:
+    if not world.house_active():
         return ""
     cid = characters.resolve(char_id)
     loc = world.location_of(cid)
@@ -362,7 +441,7 @@ def _solo_check(cid: str, now: float) -> None:
 
 
 def _solo_tick(now: Optional[float] = None) -> None:
-    if not config.COHABIT_ENABLED:
+    if not world.house_active():
         return
     # code 会话只拦**归属角色**的自主醒（他人在电脑前）：M2 消息已按角色分会话，
     # 老 wake「避让对所有角色」的挤同屏理由不再成立；别的角色照常过自己的日子。
@@ -456,6 +535,10 @@ def worker_loop() -> None:
         _signal.wait(timeout=_WORKER_WAIT_SEC)
         _signal.clear()
         try:
+            # 小屋总开关关着：不扫邀约、不判 solo、不冲队——全冻。worker 本身照常
+            # 空转（起不起由 env 管），开关一开下一拍即恢复，不用重启。
+            if not world.house_active():
+                continue
             now = time.time()
             offers.sweep(now)   # 抱人邀约的超时/失效扫除（发起人收作废补醒）
             if now - last_solo >= SOLO_TICK_SEC:

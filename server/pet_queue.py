@@ -108,6 +108,12 @@ def external_for_pet(pid: str) -> None:
         _chain.pop(pid, None)
 
 
+def clear_pending() -> None:
+    """清空猫的醒来队列（小屋总开关关的瞬间，cohabit_queue.switch_house 调）。"""
+    with _lock:
+        _pending.clear()
+
+
 # ---------- 房间事件 → 猫的概率醒（cohabit_queue._on_room_event 末尾转发）----------
 def _event_text(ev: dict) -> str:
     name = world.entity_name(ev.get("actor", ""))
@@ -121,7 +127,7 @@ def _event_text(ev: dict) -> str:
 
 def on_room_event(room_id: str, ev: dict) -> None:
     """在世界锁内被调（同 cohabit 钩子）：只做判定 + 入队，快进快出，绝不调引擎。"""
-    if not config.COHABIT_ENABLED:
+    if not world.house_active():
         return
     now = time.time()
     actor = ev.get("actor")
@@ -212,6 +218,9 @@ def worker_loop() -> None:
         _signal.wait(timeout=10)
         _signal.clear()
         try:
+            # 小屋总开关关着：猫连硬地板一起冻（衰减账在拨闸时已结清，状态不动）。
+            if not world.house_active():
+                continue
             now = time.time()
             _drain()
             if now - last_tick >= PET_TICK_SEC:

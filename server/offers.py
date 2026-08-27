@@ -147,6 +147,17 @@ def _land_accept(o: dict, via_timeout: bool = False) -> dict:
     return {"ok": True, "accepted": bool(mv["ok"]), "move": mv}
 
 
+def clear() -> None:
+    """静默作废（小屋总开关关的瞬间调）：**不走超时默认答应、不发补醒**——
+    冻结的世界里没人该被抱走，也没人醒着收「没抱成」。发起人解冻后自然发现
+    人还在原地，重抱一次就是了（口径同重启清内存）。"""
+    global _offer
+    with _lock:
+        if _offer:
+            logerr("小屋休眠：pending 的抱人邀约静默作废")
+        _offer = None
+
+
 def sweep(now: Optional[float] = None) -> None:
     """worker 每轮顺手扫：任一方先挪了地方 → 作废 + 发起人补醒；超时没反应 →
     看铃铛开关（world.carry_timeout_accept，现读）：开=默认当答应，move+carry 照走；

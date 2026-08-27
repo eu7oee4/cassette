@@ -33,6 +33,7 @@ struct HousePage: View {
             Color.house.bg.ignoresSafeArea()
             VStack(spacing: 0) {
                 header
+                if world?.enabled == false { sleepBanner }
                 if let err = world?.queue_error { queueErrorBanner(err) }
                 floorTabs
                 ScrollView {
@@ -104,6 +105,21 @@ struct HousePage: View {
                 }
             } catch { lockedText = "没走成：\(error.localizedDescription)" }
         }
+    }
+
+    /// 小屋休眠中（总开关关着，PLAN_house_switch）：全屋冻结的最后一帧照常展示
+    /// （能看不能动，改动会被服务端 409），开关在铃铛里。
+    private var sleepBanner: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "moon.zzz.fill").font(.caption)
+            Text("小屋休眠中——一切都静止着，铃铛里可以叫醒")
+                .font(.caption2).multilineTextAlignment(.leading)
+            Spacer(minLength: 0)
+        }
+        .foregroundStyle(Color.house.textSecondary)
+        .padding(.horizontal, 16).padding(.vertical, 6)
+        .frame(maxWidth: .infinity)
+        .background(Color.house.surfaceHi)
     }
 
     /// 醒来撞上模型过载（服务端已隔 30s 重试过一次）→ 队列被按停，原因摆在这儿。
@@ -379,6 +395,9 @@ private struct NudgeSheet: View {
     @State private var expSaveTask: Task<Void, Never>? = nil
     // 被抱超时默认答应/拒绝（小屋级开关，同样寄居铃铛）：nil=还没读到
     @State private var carryAccept: Bool? = nil
+    // 小屋总开关（PLAN_house_switch）：nil=还没读到。关的方向要过二次确认
+    @State private var houseOn: Bool? = nil
+    @State private var confirmSleep = false
 
     /// 可点名的角色（user 之外的全部实体），按 id 稳定排序。
     private var chars: [(id: String, name: String)] {
@@ -391,6 +410,24 @@ private struct NudgeSheet: View {
     var body: some View {
         NavigationStack {
             Form {
+                Section {
+                    if let on = houseOn {
+                        Toggle("小屋开着", isOn: Binding(
+                            get: { on },
+                            // 开的方向直接拨；关的方向先过二次确认（团团要冬眠的事得说清）
+                            set: { nv in
+                                if nv { saveHouseEnabled(true) } else { confirmSleep = true }
+                            }
+                        ))
+                        .tint(Color.house.accent)
+                    } else {
+                        Text("读取中…").foregroundStyle(.secondary)
+                    }
+                } header: {
+                    Text("总开关")
+                } footer: {
+                    Text("关＝小屋沉入休眠：活动全停、状态冻结，团团进入冬眠，TA 们只剩手机能联系你。开＝一切恢复流动，屋里的人会被叫醒。")
+                }
                 Section {
                     TextField("比如：浴室传来水声", text: $text, axis: .vertical)
                         .lineLimit(2...4)
@@ -452,8 +489,16 @@ private struct NudgeSheet: View {
                 }
             }
             .task {
+                houseOn = try? await service.worldEnabled()
                 expLimit = try? await service.worldExperienceLimit()
                 carryAccept = try? await service.worldCarryTimeoutAccept()
+            }
+            .alert("让小屋沉入休眠？", isPresented: $confirmSleep) {
+                Button("休眠", role: .destructive) { saveHouseEnabled(false) }
+                Button("算了", role: .cancel) {}
+            } message: {
+                Text("小屋活动全部停下、状态原地冻结，团团会进入冬眠。"
+                     + "TA 们醒来只剩手机能给你发消息。随时可以再打开。")
             }
             .navigationTitle("环境动静")
             .navigationBarTitleDisplayMode(.inline)
@@ -482,6 +527,20 @@ private struct NudgeSheet: View {
             catch {
                 errorText = (error as? ChatServiceError)?.errorDescription
                     ?? error.localizedDescription
+            }
+        }
+    }
+
+    /// 总开关：口径同 saveCarryAccept（不去抖，失手回读真值）。冻结/解冻的收尾
+    /// （结账猫/清队列/落事件）全在服务端 switch_house 一把做完，这里只拨。
+    private func saveHouseEnabled(_ on: Bool) {
+        houseOn = on
+        Task {
+            do { try await service.setWorldEnabled(on) }
+            catch {
+                errorText = (error as? ChatServiceError)?.errorDescription
+                    ?? error.localizedDescription
+                houseOn = try? await service.worldEnabled()
             }
         }
     }

@@ -148,6 +148,37 @@ def set_carry_timeout_accept(on: bool) -> bool:
     return bool(on)
 
 
+def house_enabled() -> bool:
+    """小屋总开关（PLAN_house_switch，2026-08-27）。默认开；关 = 小屋活动全停、
+    状态冻结（玻璃罩）：醒来队列/猫/聊天注入全部歇业，角色退回老 wake 路
+    （只能发手机消息）。各判点每轮现读——铃铛里拨完立刻生效，不用重启。"""
+    return bool(_read_json(HOUSE_SETTINGS_PATH, {}).get("house_enabled", True))
+
+
+def set_house_enabled(on: bool) -> bool:
+    """只管落盘。冻结/解冻的钩子（结账猫、清 NEXT、清队列、作废邀约、落事件）
+    在 cohabit_queue.switch_house——调用方走那边，别直接调这里。"""
+    with _LOCK:
+        d = _read_json(HOUSE_SETTINGS_PATH, {})
+        d["house_enabled"] = bool(on)
+        _write_json(HOUSE_SETTINGS_PATH, d)
+    return bool(on)
+
+
+def house_active() -> bool:
+    """运行时判定的统一入口：功能装了（env，装载闸）**且**开关开着（json，热切）。
+    原来 17 处判 config.COHABIT_ENABLED 的活动判点全换成这个；lifespan 起 worker
+    仍判 env——worker 无条件起、tick/入队层判这个，关着时重启后再打开才不用二次重启。"""
+    return config.COHABIT_ENABLED and house_enabled()
+
+
+def house_frozen() -> bool:
+    """玻璃罩状态：功能**装了**但开关**关着**。not house_active() 分不出「没装」和
+    「关着」——env 压根没开的部署里不存在冻结这回事，别把人家的猫钟停了。
+    用途：猫钟停摆（pet_store._clock_now）、用户动作 409（app._require_house_awake）。"""
+    return config.COHABIT_ENABLED and not house_enabled()
+
+
 # ---------- 实体 ----------
 def entity_ids() -> list[str]:
     """用户 + 全部角色 + 全部宠物（PLAN_pet P0：pet 是第三类实体）。"""

@@ -676,7 +676,10 @@ async def maybe_wake(char_id: Optional[str] = None) -> None:
     # 同居世界上电后（C4）：聊天世界的自主醒来（scheduled/probability）整体退役，
     # 移交 cohabit 队列（独处判定/预算/连发上限/执行锁都在那边）。这里只剩上面的
     # 邮件硬触发。**不能双跑**：两边都会消费 next_wake_at，同一个 NEXT 会被醒两次。
-    if config.COHABIT_ENABLED:
+    # 小屋总开关关着（PLAN_house_switch）→ 判定为假 → 下面的老路自动接管：
+    # ACTION 只有 none/message，正好就是「休眠时只能发手机消息」的形状。
+    import world
+    if world.house_active():
         return
 
     # code 模式开着 → 自发的醒来一律避让。那会儿他人在电脑前干活，随机戳一条聊天气泡

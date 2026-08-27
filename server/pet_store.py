@@ -95,6 +95,18 @@ def _load_raw(pid: str) -> dict:
     return s
 
 
+def _clock_now(s: dict) -> float:
+    """猫的时间。小屋冻结中（总开关关着，PLAN_house_switch）时间停在 baseline 的
+    时刻——衰减是**读时**惰性算的，只堵写口冻不住：冻结期间谁来查看（GET /pets
+    照常放行），四值都得停在关门那一刻，所以停的必须是钟本身。
+    函数内 import：world 不依赖本模块，无环，但别为一个判定把依赖拉到顶层。"""
+    import world
+    now = _now()
+    if world.house_frozen():
+        return min(now, float(s.get("updated_at", now)))
+    return now
+
+
 def _apply_decay(s: dict, now: float) -> dict:
     hours = max(0.0, (now - float(s.get("updated_at", now))) / 3600.0)
     if hours <= 0:
@@ -120,14 +132,17 @@ def _with_derived(s: dict) -> dict:
 
 
 def read_state(pid: str) -> dict:
-    """当前状态（已算衰减，含 day）。只读、不落盘。"""
-    return _with_derived(_apply_decay(_load_raw(pid), _now()))
+    """当前状态（已算衰减，含 day）。只读、不落盘。冻结中钟停摆（_clock_now）。"""
+    s = _load_raw(pid)
+    return _with_derived(_apply_decay(s, _clock_now(s)))
 
 
 def mutate(pid: str, fn: Callable[[dict], None]) -> dict:
-    """读 baseline → 物化衰减 → fn 就地改 → 落盘。返回 read_state 形态。"""
-    now = _now()
-    s = _apply_decay(_load_raw(pid), now)
+    """读 baseline → 物化衰减 → fn 就地改 → 落盘。返回 read_state 形态。
+    冻结中钟停摆：万一有改动漏进来，也记在关门那一刻，不产生时间流逝。"""
+    s = _load_raw(pid)
+    now = _clock_now(s)
+    s = _apply_decay(s, now)
     fn(s)
     for k in STAT_KEYS:
         s[k] = _clamp(s[k])
@@ -169,6 +184,21 @@ def set_mood(pid: str, value: float) -> dict:
 def scoop(pid: str) -> dict:
     """铲屎 → 猫砂盆置回 1 干净。"""
     return mutate(pid, lambda s: s.__setitem__("litter", 1))
+
+
+def settle(pid: str) -> dict:
+    """把衰减物化到此刻（baseline 结算 + updated_at=now）。小屋总开关**关**的瞬间调：
+    冻结不是停 worker（衰减是读时惰性算的，停循环冻不住），是把账结清在关的时刻。"""
+    return mutate(pid, lambda s: None)
+
+
+def resume_clock(pid: str) -> None:
+    """把时钟拨到现在而**不补扣**冻结期间的衰减——小屋总开关**开**的瞬间调。
+    与 settle 配对：关时结账、开时对表，中间那段时间对猫等于不存在。
+    走 raw 写（同 set_pose_anchor）：mutate 会先物化衰减，恰恰是要跳过的那步。"""
+    s = _load_raw(pid)
+    s["updated_at"] = _now()
+    _write_json(_dir(pid) / "state.json", s)
 
 
 def set_pose_anchor(pid: str, anchor: Optional[dict]) -> None:

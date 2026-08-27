@@ -886,6 +886,18 @@ class CarryTimeoutIn(BaseModel):
     accept: bool    # true=被抱超时默认答应（抱走）；false=超时当没反应作废（留在原地）
 
 
+class HouseEnabledIn(BaseModel):
+    enabled: bool   # 小屋总开关：false=全冻（玻璃罩），角色退回只能发手机消息
+
+
+def _require_house_awake(what: str = "") -> None:
+    """玻璃罩（PLAN_house_switch）：小屋休眠中，改变世界的用户 POST 全 409。
+    只读（看房间/看事件/看猫状态）和记录管理（删事件）照常放行。"""
+    if world.house_frozen():
+        raise HTTPException(status_code=409,
+                            detail=what or "小屋休眠中——一切都静止着，铃铛里可以叫醒它")
+
+
 @app.get("/world")
 def get_world(x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
     """房子视图：全部房间（含在场者）+ 全部实体的位置。"""
@@ -904,6 +916,7 @@ def get_world(x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
             "entities": {e: {**v, "name": world.entity_name(e),
                              "status": (busy[1] if busy and busy[0] == e else None)}
                          for e, v in snap.items()},
+            "enabled": world.house_enabled(),
             "paused": cohabit_queue.paused(),
             "queue_error": (cohabit_queue.last_error() or {}).get("text") or None,
             "carry_offer": offers.api_view()}
@@ -924,6 +937,7 @@ def get_room(room_id: str, x_auth: Optional[str] = Header(default=None, alias="X
     occ = world.occupants(room_id)
     return {"id": room_id, **r, "occupants": occ,
             "pets": [e for e in occ if pets.is_pet(e)],   # 照顾入口的开关（P3）
+            "enabled": world.house_enabled(),
             "replying": replying, "paused": cohabit_queue.paused(),
             # 队列被按停的原因（模型过载）：有值就在页上摆出来，按「开始」即清
             "queue_error": (cohabit_queue.last_error() or {}).get("text") or None,
@@ -973,6 +987,24 @@ def post_carry_timeout(body: CarryTimeoutIn,
     return {"accept": world.set_carry_timeout_accept(body.accept)}
 
 
+@app.get("/world/enabled")
+def get_house_enabled(x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
+    """小屋总开关（PLAN_house_switch）。关=全冻：活动停、状态冻、角色只剩手机。"""
+    verify_auth(x_auth)
+    return {"enabled": world.house_enabled()}
+
+
+@app.post("/world/enabled")
+def post_house_enabled(body: HouseEnabledIn,
+                       x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
+    """拨小屋总开关：走 cohabit_queue.switch_house（关=结账猫+清队列+撤 NEXT+
+    作废邀约+落事件；开=对表+落事件唤醒在场者）。落盘即生效，不用重启。"""
+    verify_auth(x_auth)
+    if not config.COHABIT_ENABLED:
+        raise HTTPException(status_code=409, detail="同居世界没开")
+    return {"enabled": cohabit_queue.switch_house(body.enabled)}
+
+
 @app.post("/world/nudge")
 def post_world_nudge(body: NudgeIn,
                      x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
@@ -982,6 +1014,7 @@ def post_world_nudge(body: NudgeIn,
     verify_auth(x_auth)
     if not config.COHABIT_ENABLED:
         raise HTTPException(status_code=409, detail="同居世界没开")
+    _require_house_awake()
     text = body.text.strip()
     if not text:
         raise HTTPException(status_code=422, detail="得写点什么——TA 醒来总得知道为什么")
@@ -1019,6 +1052,7 @@ def get_room_events(room_id: str, scope: str = "visible", limit: int = 200,
 def post_room_act(room_id: str, body: RoomActIn,
                   x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
     verify_auth(x_auth)
+    _require_house_awake()
     cohabit_queue.external_input()   # 用户动作 = 新外部输入，连发计数清零（在写事件之前）
     try:
         # 一次发送 = 一轮（混写拆出的多条共用一个 turn，UI 靠它跟别人的轮次隔开）
@@ -1063,6 +1097,7 @@ def post_room_event_delete(room_id: str, body: RoomEventDeleteIn,
 def post_room_state(room_id: str, body: RoomStateIn,
                     x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
     verify_auth(x_auth)
+    _require_house_awake()
     cohabit_queue.external_input()
     try:
         return world.state_change(world.USER_ID, room_id, body.op,
@@ -1130,6 +1165,7 @@ def post_pet_interact(pid: str, body: PetInteractIn,
                       x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
     """投喂/互动（同地点才够得着，猫必醒，反应在返回里同轮给发起者）。"""
     verify_auth(x_auth)
+    _require_house_awake("团团在冬眠，叫不醒——先在铃铛里把小屋叫醒")
     real = _resolve_pet(pid)
     _check_pet_actor(body.actor)
     if body.feed and body.feed not in ("罐罐", "猫条", "冻干"):
@@ -1152,6 +1188,7 @@ def post_pet_scoop(pid: str, body: PetScoopIn,
                    x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
     """铲屎：人得在猫房（盆在那儿）；不要求猫在场。"""
     verify_auth(x_auth)
+    _require_house_awake("小屋休眠中，砂盆也冻着——先在铃铛里把小屋叫醒")
     real = _resolve_pet(pid)
     _check_pet_actor(body.actor)
     if body.actor == world.USER_ID:
@@ -1171,6 +1208,7 @@ def post_carry_offer(body: CarryRespondIn,
     成功失败同一条路补醒发起人）；拒绝/超时/世界变了 → 各自的补醒。
     邀约已经不在（过期/被顶掉/位置变了）→ 409，UI 提示「已经过去了」。"""
     verify_auth(x_auth)
+    _require_house_awake()
     cohabit_queue.external_input()   # 用户应答 = 新外部输入（答应那下连发计数清零）
     try:
         return offers.respond(body.id, body.accept)
@@ -1184,6 +1222,7 @@ def post_world_move(body: MoveIn,
     """用户移动（含出门 away / 回房子）。门锁着返回 ok:false + 提示，不是 HTTP 错误。
     carry=抱着宠物一起走（PLAN_pet P0）：不同屋/不是宠物 → 422/409，别静默丢。"""
     verify_auth(x_auth)
+    _require_house_awake()
     cohabit_queue.external_input()
     carry = None
     if body.carry:
