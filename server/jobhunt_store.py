@@ -435,6 +435,19 @@ def jd_list(status: Optional[str] = None, limit: int = 30) -> list[dict]:
              "text_head": (r.get("text") or "")[:120]} for r in rows]
 
 
+def companies() -> list[str]:
+    """岗位库里出现过的公司名（去重、保留原文、含已归档的）。
+    J3 的兜底分类拿它认信：HR 从公司自有域名回过来时，域名表和台账都不认，
+    唯一还能对上的线索就是「这家我们库里有」。归档的也要留——岗归档了 HR 照样会回。"""
+    seen, out = set(), []
+    for r in _read_jsonl(JDS_PATH):
+        c = (r.get("company") or "").strip()
+        if c and c not in seen:
+            seen.add(c)
+            out.append(c)
+    return out
+
+
 def jd_read(jid: str) -> dict:
     for r in _read_jsonl(JDS_PATH):
         if r.get("id") == jid:

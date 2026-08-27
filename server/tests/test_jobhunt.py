@@ -311,95 +311,128 @@ class TestMailClassify(JobhuntBase):
         apps = store.applications_open()
         return {"store": store,
                 "by_addr": {a["to"].lower(): a for a in apps if a.get("to")},
-                "by_mid": {a["message_id"]: a for a in apps if a.get("message_id")}}
+                "by_mid": {a["message_id"]: a for a in apps if a.get("message_id")},
+                "companies": __import__("mail_bridge")._company_keys(store)}
 
     def _seed_app(self):
         store.application_add("dr1", "", "hr@x.com", "AI全栈-通用版",
                               "<mid123@163.com>", char_id="cass", subject="应聘iOS")
 
-    def test_reply_by_exact_addr(self):
-        from unittest import mock
+    def _classify(self, conn, uid, msg, addrs):
+        jh = self._jh()
+        v = self.mb._jobhunt_classify(conn, uid, msg, addrs, jh, "cass")
+        if v is None:
+            return None, None
+        return v, self.mb._jobhunt_apply(conn, uid, v, jh, "cass")
+
+    def test_reply_marks_ledger_and_flags_without_body(self):
         self._seed_app()
         conn = self.FakeConn(b"From: hr@x.com\r\nSubject: Re: hi\r\n\r\nnext tuesday ok?")
         msg = self._msg({"From": "hr@x.com", "Subject": "Re: hi"})
-        with mock.patch.object(self.mb, "_jobhunt_wake") as jw:
-            handled = self.mb._jobhunt_classify(conn, 5, msg, {"hr@x.com"}, self._jh(), "cass")
-        self.assertTrue(handled)
+        v, flag = self._classify(conn, 5, msg, {"hr@x.com"})
+        self.assertEqual(v["kind"], "reply")
         row = store.applications_list()[0]
         self.assertTrue(row["has_reply"])
-        self.assertIn("tuesday", row["reply_snippet"])
-        handler, cid, note = jw.call_args[0]
-        self.assertEqual(handler, "cass")
-        self.assertIn("只转述给机主", note)
-        self.assertIn("hr@x.com", note)
+        self.assertIn("tuesday", row["reply_snippet"])      # 摘要落台账
+        self.assertIsNotNone(flag)
+        self.assertNotIn("tuesday", flag["why"])            # 但不进醒来 prompt
 
     def test_reply_by_message_id_refs(self):
-        from unittest import mock
         self._seed_app()
         # HR 换了个地址回（求职者邮箱→个人邮箱），靠 In-Reply-To 命中
         conn = self.FakeConn(b"From: hr2@qq.com\r\nSubject: Re: x\r\n\r\nok")
         msg = self._msg({"From": "hr2@qq.com", "Subject": "Re: x",
                          "In-Reply-To": "<mid123@163.com>"})
-        with mock.patch.object(self.mb, "_jobhunt_wake") as jw:
-            handled = self.mb._jobhunt_classify(conn, 6, msg, {"hr2@qq.com"}, self._jh(), "cass")
-        self.assertTrue(handled)
+        v, flag = self._classify(conn, 6, msg, {"hr2@qq.com"})
+        self.assertEqual(v["kind"], "reply")
         self.assertTrue(store.applications_list()[0]["has_reply"])
-        self.assertTrue(jw.called)
+        self.assertIsNotNone(flag)
 
-    def test_recruit_mail_saved_not_woken(self):
-        from unittest import mock
+    def test_recruit_mail_saved_not_flagged(self):
         conn = self.FakeConn(b"From: n@zhipin.com\r\nSubject: 3 jobs\r\n\r\njd body " + b"x" * 5000)
         msg = self._msg({"From": "n@zhipin.com", "Subject": "3 jobs"})
-        with mock.patch.object(self.mb, "_jobhunt_wake") as jw:
-            handled = self.mb._jobhunt_classify(conn, 7, msg, {"n@zhipin.com"}, self._jh(), "cass")
-        self.assertTrue(handled)
-        self.assertFalse(jw.called)
+        v, flag = self._classify(conn, 7, msg, {"n@zhipin.com"})
+        self.assertEqual(v["kind"], "subscribe")
+        self.assertIsNone(flag)                             # 入库，不惊动谁
         jds = store.jd_list(status="new")
         self.assertEqual(len(jds), 1)
         self.assertIn("邮件订阅", jds[0]["source"])
-        # 正文截 3000
         self.assertLessEqual(len(store.jd_read(jds[0]["id"])["text"]), 3000)
 
     def test_other_mail_untouched(self):
         conn = self.FakeConn(b"")
         msg = self._msg({"From": "friend@qq.com", "Subject": "hi"})
-        self.assertFalse(self.mb._jobhunt_classify(conn, 8, msg, {"friend@qq.com"},
-                                                   self._jh(), "cass"))
+        self.assertIsNone(self.mb._jobhunt_classify(conn, 8, msg, {"friend@qq.com"},
+                                                    self._jh(), "cass"))
 
     def test_watch_gate_only_channel_char(self):
-        # default 不是通道角色（.env 钉的是 cass）→ 不挂三分类
+        # default 不是通道角色（.env 钉的是 cass）→ 不挂分类
         self.assertIsNone(self.mb._jobhunt_watch("default"))
 
-    def test_wake_fallback_barks_when_cohabit_off(self):
-        from unittest import mock
-        import time
-        with mock.patch("cohabit_queue.external_input"), \
-             mock.patch("cohabit_queue.enqueue", return_value=False), \
-             mock.patch("notify.bark_push") as bark:
-            self.mb._jobhunt_wake("cass", "cass", "note")
-            for _ in range(50):
-                if bark.called:
-                    break
-                time.sleep(0.02)
-            self.assertTrue(bark.called)
+    # ---- lead 兜底（2026-08-27 加。起因：帆软笔试邀请 + 拓端邀约两头不沾，静默掉地上）----
 
-    def test_wake_enqueues_handler(self):
-        from unittest import mock
-        with mock.patch("cohabit_queue.external_input"), \
-             mock.patch("cohabit_queue.enqueue", return_value=True) as enq, \
-             mock.patch("notify.bark_push") as bark:
-            self.mb._jobhunt_wake("cass", "cass", "有回信")
-            args = enq.call_args[0]
-            self.assertEqual(args[0], "cass")
-            self.assertEqual(args[1]["kind"], "event")
-            self.assertFalse(bark.called)
+    def _seed_jd(self, company, title="AI 实习"):
+        store.jd_save(source="test", company=company, title=title, text="x")
 
-    def test_wake_unknown_handler_falls_back_to_channel(self):
-        from unittest import mock
-        with mock.patch("cohabit_queue.external_input"), \
-             mock.patch("cohabit_queue.enqueue", return_value=True) as enq:
-            self.mb._jobhunt_wake("没这人", "cass", "note")
-            self.assertEqual(enq.call_args[0][0], "cass")
+    def test_lead_by_company_in_subject(self):
+        self._seed_jd("杭州拓端数据科技有限公司")
+        conn = self.FakeConn(b"")
+        msg = self._msg({"From": "tecdat <contact@tecdat.cn>", "Subject": "邀请您加入拓端"})
+        v, flag = self._classify(conn, 9, msg, {"contact@tecdat.cn"})
+        self.assertEqual(v["kind"], "lead")
+        self.assertIn("拓端", flag["why"])
+
+    def test_lead_by_company_in_from_name(self):
+        self._seed_jd("帆软软件 · 盘古实验室")
+        conn = self.FakeConn(b"")
+        msg = self._msg({"From": "帆软招聘 <HR@fanedm.fanruan.com>", "Subject": "一封通知"})
+        v, flag = self._classify(conn, 10, msg, {"hr@fanedm.fanruan.com"})
+        self.assertEqual(v["kind"], "lead")
+        self.assertIn("帆软", flag["why"])
+
+    def test_lead_by_hint_word(self):
+        conn = self.FakeConn(b"")
+        msg = self._msg({"From": "x@unknown-corp.com", "Subject": "邀请你参加在线笔试"})
+        v, flag = self._classify(conn, 11, msg, {"x@unknown-corp.com"})
+        self.assertEqual(v["kind"], "lead")
+        self.assertIn("笔试", flag["why"])
+
+    def test_lead_beats_subscribe(self):
+        # 招聘站代发的**笔试通知**：先判 lead，别被域名表吞成静默入库
+        self._seed_jd("帆软软件")
+        conn = self.FakeConn(b"")
+        msg = self._msg({"From": "帆软 <s@nowcoder.com>", "Subject": "邀请你参加在线笔试"})
+        v, _ = self._classify(conn, 12, msg, {"s@nowcoder.com"})
+        self.assertEqual(v["kind"], "lead")
+        self.assertEqual([j for j in store.jd_list(status="new")
+                          if "邮件订阅" in (j["source"] or "")], [])
+
+    def test_marketing_mail_not_a_lead(self):
+        # 猎聘群发广告：公司不在库里、主题没关键词 → 一个字都不该惊动谁
+        self._seed_jd("杭州拓端数据科技有限公司")
+        conn = self.FakeConn(b"")
+        for subj in ("给未来 Makers 的一封信｜安克创新2027届全球校招正式启动｜邀请创造者投递！(AD)",
+                     "对您很感兴趣，邀您沟通",
+                     "杨竹琼同学，你有一份实习僧简历提升礼包待领取，请查收"):
+            msg = self._msg({"From": "猎聘 <service@mail8.lietou-edm.com>", "Subject": subj})
+            self.assertIsNone(
+                self.mb._jobhunt_classify(conn, 13, msg, {"service@mail8.lietou-edm.com"},
+                                          self._jh(), "cass"), subj)
+
+    def test_company_keys_shape(self):
+        for c in ("Ant Group（蚂蚁集团）· Ling Team 百灵",
+                  "ALLTIME万物时（杭州西湖边，10-20人）",
+                  "杭州拓端数据科技有限公司", "Intel CAIGC", "帆软软件 · 盘古实验室"):
+            self._seed_jd(c)
+        keys = self.mb._company_keys(store)
+        self.assertIn("拓端", keys)
+        self.assertIn("帆软", keys)
+        self.assertIn("Intel", keys)
+        self.assertIn("ALLTIME", keys)
+        self.assertNotIn("Group", keys)     # 通用词绝不能留下来误伤每封英文邮件
+        self.assertNotIn("Ant", keys)       # 3 字母，太短
+        self.assertTrue(all(len(k) >= 2 for k in keys))
+
 
 
 class TestRender(JobhuntBase):

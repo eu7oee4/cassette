@@ -603,7 +603,10 @@ def _mail_wake_note(char_id: Optional[str] = None) -> str:
     items = mail_bridge.consume_wake_pending(char_id)
     if not items:
         return ""
+    # why 是 watcher 给的**判断依据**（「岗位库里有这家」），不是信的内容——贴它不违背
+    # 上面那条"不贴正文"：它决定 TA 该带着什么眼光去 mail_read，而不是替 TA 读完。
     lines = [f"来自 {it.get('from', '?')}：「{(it.get('subject') or '（无主题）')[:60]}」"
+             + (f"（{it['why']}）" if it.get("why") else "")
              for it in items[:5]]
     more = f" 等 {len(items)} 封" if len(items) > 5 else ""
     # 发信开关的实话：醒来 mail_send 默认被摘（WAKE_TOOL_EXCLUDE），不说清楚 TA 会当场
