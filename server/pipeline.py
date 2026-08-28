@@ -510,6 +510,15 @@ def _pet_mcp_config(char_id: Optional[str] = None) -> Path:
     return path
 
 
+# skill 库（PLAN_skills S0）：方法层文件树的渐进披露。内置不走插件商店（同宠物 MCP），
+# 挂载条件是「这个场景有可见的 skill」——library 空着整个不挂，工具不出现、索引不渲染。
+# 按 context 过滤和菜单块同判据：都问 skills.list_skills(context)，不会出现「工具挂了
+# 索引却没提」的缺口（那正是 _warn_uncovered 会喊的事）。
+def _skills_mounted(context: str = "chat", char_id: Optional[str] = None) -> bool:
+    import skills
+    return bool(skills.list_skills(context, char_id))
+
+
 def ombre_alive(char_id: Optional[str] = None) -> bool:
     """快速探活角色的 Ombre /mcp 端点：任何 HTTP 响应都算活（MCP 对裸 GET 回 406 是正常的），
     连不上/超时=死。OMBRE_ENABLED=0 直接当死。结果按 url 缓存 ~30s（角色可各指一个实例，
@@ -604,6 +613,9 @@ def mounted_tool_names(context: str = "chat", char_id: Optional[str] = None) -> 
     names += plug_tools
     if _pet_mcp_mounted(char_id):
         names += PET_MCP_TOOLS
+    if _skills_mounted(context, char_id):
+        import skills
+        names += skills.SKILLS_MCP_TOOLS
     # ToolSearch 也得算进来，条件跟 base_claude_args 一模一样——菜单头那句「用法默认
     # 没加载，先去取」正是按它在不在场决定说不说的。漏了它＝延迟开着却不告诉 TA 要先
     # 取用法，他直接调必失败（静默失效，只能靠肉眼看菜单头才发现）。
@@ -695,6 +707,16 @@ def tool_menu_block(context: str = "chat", char_id: Optional[str] = None) -> str
         lines.append("  " + b["body"].replace("\n", "\n  "))
         if fulls:
             lines.append("  工具：" + ", ".join(fulls))
+    # skill 索引（PLAN_skills）：skill_read 在场才追加（渲染纪律同 needs——绝不提
+    # 不在场的能力；挂载判据 _skills_mounted 和这里同问 list_skills，不会两边打架）。
+    # 索引就是 skill_read 的菜单块，所以要记进 rendered_needs——不然
+    # _warn_uncovered 每次都为它喊「菜单没覆盖」的冤。
+    if "skill_read" in by_short:
+        import skills
+        blk = skills.index_block(context, char_id, by_short["skill_read"])
+        if blk:
+            lines.append(blk)
+            rendered_needs.add("skill_read")
     _warn_uncovered(context, by_short, rendered_needs)
     if not lines:
         return ""
@@ -763,6 +785,10 @@ def base_claude_args(persona_file: Optional[Path] = None,
     if _pet_mcp_mounted(char_id):
         mcp_configs.append(str(_pet_mcp_config(char_id)))
         tools += PET_MCP_TOOLS
+    if _skills_mounted(context, char_id):
+        import skills
+        mcp_configs.append(str(skills.mcp_config(char_id)))
+        tools += skills.SKILLS_MCP_TOOLS
     # 工具延迟：上下文里只留工具名，用法（schema）等 TA 自己按名字取。工具一多，
     # 光 schema 就是大头——实测醒来那条路 52 个工具时 20,076 token，开了延迟 3,509（−83%）。
     # ToolSearch 必须**进白名单**才算数：它是内置工具，而这里的 --tools 是精确白名单，

@@ -114,7 +114,25 @@ server/skills/
     SKILL.md                路由表 + 三条铁律（照 PLAN_jobhunt_skills 第五节，一字不动）
     prompts/…               七个流程（照其第三、四节）
     frameworks/…            evidence-ranking / competency-tags / star-car / manual-spec …
+  postmortem/
+    SKILL.md                修完一个 bug 之后的复盘四步（单文件，2026-08-28 加）
 ```
+
+### 第三层：工程纪律层（`postmortem`，2026-08-28 机主拍板加）
+
+不是域方法层也不是交付层，是**跟着一类动作走的纪律**：修完 bug → 复盘、归类、
+出规避规则、拿这个类去扫同类。触发点是「修完，commit 之前」，不是修之前。
+
+来历：08-28 那次「A 的设置被写进 B」的复盘里挖出，同一个根因在 08-15 已经犯过两次
+（`8d533c0` 记录串台、`5a259b2` 消息串台）——三次表现不同、没人一次性清算过。
+把「每次修完都走一遍这四步」做成 skill，就是不让第四次发生。全文复盘见
+`PLAN_multichar.md` 末节。
+
+**装在哪（两处一份源）**：
+- app 侧 `server/skills/postmortem/`，共享 skill → 两个角色 × chat/wake/code 全覆盖；
+- Mac 上的 CC：`~/.claude/skills/postmortem` **软链**指向上面那个目录，改一处两边同步。
+  （grill-me / impeccable 是拷贝进去的私货；这个不拷，避免两份飘。仓搬家链会断，
+  断了只是 CC 少一个 skill，不报错。）
 
 ## 五、对 PLAN_jobhunt_skills 的改判（其余全部照旧）
 

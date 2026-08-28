@@ -215,22 +215,39 @@ def _build_system(profile: str = "code", char_id: Optional[str] = None) -> str:
             parts.append(p.read_text("utf-8"))
         except Exception:
             pass
+    # skill 索引插在人设和守则**之间**（PLAN_skills，08-28 机主拍板）：索引是参考资料、
+    # 守则要压轴。game 档案不插：strict 白名单里没有 skills server，提了就是说谎。
+    if profile != "game" and len(parts) >= 1:
+        try:
+            import skills
+            idx = skills.index_block("code", cid)
+            if idx:
+                parts.insert(1, idx)
+        except Exception as e:
+            print(f"[code_bridge] skill 索引渲染失败（这次会话不带索引）: {e}",
+                  file=sys.stderr)
     text = "\n\n".join(parts)
     return (text.replace("{{AGENT_NAME}}", characters.display_name(cid))
                 .replace("{{USER_NAME}}", config.user_name()))
 
 
 def _hook_settings() -> Optional[Path]:
-    """把逐段上报的 hook 写成一份**只给这个会话**的 settings（claude --settings）。
-    这样不用去动用户全局的 ~/.claude/settings.json——那是别人的机器配置，我们没资格
-    往里塞东西，塞了还会对他所有的 claude 会话生效。"""
-    if not HOOK_SCRIPT.is_file():
-        return None
-    cmd = f'"{sys.executable}" "{HOOK_SCRIPT}"'
-    entry = [{"matcher": "", "hooks": [{"type": "command", "command": cmd}]}]
+    """**只给这个会话**的 settings（claude --settings）：逐段上报的 hook + skill_read
+    的预批准。这样不用去动用户全局的 ~/.claude/settings.json——那是别人的机器配置，
+    我们没资格往里塞东西，塞了还会对他所有的 claude 会话生效。
+
+    permissions.allow 是 code 会话挂 skills MCP 的钥匙（PLAN_skills S1，08-28 A/B 实测）：
+    code 档案内置工具全开、**没有** --allowedTools 白名单那条路（start() 的 tools 参数
+    一给就整体 strict，Bash/Write 会被摘），预批准只能走 settings。game 档案的 strict
+    白名单里没有 skills server，这条 allow 在那边是死字，不会多放进任何工具。"""
+    import skills
+    payload_obj: dict = {"permissions": {"allow": list(skills.SKILLS_MCP_TOOLS)}}
+    if HOOK_SCRIPT.is_file():
+        cmd = f'"{sys.executable}" "{HOOK_SCRIPT}"'
+        entry = [{"matcher": "", "hooks": [{"type": "command", "command": cmd}]}]
+        payload_obj["hooks"] = {"Stop": entry, "PostToolUse": entry}
     import json
-    payload = json.dumps({"hooks": {"Stop": entry, "PostToolUse": entry}},
-                         ensure_ascii=False, indent=2)
+    payload = json.dumps(payload_obj, ensure_ascii=False, indent=2)
     _write_atomic(HOOK_SETTINGS_PATH, payload)
     return HOOK_SETTINGS_PATH
 
@@ -298,6 +315,17 @@ def start(context_text: str, auth_key: str, cwd: Optional[str] = None,
     # 下面 _build_system 要用它，而那时状态文件里还躺着上一次会话的归属。
     import plugins as _plugins
     cid = (char_id or "").strip() or _plugins.owner_of("tmux")
+
+    # skills MCP 挂进 code 会话（PLAN_skills S1）：接线和 chat/wake 同一份
+    # （skills.mcp_config），预批准走 _hook_settings 的 permissions.allow。
+    # game 不挂：strict 白名单不含它，挂了也是死的。挂载判据同 pipeline._skills_mounted。
+    if profile == "code":
+        try:
+            import skills
+            if skills.list_skills("code", cid):
+                mcp_configs = list(mcp_configs or []) + [str(skills.mcp_config(cid))]
+        except Exception as e:
+            print(f"[code_bridge] skills MCP 接线失败（这次会话不挂）: {e}", file=sys.stderr)
 
     for p in PROFILES.values():
         _tmux("kill-session", "-t", p["session"])
