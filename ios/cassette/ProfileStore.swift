@@ -22,8 +22,8 @@ final class ProfileStore: ObservableObject {
         dir.appendingPathComponent(charID == "default" ? "other.png" : "char_\(charID).png")
     }
 
-    private func avatarURL(_ sender: MessageSender) -> URL {
-        sender == .me ? dir.appendingPathComponent("me.png") : charAvatarURL(currentCharID)
+    private func avatarURL(_ sender: MessageSender, char: String) -> URL {
+        sender == .me ? dir.appendingPathComponent("me.png") : charAvatarURL(char)
     }
 
     init() {
@@ -49,12 +49,20 @@ final class ProfileStore: ObservableObject {
         UIImage(contentsOfFile: charAvatarURL(charID).path)
     }
 
-    /// 设置某一方的头像：缩放到合适大小 + 写文件 + 刷新界面。对方 = 当前会话角色。
-    func setAvatar(_ sender: MessageSender, image: UIImage) {
+    /// 设置某一方的头像：缩放到合适大小 + 写文件 + 刷新界面。
+    /// 对方 = **char 指名的那位**（缺省才是当前会话角色）。
+    ///
+    /// char 必须由调用方在**发起那一刻**抓好：选图要过一次异步（iCloud 里的图下载能好
+    /// 几秒），等落地时再问「现在是谁」，人在这期间切走了，图就写到新角色头上了——
+    /// 和 2026-08-28 那次「A 的设置被写进 B」是同一个坑（延迟写入 + 可变的全局当前）。
+    func setAvatar(_ sender: MessageSender, image: UIImage, char: String? = nil) {
+        let cid = char ?? currentCharID
         let scaled = image.downscaled(maxDimension: 512)
         guard let png = scaled.pngData() else { return }
-        try? png.write(to: avatarURL(sender), options: .atomic)
-        if sender == .me { meAvatar = scaled } else { otherAvatar = scaled }
+        try? png.write(to: avatarURL(sender, char: cid), options: .atomic)
+        // 界面只在「写的就是正在看的那位」时才刷：不然会把别人的新头像画到当前会话上。
+        if sender == .me { meAvatar = scaled }
+        else if cid == currentCharID { otherAvatar = scaled }
     }
 }
 

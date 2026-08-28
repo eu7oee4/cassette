@@ -9,6 +9,7 @@ struct ContentView: View {
     @StateObject private var proactiveStore = ProactiveSettingsStore() // 主动消息设置（当前角色的）
     @StateObject private var stickerStore = StickerStore() // 表情包库
     @StateObject private var charListStore = CharacterListStore() // 角色清单（会话列表数据源）
+    @StateObject private var draftStore = DraftStore()     // 未发的草稿（文字+附件），一人一份
 
     // 当前会话角色。ChatService 拼请求时读同一个 key（CurrentCharacter），天然对齐。
     @AppStorage(CurrentCharacter.key) private var currentCharID = "default"
@@ -16,6 +17,7 @@ struct ContentView: View {
     @Environment(\.scenePhase) private var scenePhase
 
     @State private var draft: String = ""
+    @State private var draftLoaded = false           // 首次进前台时把本角色的草稿铺回输入区（只做一次）
     @State private var drawerOpen = false            // 抽屉（猫爪/左缘右滑开，阴影点击/左滑关）
     @State private var navPath: [DrawerPage] = []
     @State private var draftCount = 0    // 草稿信箱待寄数（抽屉角标；挂在前台轮询里刷新）    // 抽屉 push 的页面栈
@@ -127,6 +129,8 @@ struct ContentView: View {
     @State private var editRefreshTick = 0   // 亲手编辑/删除的信号：ChatView 收到就手术式合并进冻结快照
     @State private var backToNowTick = 0     // 「编辑并重新回复」的信号：ChatView 收到就解冻回底
     @State private var windowSyncTask: Task<Void, Never>? = nil   // 删/编辑后同步后端窗口（防抖）
+    /// 已排期、还没送出去的那一份窗口同步（历史 + 它属于谁）。切人前要先把它送走。
+    @State private var windowSyncPending: (char: String, history: [ChatMessage])? = nil
     @State private var deleteCandidates: [ChatMessage] = []   // 长按气泡/堆叠卡 → 删除确认（组删多条）
     @State private var viewingWebpage: WebpageItem? = nil      // 点网页卡片 → 查看
 
@@ -184,8 +188,23 @@ struct ContentView: View {
         // 一次抽屉才看得到聊天。返回想去的地方就是聊天。）
         // 待送达同步：前台时拉一次，并每 15s 轮询（断连补投的回复靠这条通道回来）。
         // .task(id: scenePhase)：进 active 启动、离开 active 自动取消循环，省电。
+        // 草稿是按角色存的（见 DraftStore）：退到后台时把防抖里那份先落盘，别丢用户打的字。
+        .onChange(of: scenePhase) { _, phase in
+            if phase != .active { draftStore.flushPending() }
+        }
+        .onChange(of: draft) { _, _ in
+            draftStore.scheduleSave(currentDraft, char: currentCharID)
+        }
+        // 附件增删要连图/文件一起重写（文字那条只重写 meta，不动几 MB 的附件）。
+        .onChange(of: pendingImages.count) { _, _ in draftStore.save(currentDraft, char: currentCharID) }
+        .onChange(of: pendingFiles.count) { _, _ in draftStore.save(currentDraft, char: currentCharID) }
+        .onChange(of: pendingSticker) { _, _ in draftStore.save(currentDraft, char: currentCharID) }
         .task(id: scenePhase) {
             guard scenePhase == .active else { return }
+            if !draftLoaded {
+                draftLoaded = true
+                applyDraft(draftStore.load(currentCharID))
+            }
             await syncCodeMode()   // 他可能在断流/后台期间自己切进了 Code 模式 → 回前台对齐
             await syncPending()
             await reconcileRescues()
@@ -482,10 +501,13 @@ struct ContentView: View {
                           selection: $avatarPickerItem, matching: .images)
             .onChange(of: avatarPickerItem) { _, item in
                 guard let item, let target = avatarPickerTarget else { return }
+                // 选图要过一次异步（iCloud 里的图可能下载好几秒）：角色在**发起这一刻**
+                // 就钉死，等落地再问「现在是谁」＝把图写到切过去的那位头上。
+                let char = currentCharID
                 Task {
                     if let data = try? await item.loadTransferable(type: Data.self),
                        let img = UIImage(data: data) {
-                        profileStore.setAvatar(target, image: img)
+                        profileStore.setAvatar(target, image: img, char: char)
                     }
                     avatarPickerItem = nil
                     avatarPickerTarget = nil
@@ -561,8 +583,12 @@ struct ContentView: View {
         guard !isGenerating else { return }
         chatViewNonce &+= 1
         guard id != currentCharID else { return }
+        // 换人前先把「属于上一位」的两样东西落地，带的都是**它原本那位**：
+        flushWindowSync()                                   // 没送出去的删/编辑窗口同步
+        draftStore.save(currentDraft, char: currentCharID)  // 输入区里没发出去的草稿（含附件）
         chatStore.switchConversation(id)
         currentCharID = id
+        applyDraft(draftStore.load(id))                     // 换上这一位自己的草稿
         profileStore.switchCharacter(id)
         sessionId = nil
         Task { await proactiveStore.reloadForCurrentCharacter() }
@@ -862,6 +888,7 @@ struct ContentView: View {
         }
         draft = ""
         DispatchQueue.main.async { draft = "" }
+        draftStore.clear(currentCharID)
         Task { @MainActor in
             do {
                 try await chatService.codeSend(text: trimmed, imagesData: imagesData,
@@ -929,6 +956,7 @@ struct ContentView: View {
         // 清空输入框（同步 + 下一轮再清一次，盖过中文输入法候选字写回）。
         draft = ""
         DispatchQueue.main.async { draft = "" }
+        draftStore.clear(currentCharID)
 
         Task { await generateReply(imagesData: imagesToSend, filesData: filesToSend) }
     }
@@ -1224,7 +1252,10 @@ struct ContentView: View {
     /// 后端不在时不该拿旧数字亮着。
     @MainActor
     private func refreshDraftCount() async {
+        let char = currentCharID
         let wrap = try? await chatService.getMailDrafts()
+        // 在飞期间切了人：这份是上一位的角标，别覆盖新角色的（A→B→A 快切时旧响应会后到）。
+        guard char == currentCharID else { return }
         draftCount = (wrap?.plugin_installed ?? false) ? (wrap?.items.count ?? 0) : 0
     }
 
@@ -1317,6 +1348,22 @@ struct ContentView: View {
         }
     }
 
+    // MARK: - 草稿（一人一份）
+
+    /// 输入区此刻的内容打成一份草稿。
+    private var currentDraft: ComposeDraft {
+        ComposeDraft(text: draft, images: pendingImages, files: pendingFiles,
+                     stickerID: pendingSticker?.id)
+    }
+
+    /// 把一份草稿铺回输入区（表情按 id 去表情库现取——库里删了就当没有）。
+    private func applyDraft(_ d: ComposeDraft) {
+        draft = d.text
+        pendingImages = d.images
+        pendingFiles = d.files
+        pendingSticker = d.stickerID.flatMap { stickerStore.sticker(id: $0) }
+    }
+
     // MARK: - 窗口同步（删/编辑消息后）
 
     /// 删/编辑消息是纯本地操作，不触发任何后端请求——不同步的话，在下次发消息之前，
@@ -1324,12 +1371,26 @@ struct ContentView: View {
     /// 1 秒防抖：连删几条（或删整组照片）只推最后那一份。
     /// **不用等它**：推失败也只是窗口略旧，下次发消息 /chat 会整体覆盖，没有需要提示的事。
     private func scheduleWindowSync() {
+        // (历史, 角色) 在**排期这一刻**成对快照。等 1 秒后才去读 chatStore/全局的话，
+        // 这中间切了人 → 推的是新角色的历史，原主人的删改一条也没送到（TA 下次醒来
+        // 看到的还是删之前的世界，正是这个函数存在的理由）。
+        let snapshot = (char: currentCharID, history: chatStore.messages)
+        windowSyncPending = snapshot
         windowSyncTask?.cancel()
         windowSyncTask = Task { @MainActor in
             try? await Task.sleep(for: .seconds(1))
             guard !Task.isCancelled else { return }
-            try? await chatService.syncWindow(history: chatStore.messages)
+            windowSyncPending = nil
+            try? await chatService.syncWindow(history: snapshot.history, char: snapshot.char)
         }
+    }
+
+    /// 把排期中的窗口同步立刻送出去（切人前用）：不等防抖，带的是它原本那位。
+    private func flushWindowSync() {
+        windowSyncTask?.cancel()
+        guard let p = windowSyncPending else { return }
+        windowSyncPending = nil
+        Task { try? await chatService.syncWindow(history: p.history, char: p.char) }
     }
 
     // MARK: - 编辑 / 重新生成

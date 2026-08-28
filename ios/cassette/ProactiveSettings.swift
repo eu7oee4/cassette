@@ -120,6 +120,10 @@ final class ProactiveSettingsStore: ObservableObject {
     /// 进页面拉后端当前值对齐（后端是执行的真相）。连不上就保留本地值。
     /// 在飞期间切了人 → 这份是上一位的，丢掉。
     func refreshFromServer() async {
+        // 本地还有没送到后端的改动 → 先送走再读，否则这一读会拿后端的旧值把它盖回去
+        // （用户看到的是「我改的设置自己变回去了」）。必须 await：fire-and-forget 的话
+        // GET 可能先于 POST 落地，就还是拿旧值覆盖。
+        await flushPendingNow()
         let id = charID
         let outer = loading
         loading = true
@@ -142,8 +146,13 @@ final class ProactiveSettingsStore: ObservableObject {
         pushTask = Task { [service] in
             try? await Task.sleep(for: .milliseconds(debounceMs))
             guard !Task.isCancelled else { return }
-            _ = try? await service.saveSettings(snapshot, char: id)
-            if self.pending?.char == id { self.pending = nil }
+            do {
+                _ = try await service.saveSettings(snapshot, char: id)
+                if self.pending?.char == id { self.pending = nil }
+            } catch {
+                // 没送到就**留着 pending**（本地已经是新值了）：清掉的话后端还是旧值，
+                // 下次进页面对齐就把它静默盖回去。留着 → 下次 refresh 前先补送。
+            }
         }
     }
 
@@ -157,10 +166,21 @@ final class ProactiveSettingsStore: ObservableObject {
     }
 
     /// 把排期中的回写立刻送出去（切人前用）：不等防抖，也不管现在在看谁。
+    /// 送的是**上一位**的值和角色，和随后要读的新角色不冲突，所以不用等它回来。
     private func flushPending() {
         pushTask?.cancel()
         guard let p = pending else { return }
         pending = nil
         Task { [service] in _ = try? await service.saveSettings(p.value, char: p.char) }
+    }
+
+    /// 同上，但**等它送完**：给「马上要读同一个角色」的调用方用（refreshFromServer）。
+    /// 失败就把 pending 放回去，下次再补送——绝不能一边丢掉改动一边去拉旧值。
+    private func flushPendingNow() async {
+        pushTask?.cancel()
+        guard let p = pending else { return }
+        pending = nil
+        do { _ = try await service.saveSettings(p.value, char: p.char) }
+        catch { pending = p }
     }
 }

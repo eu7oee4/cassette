@@ -317,7 +317,10 @@ struct ChatService {
 
     /// 删/编辑消息后把当前历史推给后端对齐 recent_window（**不触发生成**）。
     /// 这类操作纯本地，不推的话在下次发消息之前，TA 每次醒来看到的都是删改之前的世界。
-    func syncWindow(history: [ChatMessage]) async throws {
+    ///
+    /// **char 是这份历史属于谁**，不是「现在在看谁」——调用方是防抖排期的（删几条只推
+    /// 最后一份），必须把 (历史, 角色) 成对快照了传进来，理由同 saveSettings。
+    func syncWindow(history: [ChatMessage], char: String? = nil) async throws {
         struct Body: Encodable { let messages: [OutMessage]; let char_id: String? }
         // 过滤和条数口径必须和 /chat 一字不差——两条路写的是同一个窗口。
         let messages = history.filter { !$0.isMemoryNote && !$0.isSystem && !$0.isBrowseNote }
@@ -327,9 +330,10 @@ struct ChatService {
                            text: $0.plainText,
                            ts: Int($0.timestamp.timeIntervalSince1970))
             }
-        let body = try JSONEncoder().encode(Body(messages: Array(messages),
-                                                 char_id: CurrentCharacter.id))
-        _ = try await perform(authedRequest("POST", "/window/sync", jsonBody: body))
+        // URL 上的 ?char= 和 body 里的 char_id 必须同一个来源，否则两个标签会打架。
+        let cid = char ?? CurrentCharacter.id
+        let body = try JSONEncoder().encode(Body(messages: Array(messages), char_id: cid))
+        _ = try await perform(authedRequest("POST", "/window/sync", jsonBody: body, char: cid))
     }
 
     // MARK: - 角色清单
