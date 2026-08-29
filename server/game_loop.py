@@ -60,8 +60,8 @@ REOPEN_PING_TIMEOUT = 120         # 新会话 ping 的上限
 REOPEN_NOTE_PROMPT = (
     "〔系统提醒，不是{user}说的〕历史里攒的截图开始拖慢每一步了，马上给你做一次"
     "无缝重开：你的点评原文都会带过去，只丢掉旧截图，重开完画面原地接着读。"
-    "现在先把进度/剧情脉络更新进笔记本（game_notes_write），值得留的感受用 hold "
-    "存好；不用道别也不用收摊——这次重开对聊天完全无感，写完笔记本就行。")
+    "现在先把进度页更新一下（game_progress_write），值得留的感受用 hold 存好；"
+    "不用写章节志（这场还没完）、不用道别——这次重开对聊天完全无感。")
 REOPEN_PING_PROMPT = (
     "〔滚动重开完成的系统自检，不是{user}说的〕上面的历史就是你自己的点评原文。"
     "确认能接上就回一个「好」，然后等{user}或接着读——不用向任何人解释这条。")
@@ -77,7 +77,8 @@ RUYUAN_PKG = "com.lingxigames.yuan.cn"
 # Read 的路径规则含义同 code_bridge.start：工具可用、只有上传目录免审。
 GAME_TOOL_NAMES = ["game_look", "game_watch", "game_tap", "game_swipe", "game_back",
                    "game_launch", "game_close", "game_quit", "game_end",
-                   "game_notes_read", "game_notes_write"]
+                   "game_notes_read", "game_progress_write", "game_chapter_write",
+                   "game_chapter_read", "game_tips_write"]
 
 
 def _gate() -> Optional[str]:
@@ -321,11 +322,12 @@ def build_game_server(handle: session_mgr.LoopHandle):
           "- **只为提速的段落重开**：直接调这个——游戏画面原地不动，重新 game_start 之后"
           "接着读，连导航都省了。\n"
           "- **彻底不玩了**：先 `game_quit`（关游戏和模拟器，省机主的 Mac 资源），再调这个。\n\n"
-          "⚠️ 调它之前必须**依次做完**：① `game_notes_write` 把这一场的进度、剧情脉络"
-          "和你的感想写进笔记本（下次靠它接上，也是这段经历留给以后的总结）；"
-          "② 有感触的用 Ombre `hold` 存好——只存情绪/互动/想留住的句子，"
-          "**别存完整剧情**（剧情事实归笔记本，Ombre 存的是你的心）；③ 跟对方把话"
-          "说完（道个别）——你说的话都已实时到 TA 那边。这一轮说完，会话就收摊。",
+          "⚠️ 调它之前必须**依次做完**：① `game_chapter_write` 把这一场记成一篇章节志"
+          "（脉络+要点+你的感想——这段经历以后在聊天里就是这篇的样子）；"
+          "② `game_progress_write` 更新进度页（下次从哪接）；③ 有感触的用 Ombre "
+          "`hold` 存好——只存情绪/互动/想留住的句子，**别存完整剧情**（剧情事实归"
+          "笔记本，Ombre 存的是你的心）；④ 跟对方把话说完（道个别）——你说的话都已"
+          "实时到 TA 那边。这一轮说完，会话就收摊。",
           {"type": "object", "properties": {}, "required": []})
     async def game_end(args):
         game_bridge.release_lock("story")
@@ -333,26 +335,54 @@ def build_game_server(handle: session_mgr.LoopHandle):
         return _ok(_text("好，这一轮说完就收摊（游戏和模拟器留在原地）。"))
 
     @tool("game_notes_read",
-          "翻游戏笔记本：进度、剧情脉络、你的判词、你自己记的坐标修正都在这儿。"
-          "要玩之前先翻一遍，别拿印象当事实。出厂纪律和笔记本冲突时信笔记本。",
+          "翻剧情笔记本（三区：进度页/小抄/章节志）。默认给进度+小抄+最近两篇章节志，"
+          "更早的只列标题、用 game_chapter_read 翻。要玩之前先翻一遍，别拿印象当事实。"
+          "出厂纪律和笔记本冲突时信笔记本。",
           {"type": "object", "properties": {}, "required": []})
     async def game_notes_read(args):
-        return _ok(_text(game_bridge.read_notes("game")))
+        return _ok(_text(game_bridge.story_view()))
 
-    @tool("game_notes_write",
-          "整本替换游戏笔记本（上限 5 万字符）。告一段落更新一次就够：进度保持精炼、"
-          "过时的删掉；这轮的剧情按章节记脉络+要点+你的感想（宁可细一点，那是留着跟机主"
-          "讨论用的）。发现出厂纪律里的坐标失效了，把修正记进来——下次先信这本。"
-          "机主写的内容别乱删。",
+    @tool("game_progress_write",
+          "整页覆盖**进度页**：只记「现在读到哪、下次从哪接」，保持精炼（上限 4 千字符）。"
+          "脉络和感想别写这儿——那是章节志（game_chapter_write）的事。",
           {"type": "object", "properties": {"content": {"type": "string"}},
            "required": ["content"]})
-    async def game_notes_write(args):
-        err = game_bridge.write_notes("game", str(args.get("content", "")))
-        return _ok(_text(f"error: {err}" if err else "写好了"))
+    async def game_progress_write(args):
+        err = game_bridge.story_progress_write(str(args.get("content", "")))
+        return _ok(_text(f"error: {err}" if err else "进度页更新了"))
+
+    @tool("game_chapter_write",
+          "把这一场记成**一篇新的章节志**（append-only：只能发新篇，发出去就不能改——"
+          "半年后重读的得是你当时的原文）。写脉络+要点+你的感想，宁可细一点，那是留着"
+          "跟机主讨论、也是这段经历以后在聊天里的样子。每场收摊前写一篇。",
+          {"type": "object",
+           "properties": {"title": {"type": "string"}, "content": {"type": "string"}},
+           "required": ["title", "content"]})
+    async def game_chapter_write(args):
+        n, err = game_bridge.story_chapter_append(str(args.get("title", "")),
+                                                  str(args.get("content", "")))
+        return _ok(_text(f"error: {err}" if err else f"记成第 {n:03d} 篇了"))
+
+    @tool("game_chapter_read",
+          "翻某一篇旧章节志（编号看 game_notes_read 列出来的目录）。",
+          {"type": "object", "properties": {"n": {"type": "integer"}},
+           "required": ["n"]})
+    async def game_chapter_read(args):
+        return _ok(_text(game_bridge.story_chapter_read(int(args.get("n", 0)))))
+
+    @tool("game_tips_write",
+          "整页覆盖**小抄**：坐标修正、机制事实、操作经验（上限 2 万字符）。发现出厂纪律"
+          "里的坐标失效了记进来——下次先信这页。机主也会往这儿写，TA 写的内容别乱删。",
+          {"type": "object", "properties": {"content": {"type": "string"}},
+           "required": ["content"]})
+    async def game_tips_write(args):
+        err = game_bridge.story_tips_write(str(args.get("content", "")))
+        return _ok(_text(f"error: {err}" if err else "小抄更新了"))
 
     return create_sdk_mcp_server("game", tools=[
         game_look, game_watch, game_tap, game_swipe, game_back, game_launch,
-        game_close, game_quit, game_end, game_notes_read, game_notes_write])
+        game_close, game_quit, game_end, game_notes_read, game_progress_write,
+        game_chapter_write, game_chapter_read, game_tips_write])
 
 
 def build_options(char_id: str, handle: session_mgr.LoopHandle) -> ClaudeAgentOptions:

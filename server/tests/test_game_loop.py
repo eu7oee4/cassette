@@ -176,9 +176,9 @@ class ReopenTest(unittest.IsolatedAsyncioTestCase):
         self.handle.meta["shots"] = 2                     # 工具层计的账，测试直填
         c1.feed(_asst(TextBlock(text="这章读完了")), _result())
         await asyncio.sleep(0.05)
-        # ① 巩固钩子：笔记本提醒进了旧 client
+        # ① 巩固钩子：进度页提醒进了旧 client
         self.assertEqual(len(c1.queries), 2)
-        self.assertIn("笔记本", c1.queries[1])
+        self.assertIn("进度页", c1.queries[1])
         c1.feed(_asst(TextBlock(text="记好了")), _result())   # 他写完笔记本
         await asyncio.sleep(0.05)
         # ② 铸文本史：user 开场 + 他说过的话，全是 TA 见过的原文

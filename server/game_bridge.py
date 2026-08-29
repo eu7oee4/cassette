@@ -141,6 +141,125 @@ def notes_status() -> dict:
     return {"chars": 0, "updated_at": None}
 
 
+# ---------- 剧情笔记本 v2（PLAN_sdk §5.1，08-29 机主拍板「现在做掉」）----------
+# 旧形态是一个 blob 整本替换：三种生命周期混一起，「机主写的别乱删」「过时的删掉」
+# 全靠自觉。v2 拆三区，纪律做进接口形状：
+#   进度页 progress.md —— 当前在哪，小、整页覆盖，写错只丢一页
+#   章节志 chapters/NNN.md —— 一场一篇 append-only，**没有改旧篇的接口**
+#     （现在的他不许改写过去的他；半年后重读的得是当时的原文）
+#   小抄 tips.md —— 坐标修正/机制事实，长期参考，机主也写
+# notes.md 从此归任务本专用（顺手把「拆两本」真做掉）；旧 blob 迁进第 000 篇。
+
+STORY_DIR = GAME_DIR / "story_notes"
+STORY_PROGRESS_MAX = 4_000
+STORY_TIPS_MAX = 20_000
+STORY_CHAPTER_MAX = 20_000
+
+
+def _write_text_atomic(path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+    tmp.write_text(content, "utf-8")
+    tmp.replace(path)
+
+
+def _story_dir():
+    """惰性一次性迁移：v2 目录还没有而旧 blob 有内容 → 旧本整个存成第 000 篇
+    （原文不动，红线口径），进度页放一句指路。之后旧 notes.md 归任务本。"""
+    d = STORY_DIR
+    if not d.exists():
+        legacy = NOTES_PATH.read_text("utf-8") if NOTES_PATH.exists() else ""
+        (d / "chapters").mkdir(parents=True, exist_ok=True)
+        if legacy.strip():
+            _write_text_atomic(d / "chapters" / "000.md",
+                               "# 迁移自旧笔记本\n\n" + legacy)
+            _write_text_atomic(d / "progress.md",
+                               "（从旧笔记本迁移过来：最新进度在第 000 篇末尾，"
+                               "读完这一场记得把这页换成真进度。）")
+    return d
+
+
+def story_progress_read() -> str:
+    p = _story_dir() / "progress.md"
+    return p.read_text("utf-8") if p.exists() else ""
+
+
+def story_progress_write(content: str) -> Optional[str]:
+    if len(content) > STORY_PROGRESS_MAX:
+        return (f"进度页太长了（{len(content)} > {STORY_PROGRESS_MAX} 字符）——"
+                "它只记「现在在哪、下次从哪接」，脉络和感想写进章节志")
+    _write_text_atomic(_story_dir() / "progress.md", content)
+    return None
+
+
+def story_tips_read() -> str:
+    p = _story_dir() / "tips.md"
+    return p.read_text("utf-8") if p.exists() else ""
+
+
+def story_tips_write(content: str) -> Optional[str]:
+    if len(content) > STORY_TIPS_MAX:
+        return f"小抄太长了（{len(content)} > {STORY_TIPS_MAX} 字符），精简后再写"
+    _write_text_atomic(_story_dir() / "tips.md", content)
+    return None
+
+
+def story_chapters() -> list[tuple[int, str]]:
+    """[(编号, 标题)]，标题取每篇首行（剥掉 #）。"""
+    out = []
+    cdir = _story_dir() / "chapters"
+    for p in sorted(cdir.glob("*.md")):
+        try:
+            n = int(p.stem)
+        except ValueError:
+            continue
+        first = (p.read_text("utf-8").splitlines() or [""])[0]
+        out.append((n, first.lstrip("# ").strip()))
+    return out
+
+
+def story_chapter_append(title: str, content: str):
+    """append-only：只发新篇，没有任何改旧篇的口。返回 (编号, None) 或 (None, 错误)。"""
+    title = (title or "").strip()
+    if not title:
+        return None, "章节志要有个标题（这一场读了什么）"
+    if len(content) > STORY_CHAPTER_MAX:
+        return None, (f"这篇太长了（{len(content)} > {STORY_CHAPTER_MAX} 字符）——"
+                      "章节志是脉络+要点+感想，不是逐句转录（原话在聊天记录里都有）")
+    chapters = story_chapters()
+    n = (chapters[-1][0] + 1) if chapters else 1
+    _write_text_atomic(_story_dir() / "chapters" / f"{n:03d}.md",
+                       f"# {title}\n\n{content}")
+    return n, None
+
+
+def story_chapter_read(n: int) -> str:
+    p = _story_dir() / "chapters" / f"{int(n):03d}.md"
+    if not p.exists():
+        have = ", ".join(str(c) for c, _ in story_chapters()) or "（还没有）"
+        return f"没有第 {n} 篇。现有篇号：{have}"
+    return p.read_text("utf-8")
+
+
+def story_view(recent: int = 2) -> str:
+    """默认视图（渐进披露）：进度 + 小抄 + 最近几篇全文 + 更早的只列标题。"""
+    chapters = story_chapters()
+    parts = ["【进度】", story_progress_read().strip() or "（空白——第一场读完记得写）",
+             "", "【小抄（坐标修正/机制事实，机主也会写，别乱删）】",
+             story_tips_read().strip() or "（空）"]
+    tail = chapters[-recent:] if recent > 0 else []
+    older = chapters[:-recent] if recent > 0 else chapters
+    if older:
+        parts += ["", "【更早的章节志（用 game_chapter_read(编号) 翻）】"]
+        parts += [f"  第{n:03d}篇 · {t}" for n, t in older]
+    for n, _t in tail:
+        parts += ["", f"=== 第{n:03d}篇 ===",
+                  story_chapter_read(n)]
+    if not chapters:
+        parts += ["", "【章节志】（还没有——每场收摊前用 game_chapter_write 记一篇）"]
+    return "\n".join(parts)
+
+
 # ---------- 任务集（presets：机主在游戏页存的「一串任务+定制选项」）----------
 # 存宿主不存手机：AI 也要查得到——机主在聊天里说「做日常任务集」，AI 用 task_run_preset
 # 照单派活。列表新的在前，「默认选最上面」= 默认选最新设定的。

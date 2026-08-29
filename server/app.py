@@ -2126,7 +2126,8 @@ def game_tasks_stop(x_auth: Optional[str] = Header(default=None, alias="X-Auth")
 GAME_SESSION_TOOLS = [f"mcp__game__{t}" for t in (
     "game_look", "game_watch", "game_tap", "game_swipe", "game_back",
     "game_launch", "game_close", "game_quit", "game_end",
-    "game_notes_read", "game_notes_write")] + [
+    "game_notes_read", "game_progress_write", "game_chapter_write",
+    "game_chapter_read", "game_tips_write")] + [
     # 内置 Read 只为一件事：看机主随消息发来的图（/code/send 落到 uploads/，路径写在
     # 消息里）。路径规则限定到上传目录——读别处会弹权限，不是静默放行（code_bridge
     # 会把这条剥成裸名进 --tools、完整规则进 --allowedTools）。
@@ -2396,11 +2397,11 @@ async def _game_watchdog() -> None:
                 st["reminded"] = now
                 code_bridge.send(
                     f"〔系统提醒，不是{config.user_name()}说的〕这个会话开了一个钟头，"
-                    "历史里攒的截图会让你每一步越来越慢。读到段落点就收摊重开：进度写进"
-                    "笔记本（game_notes_write）、值得留的感受用 hold 存好、跟人道个别，"
-                    "然后 game_end 关掉这局（不用 game_quit——游戏画面原地不动，"
-                    "重新 game_start 后直接接着读）。速度会回满，笔记本把进度接上。"
-                    "不急，读完这段再收。")
+                    "历史里攒的截图会让你每一步越来越慢。读到段落点就收摊重开：这一场"
+                    "写成章节志（game_chapter_write）、进度页更新（game_progress_write）、"
+                    "值得留的感受用 hold 存好、跟人道个别，然后 game_end 关掉这局"
+                    "（不用 game_quit——游戏画面原地不动，重新 game_start 后直接接着读）。"
+                    "速度会回满，笔记本把进度接上。不急，读完这段再收。")
         except asyncio.CancelledError:
             return
         except Exception as e:
@@ -2457,7 +2458,15 @@ def game_presets_run(name: str, x_auth: Optional[str] = Header(default=None, ali
 
 @app.get("/game/notes/{book}")
 def game_notes_get(book: str, x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
+    """笔记本 v2（PLAN_sdk §5.1）后 book 的含义：task=任务本（旧 blob 原样）；
+    story/game=剧情本组合视图（只读渲染）；tips/progress=剧情本里机主可编辑的两区。"""
     verify_auth(x_auth)
+    if book in ("story", "game"):
+        return {"book": book, "content": game_bridge.story_view()}
+    if book == "tips":
+        return {"book": book, "content": game_bridge.story_tips_read()}
+    if book == "progress":
+        return {"book": book, "content": game_bridge.story_progress_read()}
     return {"book": book, "content": game_bridge.read_notes(_game_book(book))}
 
 
@@ -2465,7 +2474,16 @@ def game_notes_get(book: str, x_auth: Optional[str] = Header(default=None, alias
 def game_notes_post(book: str, inp: GameNotesIn,
                     x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
     verify_auth(x_auth)
-    err = game_bridge.write_notes(_game_book(book), inp.content)
+    if book in ("story", "game"):
+        raise HTTPException(status_code=400, detail=(
+            "剧情本已拆三区：机主要写的话编辑 tips（小抄）或 progress（进度页）；"
+            "章节志只能由 TA 在会话里追加（append-only）"))
+    if book == "tips":
+        err = game_bridge.story_tips_write(inp.content)
+    elif book == "progress":
+        err = game_bridge.story_progress_write(inp.content)
+    else:
+        err = game_bridge.write_notes(_game_book(book), inp.content)
     if err:
         raise HTTPException(status_code=400, detail=err)
     return {"ok": True}
