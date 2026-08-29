@@ -54,6 +54,8 @@ import cohabit_queue
 import config
 import forge
 import game_bridge
+import game_loop
+import session_mgr
 import jobhunt_store
 import mail_bridge
 import offers
@@ -179,6 +181,7 @@ def _forge_ops_probe() -> None:
 @asynccontextmanager
 async def _lifespan(_app: FastAPI):
     """启动 wake 调度器（on_event 已被 FastAPI 弃用，用 lifespan）。"""
+    session_mgr.set_event_loop(asyncio.get_running_loop())   # SDK 常驻 loop 的过桥
     characters.ensure_layout()   # 默认角色目录补齐（state 侧旧布局迁移在 state_store import 时已做）
     world.ensure_world()         # 大房子：注册表 + world.json 补齐（幂等，存在不覆盖）
     if config.COHABIT_ENABLED:
@@ -1355,9 +1358,12 @@ def code_status(busy: int = 0, x_auth: Optional[str] = Header(default=None, alia
     # session_char＝正开着这个会话的是谁（起会话时钉死的，可能和 owner 不同：
     # 会话开着期间归属被转走过）。
     owner = plugins.owner_of("tmux")
+    h = code_bridge.sdk_loop_handle()
+    busy_val = ((h.awaiting_user_since is None) if h is not None
+                else (bool(busy) and code_bridge.is_busy()))
     return {"enabled": config.CODE_MODE_ENABLED, "alive": code_bridge.session_alive(),
             "tmux": code_bridge.tmux_available(), "cwd": config.CODE_CWD,
-            "busy": bool(busy) and code_bridge.is_busy(),
+            "busy": busy_val,
             "profile": code_bridge.active_profile(),
             "owner": owner, "owner_name": characters.display_name(owner),
             "session_char": code_bridge.session_char()}
@@ -1381,6 +1387,10 @@ def code_start(inp: CodeStartIn, char: Optional[str] = None,
             detail=f"电脑上的会话现在归「{characters.display_name(owner)}」——"
                    f"要给「{characters.display_name(cid)}」用的话，"
                    "去插件商店右上角把「电脑上的会话」转过来")
+    if code_bridge.sdk_loop_handle() is not None:
+        # tmux 路的「杀旧起新」杀不到 SDK loop，静默放行会双开（独占组失守）。
+        raise HTTPException(status_code=409,
+                            detail="游戏会话（SDK）还开着——先在游戏页收摊，再切 Code")
     conv = [{"ts": m.ts, "role": m.role, "text": m.text} for m in inp.messages][-CODE_HISTORY_CAP:]
     scene = (f"【场景】你刚从 {config.user_name()} 的手机聊天切到 code 模式：还是你，"
              "只是这个会话里你手上有整台电脑的工具（读写文件、跑命令都行）。"
@@ -1412,11 +1422,13 @@ def code_send(inp: CodeSendIn, char: Optional[str] = None,
     _require_code()
     # 先过护栏再落图，别白存文件
     _require_session_owner(char)   # 会话是别人的 → 409，别静默串台（见该函数的注释）
-    if not code_bridge.session_alive():
-        raise HTTPException(status_code=409, detail="会话不在（先切一次 Code 模式）")
-    if code_bridge.dialog_pending():
-        raise HTTPException(status_code=409,
-                            detail="TA 正停在一个确认弹窗上，这条会被弹窗吃掉——先在终端里按掉，再发")
+    sdk_handle = code_bridge.sdk_loop_handle()
+    if sdk_handle is None:
+        if not code_bridge.session_alive():
+            raise HTTPException(status_code=409, detail="会话不在（先切一次 Code 模式）")
+        if code_bridge.dialog_pending():
+            raise HTTPException(status_code=409,
+                                detail="TA 正停在一个确认弹窗上，这条会被弹窗吃掉——先在终端里按掉，再发")
     msg = (inp.text or "")
     notes: list[str] = []
     n_img = 0
@@ -1446,9 +1458,16 @@ def code_send(inp: CodeSendIn, char: Optional[str] = None,
         raise HTTPException(status_code=400, detail="空消息")
     # 时间头：交互式会话里没有聊天那套时间注入，模型只能靠猜（实锤过：下午说"早点睡"）。
     msg = f"〔现在是 {pipeline.now_str()}〕\n{msg}"
-    r = code_bridge.send(msg)
-    if not r.get("ok"):
-        raise HTTPException(status_code=409, detail=r.get("error", "没发进会话"))
+    if sdk_handle is not None:
+        try:
+            sdk_handle.put_threadsafe(msg)    # SDK loop：进队列，loop 里 query() 注入
+            r = {"ok": True}
+        except Exception as e:
+            raise HTTPException(status_code=409, detail=f"没发进会话：{e}")
+    else:
+        r = code_bridge.send(msg)
+        if not r.get("ok"):
+            raise HTTPException(status_code=409, detail=r.get("error", "没发进会话"))
     extra = (f"〔发来{n_img}张图〕" if n_img else "") + (f"〔发来{n_file}个文件〕" if n_file else "")
     _code_window_append("user", inp.text + extra)
     return r
@@ -1458,6 +1477,11 @@ def code_send(inp: CodeSendIn, char: Optional[str] = None,
 def code_stop(x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
     verify_auth(x_auth)
     _require_code()
+    h = code_bridge.sdk_loop_handle()
+    if h is not None:
+        # SDK loop：cancel 之后锁/补醒由 _game_loop_closed 兜（任何退出路径共用）
+        session_mgr.stop(h.char_id, h.scene, "manual")
+        return {"ok": True}
     r = code_bridge.stop()
     # 剧情会话收摊要把模拟器使用权还回去，不然任务引擎永远派不了单。
     # code 档案下这是个空操作（锁本来就不是 story 的）。
@@ -1475,6 +1499,19 @@ def code_capture(lines: int = 200, char: Optional[str] = None,
     verify_auth(x_auth)
     _require_code()
     _require_session_owner(char)
+    h = code_bridge.sdk_loop_handle()
+    if h is not None:
+        # SDK 会话没有终端画面：终端页给一份最近对话的文字渲染顶着（真机验收后
+        # 再决定要不要做成事件流页）。
+        window = state_store.read_recent_window(h.char_id)[-30:]
+        head = [f"〔SDK 剧情会话 · {characters.display_name(h.char_id)} · "
+                f"截图 {h.meta.get('shots', 0)} 张"
+                + ("，滚动重开中〕" if h.reopening else "〕"),
+                "〔这个会话没有终端画面，下面是最近的对话记录〕", ""]
+        body = [("＞ " if w.get("role") == "user" else "· ") + (w.get("text") or "")
+                for w in window]
+        return {"ok": True, "alive": True, "content": "\n".join(head + body),
+                "dialog": []}
     return code_bridge.capture(lines=lines)
 
 
@@ -1486,6 +1523,8 @@ def code_keys(inp: CodeKeysIn, char: Optional[str] = None,
     verify_auth(x_auth)
     _require_code()
     _require_session_owner(char)
+    if code_bridge.sdk_loop_handle() is not None:
+        return {"ok": False, "error": "SDK 会话没有终端按键（这条路上不存在弹窗）"}
     return code_bridge.send_keys(inp.keys)
 
 
@@ -2121,9 +2160,18 @@ def _game_session_mcp_config():
 def game_story_start(inp: GameStoryStartIn,
                      x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
     """聊天里 TA 自己调 game_start 切去玩游戏（装了 game-story 插件才有这个能力）。
-    上下文口径照 codemode_start：recent_window + 在飞正文；task 原样回显进聊天。"""
+    引擎按 STORY_ENGINE 分流（PLAN_sdk S1/PR7）：sdk=agent-sdk 常驻 loop（默认），
+    tmux=旧路回退。app 侧 game-story 三件套两条路通用，一行不改。"""
     verify_auth(x_auth)
     _require_game()
+    if config.STORY_ENGINE != "tmux":
+        return _game_story_start_sdk(inp)
+    return _game_story_start_tmux(inp)
+
+
+def _game_story_start_tmux(inp: GameStoryStartIn):
+    """旧路（tmux+交互式 claude）。上下文口径照 codemode_start：recent_window +
+    在飞正文；task 原样回显进聊天。新路跑稳两周后整段退役。"""
     if code_bridge.session_alive():
         return {"ok": False, "error": "已经有一个会话开着（code 或游戏），先收摊再切"}
     cfg = _game_session_mcp_config()
@@ -2176,6 +2224,127 @@ def game_story_start(inp: GameStoryStartIn,
     return r
 
 
+# ---------- 剧情会话 SDK 路（PLAN_sdk S1/PR7）----------
+
+_GAME_CTX_CAVEAT_SDK = (
+    "\n【关于刚才聊天里说过的游戏内容】凡是关于游戏进度/剧情/界面的具体说法，都是你在"
+    "聊天里**看不到画面、翻不了笔记本**的情况下说的，当没核实过的印象就行。以你现在"
+    "翻到的剧情本和屏幕上真实的画面为准，对不上就以眼前的为准。\n")
+
+
+def _deliver_game_segment(cid: str):
+    """SDK loop 的回传闭包：一段正文 → outbox（app 轮询上屏）+ recent_window（醒来
+    可见）+ 轮尾 Bark。语义与 /code/append 一致，但进程内单写者不需要去重锁。
+    cid 钉在闭包里不现读全局（串台六条）。"""
+    def deliver(text: str, stop: bool) -> None:
+        try:
+            body = _fence_code_if_needed((text or "").strip())
+            if not body:
+                return
+            state_store.outbox_append({"id": uuid.uuid4().hex[:12], "ts": int(time.time()),
+                                       "text": body, "sticker_ids": [], "delivered": False,
+                                       "char_id": cid, "origin": "game"})
+            _code_window_append("assistant", body, char_id=cid)
+            if stop:
+                now = time.time()
+                if now - _code_bark_state.get("last", 0) > CODE_BARK_GAP_SEC:
+                    _code_bark_state["last"] = now
+                    title = characters.display_name(cid)
+                    threading.Thread(target=bark_push, args=(body,),
+                                     kwargs={"title": title}, daemon=True).start()
+        except Exception as e:
+            logerr(f"game loop 回传失败: {e}")
+    return deliver
+
+
+def _game_loop_closed(handle) -> None:
+    """loop 收摊的清场（任何退出路径都走这儿）：还模拟器使用权 + 补攒着的醒来。"""
+    game_bridge.release_lock("story")
+    try:
+        cohabit_queue.code_session_closed()
+    except Exception as e:
+        logerr(f"game loop 收摊补醒失败: {e}")
+    if (handle.stop_reason or "").startswith("engine-error"):
+        bark_push("游戏会话引擎挂了，已收摊（游戏画面原地不动，可以重新 game_start）")
+
+
+def _game_watch_policy(cid: str) -> session_mgr.WatchPolicy:
+    """看守三件事里的两件（idle 收摊 / 等回话提醒）；软提醒退役——滚动重开替掉了它。"""
+    return session_mgr.WatchPolicy(
+        idle_stop_sec=GAME_IDLE_STOP_SEC, wait_nudge_sec=GAME_WAIT_NUDGE_SEC,
+        on_idle_stop=lambda h: bark_push("游戏会话 20 分钟没动静，替 TA 收摊了"),
+        on_wait_nudge=lambda h: bark_push(
+            f"{characters.display_name(cid)} 在游戏会话里停着等你回话"))
+
+
+def _game_story_start_sdk(inp: GameStoryStartIn):
+    """SDK 路起剧情会话。与 tmux 路的两点不同：①进场景铸造（§4 规则一）——聊天
+    尾轮从「注入引文」变成 transcript 里他自己的记忆，开场注入只剩场景说明；
+    ②生命周期归 session_mgr（看守内建、独占组防双开）。"""
+    if code_bridge.session_alive():
+        return {"ok": False, "error": "已经有一个会话开着（code 或游戏），先收摊再切"}
+    if not os.path.isdir(code_bridge.GAME_CWD):
+        return {"ok": False, "error":
+                f"游戏会话的工作目录不存在：{code_bridge.GAME_CWD}——mkdir 之后先手动"
+                "在里面跑一次 claude 把「信任此文件夹」按掉"}
+    holder = game_bridge.acquire_lock("story")
+    if holder:
+        return {"ok": False, "error": "任务引擎正在用模拟器跑日常，等它跑完再玩（task_status 可看进度）"}
+    task = (inp.task or "").strip()
+    cid = plugins.owner_of("tmux")   # 会话归属口径同 tmux 路（见那边的注释）
+    window = state_store.read_recent_window(cid)
+    msgs = [{"role": w.get("role"), "text": (w.get("text") or ""),
+             "ts": w.get("ts") or int(time.time())}
+            for w in window
+            if w.get("role") in ("user", "assistant") and (w.get("text") or "").strip()]
+    live = pipeline.strip_markers(state_store.get_live_reply()).strip()
+    if live:
+        msgs.append({"role": "assistant", "text": live, "ts": int(time.time())})
+    forged_sid = None
+    if msgs:
+        try:
+            forged_sid = forge.render(forge.tail_window(msgs), cwd=code_bridge.GAME_CWD)
+        except Exception as e:
+            logerr(f"进场景铸造失败（这次退回无历史开场）: {e}")
+    u = config.user_name()
+    scene = (f"【场景】刚才在聊天里说好了你去玩游戏，你自己调 game_start 切过来了——还是你，"
+             "现在这个会话里你手上有模拟器里的游戏（game_* 工具 + 你的记忆；没有电脑，"
+             f"跑不了命令，Read 只用来看 {u} 发来的图）。这个会话是常驻的：{u}随时会插话，"
+             "你说的每段话都实时回到 TA 的聊天气泡里。")
+    tail = (f"\n【这次去干什么】\n〔现在是 {pipeline.now_str()}〕\n{task}\n"
+            f"〔这段是你在聊天里自己说的打算，已经原样回显给{u}了，说歪了 TA 会来纠正。〕"
+            if task else
+            f"\n〔现在是 {pipeline.now_str()}〕先 game_notes_read 翻翻剧情本看看上次到哪了，"
+            "想看什么自己挑。")
+    context = scene + _GAME_CTX_CAVEAT_SDK + tail
+    deliver = _deliver_game_segment(cid)
+
+    async def runner(handle):
+        opts = game_loop.build_options(cid, handle)
+        if forged_sid:
+            opts.resume = forged_sid
+        await game_loop.run(handle, context_text=context, deliver=deliver,
+                            options=opts, on_closed=_game_loop_closed, user_name=u)
+
+    r = session_mgr.start(cid, game_loop.SCENE, runner,
+                          exclusive_group=game_loop.EXCLUSIVE_GROUP,
+                          watch=_game_watch_policy(cid))
+    if isinstance(r, dict):
+        game_bridge.release_lock("story")
+        return r
+    logerr(f"切游戏剧情会话(SDK)：{task[:80] if task else '(自己安排)'}")
+    if task:
+        echo = f"〔去玩游戏了，说好的是〕\n\n{task}"
+        try:
+            state_store.outbox_append({"id": uuid.uuid4().hex[:12], "ts": int(time.time()),
+                                       "text": echo, "sticker_ids": [], "delivered": False,
+                                       "char_id": cid, "origin": "game"})
+            _code_window_append("assistant", echo, char_id=cid)
+        except Exception as e:
+            logerr(f"game task 回显失败: {e}")
+    return {"ok": True, "session": "sdk", "cwd": code_bridge.GAME_CWD}
+
+
 # 剧情会话看守（只对 game 档案）：画面 20 分钟没变自动收摊；TA 停着等人 5 分钟 Bark
 # 提醒一次；每玩 90 分钟往会话里递一句提醒。哈希包含机主发进去的消息——「没变」= 两边
 # 都没动。code 档案绝不适用这套：写代码停下来常常是在等回话，按「没动静」杀会毁活。
@@ -2190,6 +2359,8 @@ async def _game_watchdog() -> None:
     while True:
         try:
             await asyncio.sleep(60)
+            if code_bridge.sdk_loop_handle() is not None:
+                continue   # SDK loop 看守内建（session_mgr），这个刮屏看守只管 tmux 旧路
             if code_bridge.active_profile() != "game" or not code_bridge.session_alive():
                 if game_bridge.lock_owner() == "story":
                     game_bridge.release_lock("story")   # 会话没了别让锁悬着

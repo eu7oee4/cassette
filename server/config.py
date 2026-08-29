@@ -97,6 +97,10 @@ BACKEND_URL = os.environ.get("CASSETTE_BACKEND_URL", "http://127.0.0.1:8000").rs
 # 开通步骤见 README 的 Game mode 一节。没开时 /game/* 一律 503，插件工具有声报错。
 GAME_MODE_ENABLED = os.environ.get("GAME_MODE_ENABLED", "0") == "1"
 
+# 剧情会话引擎（PLAN_sdk S1/PR7）：sdk=agent-sdk 常驻 loop（默认）；tmux=旧路回退。
+# 新路跑稳两周后 tmux 路和 game-story 插件的会话侧 MCP 一起退役。
+STORY_ENGINE = (os.environ.get("STORY_ENGINE", "sdk").strip() or "sdk")
+
 # 可选：Bark 推送（断连补投/主动消息时通知手机；不配则静默跳过）
 BARK_URL = os.environ.get("BARK_URL", "").strip()
 BARK_ICON = os.environ.get("BARK_ICON", "").strip()   # 通知图标（公网可访问的图片 URL），空=Bark 默认

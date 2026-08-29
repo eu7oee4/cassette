@@ -98,7 +98,22 @@ def _write_session_state(d: dict) -> None:
     _write_atomic(SESSION_STATE_PATH, json.dumps(d, ensure_ascii=False, indent=2))
 
 
+def sdk_loop_handle():
+    """SDK 常驻 loop（PLAN_sdk S1）也算「电脑上的会话」。判据统一在本模块出口——
+    wake 避让 / cohabit 在场 / app 对齐 / codemode「会话占用中」全都只问 code_bridge，
+    在这儿接一次比在四个消费方各接一遍稳（漏一个就是 08-29 测试基线那类延迟炸弹）。
+    活着返回 handle，没有返回 None。"""
+    try:
+        import session_mgr
+        return session_mgr.group_alive("computer")
+    except Exception:
+        return None
+
+
 def active_profile() -> str:
+    h = sdk_loop_handle()
+    if h is not None:
+        return h.scene if h.scene in PROFILES else "code"
     p = _read_session_state().get("profile")
     return p if p in PROFILES else "code"
 
@@ -107,7 +122,11 @@ def session_char() -> str:
     """这次会话起的时候记下的归属角色（没记过返回空串，调用方自己退回资源归属）。
 
     落盘而不是现算：会话开着的时候把 tmux 资源转给别人，剩下半截话就会掉进另一个人的
-    会话里——一轮对话被劈成两半，两边都看不懂。起会话那一刻钉死，收摊为止都不变。"""
+    会话里——一轮对话被劈成两半，两边都看不懂。起会话那一刻钉死，收摊为止都不变。
+    SDK loop 的归属钉在 handle 上，语义相同。"""
+    h = sdk_loop_handle()
+    if h is not None:
+        return h.char_id
     return (_read_session_state().get("char_id") or "").strip()
 
 
@@ -118,6 +137,9 @@ def _session() -> str:
 
 
 def session_started_at() -> int:
+    h = sdk_loop_handle()
+    if h is not None:
+        return int(h.started_at)
     return int(_read_session_state().get("started_at") or 0)
 
 
@@ -168,7 +190,9 @@ def session_alive() -> bool:
     只判 has-session 不够：claude 崩了/退了会留一个空 shell 的 tmux 会话，那样切入会被
     「会话占用中」永久挡住，send 还会把消息糊到 shell 提示符上。判据用"pane 的 shell 还
     有没有子进程"——比 pane_current_command 稳（claude 跑 Bash 工具时前台命令名会变，
-    子进程一直在）。"""
+    子进程一直在）。SDK loop 活着也算（见 sdk_loop_handle）。"""
+    if sdk_loop_handle() is not None:
+        return True
     if _tmux("has-session", "-t", _session()).returncode != 0:
         return False
     r = _tmux("list-panes", "-t", _session(), "-F", "#{pane_pid}")

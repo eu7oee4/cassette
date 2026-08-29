@@ -478,6 +478,15 @@
 - **PR7 接口切换 + 退役**：`/game/story/start` 改起 loop task；`/code/*` 排的
   game profile 分支改指 loop 等价操作（app 侧 game-story 三件套一行不改）；
   env `STORY_ENGINE=sdk|tmux` 保回退。
+  ✅ 08-29 完工（PR4-7 全部落码，含 PR6 的进场景铸造挪到这里的 start 路径）：
+  `config.STORY_ENGINE`（默认 sdk）；**门面收口**——`code_bridge.sdk_loop_handle()`
+  让 session_alive/active_profile/session_char/started_at 四判据先问 SDK loop，
+  wake 避让/cohabit 在场/codemode 占用检查零改动全接上；`/code/send`→队列注入、
+  `/code/stop`→session_mgr.stop（清场归 on_closed 单点）、`/code/capture`→最近
+  对话文字渲染（无终端画面，真机验收后定要不要事件流页）、`/code/keys`→有声拒；
+  `/code/start` 见 SDK loop 活着直接 409（tmux 杀旧杀不到 loop，放行=双开）；
+  tmux 刮屏看守对 SDK loop 让位。单测 +3（门面三态），全量 272 全绿。
+  **未重启后端；S1 收尾只剩真机验收清单（本节末）。**
 - **S1 验收**：真机整读一章，延迟跨 N 张恒定；他能说出是哪段聊天把他送来的
   （进场景铸造生效）；急停/互斥/看守/Bark 全过；`STORY_ENGINE=tmux` 一键回老路。
 
