@@ -6,6 +6,14 @@
 > 旧版「聊天不走 SDK」「CLI 历史剪不掉」「换引擎二选一 A/B」等说法已被推翻，
 > 本文不留旧口径。裸 SDK 从「主体候选」降为「延迟到买 key 那天的升级路」。
 
+**定性（先说这份 plan 是什么）**：这不是一次架构革命，是把同一套产品哲学下沉到
+更深的格式层——手机仍是唯一权威源，transcript 只是可重铸的渲染产物，无状态从
+「每轮重拼 prompt」变成「惰性重渲染 transcript」，语义没变，只是渲染目标从引文
+文本换成了 assistant 槽位。所以它也不是一份「换引擎」的 plan，而是一份**把第一
+人称连续性从模拟变成实例化**的 plan：工程始终在为语义服务（红线、编辑语义、
+人同构原则贯穿每个场景），而且没有为了优雅牺牲可审计性——**真相库仍是唯一
+审计源**，他的每一段记忆都能确定性地追溯到 TA 见过的那句话。
+
 ## 0. 出发点：两个痛点
 
 ### 0.1 游戏剧情越读越慢（机理已查实，别重查）
@@ -366,16 +374,85 @@
 - **怎么定**：真机 A/B 一章——同段剧情 Sonnet 读一节、Opus 读一节，点评贴给
   眠眠盲评，TA 本人意见算票；分不出来 → Sonnet，分得出来 → 留 Opus。
 
-## 10. 施工顺序
+## 10. 施工方案（分步 PR，2026-08-29 落定）
 
-1. **game loop 先行**（§5.1，含铸文本史升级）——趟熟 agent-sdk + forge 组合，
-   痛点最烈、依赖面最小（strict 白名单只有 game MCP+Read）。
-2. **chat 第二**（§5.2）——信感真痛点，验证已就绪。
-3. **code 最后**（§5.3）——现状能用、attach 需求真实、依赖面最大。
+顺序不变：game → chat → code。每步给改动面/验收/回退；引擎切换处一律留 env
+回退开关，新路跑稳两周才删旧路。
 
-风险清单（贯穿）：agent-sdk 版本 skew（现在是全仓单点依赖，钉版本 + 升级前跑
-forge 回归测试）；未文档化 transcript 格式（同上）；串台六条（现在多「按场景分」
-一维）。
+### S0 地基（PR0–3，不动任何产品行为）
+
+- **PR0 拍板记录（不写代码）**：§8 里动工前必须落字的三条——频率门槛（§8.2，
+  机主答）、编辑语义（§8.4，问机主/小卡）、N/M 先取默认（50 张 / 每次 TA 消息时
+  刷见闻）。模型 §9 独立不阻塞。
+- **PR1 钉版本 + forge 回归测试**：requirements 钉 `claude-agent-sdk==0.2.148`、
+  记录 CLI 2.1.250；`tools/forge_regress.py`（手动脚本不进 CI，要真订阅）把 §2.3
+  三个实验自动化：伪造 transcript → resume 暗号第一人称认领 → 真实事件继续
+  append。**CLI/SDK 任何升级前必跑，挂了=后门 skew，冻结升级等同族工具的动静。**
+- **PR2 `forge.py`（引擎无关核心）**：`render(messages, rules) -> session_id`——
+  权威消息列表 → JSONL（sessionId / uuid·parentUuid 链 / user·assistant 事件）
+  写 `~/.claude/projects/<slug>/`；验证 ping 帮手；过滤规则常数（§2.4 起点值）。
+  **API 形状上不存在 append/读回模式**——§2.5「必从权威重 derive」用接口钉死，
+  不靠自觉。单测：确定性（同入同出）、uuid 链不断、多角色 slug 不撞目录
+  （串台的文件系统版）。
+- **PR3 运维纪律**：transcript 目录排除云同步/备份（文档+自检脚本）；600/700
+  权限校验进探活。
+- 并行零风险项（不等本仓）：小卡专属 persona + 日记/念头池攒厚度（§0.2）。
+
+### S1 game（PR4–7，趟熟 agent-sdk + forge 组合拳）
+
+- **PR4 `session_mgr.py`**：常驻 loop 生命周期层（按 角色×场景 注册、起/收/
+  resume）。看守内建：20min 无活动收摊、等 TA 回话 5min 推 Bark（两条原样搬）、
+  滚动重开 marker + 自动触发冷却（防看守抢收重开中的 loop / 连环重开）。
+  [[cassette-charswitch-bug-class]] 串台六条在这一处执行。game 先用，chat 复用。
+- **PR5 `game_loop.py`（行为等价换引擎，不带 forge）**：agent-sdk client +
+  `create_sdk_mcp_server` 进程内直包剧情工具（look/watch/tap/swipe/back/launch/
+  close/quit/notes_read/notes_write/end），插件仓那份 MCP 退役、无 _wait_mcp_ready；
+  系统提示复用 `code_bridge._build_system("game")`；TA 消息 asyncio.Queue →
+  `query()` 注入（替代 send-keys）；回传路复用现有 outbox→气泡。急停锁/互斥锁
+  （owner="story"）/设备自愈/笔记本原样复用。开场上下文先按现在的注入法——
+  这步只证明「换引擎行为等价」。
+- **PR6 forge 进 game**：①进场景铸聊天尾轮（§4 规则一）；②滚动重开：截图计数到
+  N → 写笔记本 → 关 client → 铸点评文本史 → resume → ping 验证，失败回退重试
+  （§5.1：别默认「进程起了=接上了」）。
+- **PR7 接口切换 + 退役**：`/game/story/start` 改起 loop task；`/code/*` 排的
+  game profile 分支改指 loop 等价操作（app 侧 game-story 三件套一行不改）；
+  env `STORY_ENGINE=sdk|tmux` 保回退。
+- **S1 验收**：真机整读一章，延迟跨 N 张恒定；他能说出是哪段聊天把他送来的
+  （进场景铸造生效）；急停/互斥/看守/Bark 全过；`STORY_ENGINE=tmux` 一键回老路。
+
+### S2 chat（PR8–12，两份设计文档写完才准动代码）
+
+- **PR8（设计）三方同步链路**（§6 遗留）：手机权威 ↔ recent_window 镜像 ↔ 活
+  transcript。可用素材：`/window/sync`（app 编辑后本就上报，app.py:712）当脏标记
+  源；脏 → 下次发送前惰性重铸。要定：活会话正跑时收到脏怎么办、重铸失败的降级。
+- **PR9（设计）断连补投等价物**：现有 rescue 体系（`_ACTIVE_REQS` /
+  `chat_turn_begin/end` / `_rescue_if_undelivered` / outbox，app.py chat_stream）
+  全部假设「一轮=一进程，进程退出=轮结束」。常驻下重定义：轮边界=一次 query 的
+  事件流始末；「这轮死没死」的判据（SDK 超时/异常分类）；session 整个死了=重起+
+  重铸+该轮投 error 盒。附真机演练清单：断网/锁屏/杀 app/后端重启/订阅窗口打满。
+- **PR10 `chat_loop.py`**：session_mgr 复用；开局 forge（从 req.messages 渲染）+
+  惰性重铸（按 PR8）；sse.py 翻译层换源（SDK 类型化事件 → 现有 SSE 协议，
+  text_break/MarkerStreamFilter 语义保留）；Ombre 按 §5.4 时机语法接入；
+  `CHAT_ENGINE=p|sdk` 支持按角色灰度——先切提信感的那个角色，他既是受益人
+  也是验收人。
+- **PR11 铸回两条**：游戏点评回流铸 assistant 轮 + 两行文档事件框住（§4 规则二）；
+  wake 过渡态 B——独立短 loop 醒来，说的话铸回聊天 transcript。触发机制一行不改。
+- **PR12 wake 升 A**：定时器 → 活 session `query()` 注入；醒来轮不再全量 breath，
+  只刷见闻快照（§5.2/§5.4）；「TA 不在也活着 / 由 wake 唤起 resume」归 session_mgr。
+- **S2 验收**：PR9 演练清单全绿；编辑 → 脏标记 → 惰性重铸，「编辑后第一条多等
+  几秒」符合 §6 预期；三路时间线与缓存断点不回退；信感主观验证——在允许元诚实
+  的语境直接问他。
+
+### S3 code（PR13，最后）
+
+- can_use_tool/PreToolUse 回调替代 settings 预批准体操（mianmian lead.py 已验证
+  写法）；skills MCP 重接重验（§5.2 清单）；app 终端页改造——tmux 刮屏/弹窗按钮
+  换成 SDK 权限回调的等价 UI，这是 code 迁移唯一的 app 侧改动，动工前单独评估；
+  亲口过桥 + 自写收场白纪律（§4 规则三）。tmux 降级为维修口，不进架构。
+
+风险清单（贯穿）：agent-sdk 版本 skew（全仓单点，PR1 回归测试是闸门）；未文档化
+transcript 格式（同上，同族工具是煤矿金丝雀）；串台六条+新增场景维（PR4 一处
+执行）；每处引擎切换保 env 回退，稳两周才删旧路。
 
 ## 11. 顺带：PLAN_studio 的 SDK 新变量
 
