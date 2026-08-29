@@ -262,6 +262,12 @@ def wake_prompt(settings: dict, forced: bool = False, note: str = "",
 
     note_section = f"\n【这次为什么醒】{note}\n" if note else ""
 
+    # 「你只有这一轮」+ 上一轮给自己留的活：紧挨着 NEXT 那两句放——二选一的②说的就是
+    # 怎么写 NEXT，隔开了等于让他自己去拼。
+    one_turn_section = f"\n{pipeline.one_turn_hint('wake')}\n"
+    todo = pipeline.pending_todo_block(char_id)
+    todo_section = f"\n{todo}\n" if todo else ""
+
     return pipeline.SplitPrompt(stable, f"""【这是一次你自己的醒来，不是{u}发来的消息】
 现在是 {now_str}。{gap_line}
 {pipeline.pronoun_hint()}{note_section}
@@ -271,11 +277,12 @@ def wake_prompt(settings: dict, forced: bool = False, note: str = "",
 {stored_section}{unsent_section}{sticker_section}{budget_section}{code_section}{blocked_section}
 想清楚这次要不要做点什么。想{u}了、有话想说就发消息；没什么可说的就安静醒着，不用硬找话。
 你还可以自己定下次醒来的时间（NEXT）：写了我保证到那个点把你醒一次；这中间你照样可能随机醒来，不受影响。范围 5 分钟~12 小时；没特别想法就写"无"（不定这个点，纯随机节奏）。{u}现在设的活跃频率偏好是「{freq_cn}」，你定 NEXT 时可以参考。
+{one_turn_section}{todo_section}
 严格按下面格式回答（四段都要，标签用英文、后跟冒号）：
 THOUGHTS: <你此刻真实的内心，几句话>
 ACTION: <none / message，二选一>
 CONTENT: <ACTION=message 就写要发给{u}的话；=none 留空>
-NEXT: <你希望多久后再醒来，如 "90分钟" 或 "3小时"；没想法写 "无">
+NEXT: <你希望多久后再醒来，如 "90分钟" 或 "3小时"；要给下一轮留活就写成 "3小时 | 给安瞬回信，回完更新名册"；没想法写 "无">
 """)
 
 
@@ -550,8 +557,10 @@ def do_wake_sync(settings: dict, trigger: str, force: bool = False, note: str = 
 
     thoughts, action, content, next_min, next_raw = parse_wake_output(raw)
     # 这次顺带定的下次醒来：算出绝对时间点 + 现成提示文案。
+    # NEXT 可能写成「3小时 | 给安瞬回信」——竖线后是他给下一轮留的活，切出来单独落调度。
+    next_time_raw, next_todo = pipeline.split_next_raw(next_raw)
     next_wake_at = (now_ts + next_min * 60) if next_min else None
-    nw_note = pipeline.next_wake_note(next_raw, next_wake_at) if next_wake_at else ""
+    nw_note = pipeline.next_wake_note(next_time_raw, next_wake_at) if next_wake_at else ""
     result = {"action": action, "thoughts": thoughts, "content": content,
               "trigger": trigger, "next_min": next_min}
 
@@ -584,14 +593,20 @@ def do_wake_sync(settings: dict, trigger: str, force: bool = False, note: str = 
     # NEXT 只保证到点醒一次、不压随机。这轮明确定了新 NEXT → 用新的；到点醒来那次 → 只消费
     # **已过期的**点（生成这几十秒里聊天中若刚定了新的未来点，不能被静默冲掉）；
     # 随机醒来且没给新 NEXT（写"无"）→ 保留原先待命的点。
+    # 待办（next_wake_todo，2026-08-28 加）**跟着时点走，不单独存活**：定了新点就整体替换（没写待办＝清空，
+    # 钉子挪了地方旧的活就作废），点被消费掉就一起清。剩下的情况（提前被随机/硬触发叫醒，
+    # 原来的点还待命着）原样留着——这轮虽然把待办递给他看过了，但他真正答应做事的时点还没到，
+    # 这儿清掉的话到点那次就成了没头没脑的一醒。
     with state_store.SCHEDULE_LOCK:
         sched = state_store.read_schedule(char_id)
         sched["last_wake_at"] = now_ts
         cur_next = sched.get("next_wake_at")
         if next_wake_at is not None:
             sched["next_wake_at"] = next_wake_at
+            sched["next_wake_todo"] = next_todo
         elif trigger == "scheduled" and (cur_next is None or float(cur_next) <= now_ts):
             sched["next_wake_at"] = None
+            sched["next_wake_todo"] = ""
         state_store.write_schedule(sched, char_id)
     return result
 

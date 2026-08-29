@@ -421,6 +421,21 @@ class TestExecute(CohabitBase):
         sched = state_store.read_schedule(self.cid)
         self.assertAlmostEqual(sched["next_wake_at"], before + 90 * 60, delta=5)
 
+    def test_next_todo_lands_and_comes_back_next_round(self):
+        # NEXT 可以带「下一轮要做什么」（时间 | 待办），落 schedule、下一轮注入里递回去
+        self.wake_once(out("none", nxt="90分钟 | 给安瞬回信"))
+        self.assertEqual(state_store.read_schedule(self.cid)["next_wake_todo"], "给安瞬回信")
+        self.wake_once(out("none"))
+        self.assertIn("给安瞬回信", self.prompts[-1])
+        self.assertIn("你只有这一轮", self.prompts[-1])
+
+    def test_next_todo_not_in_wake_note(self):
+        # 灰字/日志里只有时间：待办是他给自己留的话，不往用户那边漏
+        self.wake_once(out("phone", phone="睡了", nxt="90分钟 | 给安瞬回信"))
+        note = self.log_entries()[-1]["next_wake_note"]
+        self.assertIn("90分钟", note)
+        self.assertNotIn("安瞬", note)
+
     def test_act_while_away_is_logged_not_written(self):
         world.move(self.cid, world.AWAY)
         r = self.wake_once(out("act", say="喊给谁听呢"))

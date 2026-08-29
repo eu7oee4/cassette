@@ -177,6 +177,11 @@ def cohabit_prompt(cid: str, reasons: list[dict], settings: dict) -> str:
     pnames = "、".join(pets.display_name(p) for p in pets.ids())
     carry_pets = f"抱{pnames}不用先问，同屋直接写名字就行。" if pnames else ""
 
+    # 「你只有这一轮」+ 上一轮留的活：口径和聊天/wake 那两条路同一份来源（pipeline）。
+    one_turn_section = f"\n{pipeline.one_turn_hint('wake')}\n"
+    _todo = pipeline.pending_todo_block(cid)
+    todo_section = f"\n{_todo}\n" if _todo else ""
+
     return pipeline.SplitPrompt(stable, f"""【这是一次你自己的醒来，不是{u}发来的消息】
 现在是 {pipeline.now_str()}。
 {pipeline.pronoun_hint()}
@@ -193,6 +198,7 @@ def cohabit_prompt(cid: str, reasons: list[dict], settings: dict) -> str:
 {reason_lines or '- （无特别原因，就是醒了）'}
 
 想清楚这轮要不要做点什么：在房间里动作/说话（act）、给{u}的手机发消息（phone）、挪个地方（MOVE）、或者什么都不做（none）。没话可说就安静待着，不用硬找话。
+{one_turn_section}{todo_section}
 严格按下面格式回答（每个标签一行开头，英文+冒号，全部都要写，用不上的留空）：
 THOUGHTS: <你此刻真实的内心，几句话>
 ACTION: <none / act / phone，三选一。act=在你所在的房间里表达；phone=给{u}手机发消息，人在哪都行；一轮只能选一样>
@@ -201,7 +207,7 @@ STATE: <ACTION=act 时顺手改这里的地点状态，每行一条、最多 {wo
 PHONE: <ACTION=phone 时发给{u}的消息>
 MOVE: <想去哪就写上面清单里的房间 id；id 后可空格接一句进场的样子，如 "living_room 打着哈欠晃进来"；不动写 "无"。移动发生在这一轮的最后，走完下一轮会告诉你结果>
 CARRY: <配合 MOVE：想抱着{u}一起走就写「{u}」（前提是{u}此刻和你同屋）。抱人要{u}愿意：写了这项，这轮的 MOVE 不会立刻发生——先问{u}，答应了才一起过去；答应、拒绝还是没反应，之后都会告诉你。{carry_pets}不带人写 "无">
-NEXT: <你希望多久后再自主醒来，如 "90分钟" 或 "3小时"；没想法写 "无">
+NEXT: <你希望多久后再自主醒来，如 "90分钟" 或 "3小时"；要给下一轮留活就写成 "3小时 | 回信，回完更新名册"；没想法写 "无">
 """)
 
 
@@ -303,10 +309,14 @@ def parse_cohabit_output(text: str) -> dict:
     if carry_raw in ("无", "none", ""):
         carry_raw = ""
 
+    # NEXT 可能写成「3小时 | 回信」：竖线后是给下一轮留的活，切开各走各的
+    # （next_raw 只留时间部分——它要进 next_wake_note 那句灰字，待办不往那边漏）。
     next_min = pipeline.parse_next_minutes(s["NEXT"])
+    next_head, next_todo = pipeline.split_next_raw(s["NEXT"].strip())
     return {"thoughts": s["THOUGHTS"], "action": action, "motion": motion, "say": say,
             "state_ops": state_ops, "phone": phone, "move": move, "move_motion": move_motion,
-            "carry_raw": carry_raw, "next_min": next_min, "next_raw": s["NEXT"].strip()}
+            "carry_raw": carry_raw, "next_min": next_min, "next_raw": next_head,
+            "next_todo": next_todo}
 
 
 # ---------- 执行 ----------
@@ -436,15 +446,18 @@ def _cohabit_wake_body(cid: str, reasons: list[dict], _chain_no: int,
         state_store.append_wake_log(entry, char_id=cid)
 
     # ② NEXT 落调度（口径同 do_wake_sync：明确定了新点用新的；scheduled 触发只消费已过期的点）
+    #    待办跟着时点走，不单独存活——理由见 wake.do_wake_sync 同一处的注释。
     with state_store.SCHEDULE_LOCK:
         sched = state_store.read_schedule(cid)
         sched["last_wake_at"] = now_ts
         cur_next = sched.get("next_wake_at")
         if next_wake_at is not None:
             sched["next_wake_at"] = next_wake_at
+            sched["next_wake_todo"] = p["next_todo"]
         elif any(r.get("kind") == "scheduled" for r in reasons) \
                 and (cur_next is None or float(cur_next) <= now_ts):
             sched["next_wake_at"] = None
+            sched["next_wake_todo"] = ""
         state_store.write_schedule(sched, cid)
 
     # ③ move（末位执行）+ 结果补醒：成功/失败同一条路，只是原因文本不同。

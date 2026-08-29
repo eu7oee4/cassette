@@ -224,8 +224,11 @@ def _clear_next_wakes() -> None:
     for cid in characters.ids():
         with state_store.SCHEDULE_LOCK:
             sched = state_store.read_schedule(cid)
-            if sched.get("next_wake_at"):
+            if sched.get("next_wake_at") or sched.get("next_wake_todo"):
                 sched.pop("next_wake_at", None)
+                # 待办跟着钉子一起撤：钉子没了还留着活，解冻后第一次醒来就会拿到
+                # 一件"上一轮答应过"、而中间整段没有记忆的事，只会更像失约。
+                sched.pop("next_wake_todo", None)
                 state_store.write_schedule(sched, cid)
 
 

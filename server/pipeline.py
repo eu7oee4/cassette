@@ -241,6 +241,20 @@ NEXT_MAX_MIN = 720   # 上限 12 小时
 
 _CHAT_NEXT_RE = re.compile(r"\[\[\s*(?:next[_\- ]?wake|下次醒来)\s*[:：]\s*(.*?)\]\]", re.I)
 
+# NEXT 里的待办：时间和「下一轮要做什么」用竖线隔开（[[next_wake:1小时|给安瞬回信]]）。
+# 全角｜一起收——中文输入法下打出全角是常态，不收的话整段会被当成时间去解析。
+_NEXT_TODO_SEP = re.compile(r"\s*[|｜]\s*")
+NEXT_TODO_MAX = 200   # 待办存进 schedule 的长度上限（防模型把整段计划塞进来）
+
+
+def split_next_raw(raw: str) -> tuple[str, str]:
+    """把 NEXT/[[next_wake]] 的原话切成 (时间部分, 待办)。没写待办 → 待办是空串。
+    只切第一个竖线：待办正文里再出现竖线是它自己的事。"""
+    if not raw:
+        return "", ""
+    parts = _NEXT_TODO_SEP.split(raw.strip(), maxsplit=1)
+    return parts[0].strip(), (parts[1].strip()[:NEXT_TODO_MAX] if len(parts) > 1 else "")
+
 
 def pronoun_hint() -> str:
     """人称代词提示（聊天/醒来共用注入）：不给的话模型会自己猜用户性别，猜错很伤。"""
@@ -249,13 +263,18 @@ def pronoun_hint() -> str:
 
 def _chat_next_hint() -> str:
     # 函数不是模块级常量：名字用户随时可改，import 时冻结就换不动了。
+    # 口径必须和 one_turn_hint('chat') 对得上：那条规矩的②就是靠这个标记落地的，
+    # 两处说法不一样，模型会照着更近的那条写。
     return (f"【可选：如果{config.user_name()}提到要离开/回来/睡觉之类，你可以顺手安排下次主动醒来——"
-            "在回复里写 [[next_wake:3小时]]（范围 5 分钟~12 小时，会被剥掉、对方看不到）。没必要就别写。】")
+            "在回复里写 [[next_wake:3小时]]（范围 5 分钟~12 小时，会被剥掉、对方看不到）；"
+            "要给下一轮留活就写 [[next_wake:3小时|下一轮要做什么]]。没必要就别写。】")
 
 
 def parse_next_minutes(section: str) -> Optional[int]:
-    """把「90分钟」「3小时」这类字样解析成分钟数，夹在 [5, 720]。'无'/空/解析不出 → None。"""
-    s = section.strip()
+    """把「90分钟」「3小时」这类字样解析成分钟数，夹在 [5, 720]。'无'/空/解析不出 → None。
+    ⚠️ 先把待办切掉再解析——「无 | 读第 2 封信」这种写法里，兜底的"有数字就当分钟"
+    会去咬待办里的数字，把"不定点"读成"2 分钟后醒"。所有调用方都靠这一句挡着。"""
+    s = split_next_raw(section)[0]
     if not s or s in ("无", "None", "none", "-"):
         return None
     m = re.search(r"(\d+(?:\.\d+)?)\s*(小时|时|h|hour|hr)", s, re.I)
@@ -269,27 +288,75 @@ def parse_next_minutes(section: str) -> Optional[int]:
     return max(NEXT_MIN_MIN, min(NEXT_MAX_MIN, int(round(mins))))
 
 
-def parse_chat_next(reply: str) -> tuple[str, Optional[int], Optional[str]]:
-    """从聊天回复里解析并剥掉 [[next_wake:X]]，返回 (清理后文本, 分钟或None, 原话或None)。取最后一个有效值。"""
-    found: list = []   # [(分钟, 原话)]
+def parse_chat_next(reply: str) -> tuple[str, Optional[int], Optional[str], str]:
+    """从聊天回复里解析并剥掉 [[next_wake:X|待办]]，返回
+    (清理后文本, 分钟或None, 时间原话或None, 待办)。取最后一个有效值。
+    待办只跟着有效时间走：没解析出时间的标记整条作废，待办也跟着丢——
+    留一个没有兑现时点的待办，等于永远注入、永远清不掉。"""
+    found: list = []   # [(分钟, 时间原话, 待办)]
 
     def on_match(m):
         raw = m.group(1).strip()
         mins = parse_next_minutes(raw)
         if mins is not None:
-            found.append((mins, raw))
+            head, todo = split_next_raw(raw)
+            found.append((mins, head, todo))
         return ""
 
     reply = _CHAT_NEXT_RE.sub(on_match, reply)
     if found:
-        mins, raw = found[-1]
-        return reply.strip(), mins, raw
-    return reply.strip(), None, None
+        mins, head, todo = found[-1]
+        return reply.strip(), mins, head, todo
+    return reply.strip(), None, None, ""
 
 
 def next_wake_note(raw: str, at: int) -> str:
-    """定了下次醒来的提示文案：原话(相对) + 夹取后的绝对时间点。聊天灰字用。"""
+    """定了下次醒来的提示文案：原话(相对) + 夹取后的绝对时间点。聊天灰字用。
+    只放时间部分——待办是他给自己留的话，不往用户那边灰字里漏。"""
     return f"已定下次醒来：{raw}（{fmt_ts(at)}）"
+
+
+# ---------- 「你只有这一轮」 ----------
+# 一次性子进程的硬事实：正文吐完进程就退，没有"说完之后"。模型不知道这件事，于是会写
+# 「我现在就去回信」「名册我一并更新」——这些话在它这儿全是空头，用户却当承诺听。
+# 实锤（2026-08-28 21:49）：同一条回复里，开口前做的（读完十封信、搭出名册网页）都成了，
+# 放到开口后的（回信、更新名册）一件没做，且既没 hold 记忆也没定 next_wake——
+# 意图只以正文形式活在 recent_window 里，没有任何执行钩子。
+# 所以规矩是二选一，不是提醒："先做后说" 或 "钉到下一轮"，两个都不选就别说出口。
+# 复盘全文（含归类、规避规则、清除口径三种情形）在主仓 PLAN_oneturn.md。
+# ⚠️ 这段被淹掉就等于没有：它排在 prompt 尾巴上是有意的，别挪回 extras（见 build_prompt）。
+def one_turn_hint(kind: str = "chat") -> str:
+    """聊天/醒来共用同一条规矩，只有②的写法按各自的定点方式分叉。
+    kind='chat' → [[next_wake:…]] 标记；'wake' → 输出格式里的 NEXT 段。"""
+    if kind == "wake":
+        how = ("在 NEXT 那段写成「时间 | 下一轮要做什么」，例：\n"
+               "   NEXT: 1小时 | 给安瞬回信，回完更新名册")
+    else:
+        how = ("在回复里写 [[next_wake:时间|下一轮要做什么]]（会被剥掉、对方看不到），例：\n"
+               "   [[next_wake:1小时|给安瞬回信，回完更新名册]]")
+    return ("【你只有这一轮。这段回复发出去，你这个进程就结束了——没有「说完之后」。"
+            "所以「我现在就去X」「我这就去X」「X我一并做了」这类话在你这儿不成立：说了也没有那个之后，"
+            f"而{config.user_name()}会当成承诺来等。\n"
+            "要提一件还没做的事，二选一：\n"
+            "① 这一轮里就做掉，做完了再开口——工具都在你手上，回复里报结果，别报打算；\n"
+            f"② 这一轮做不完、或者现在不该做 → 钉到下一轮：{how}\n"
+            "   竖线后面那句会原样存下来，到点醒来时递回给你，所以写清楚做什么，别写「继续」。"
+            "没有时间就没有钉子——②必须带时间。\n"
+            "两个都不选，就别把这件事说出口。】")
+
+
+def pending_todo_block(char_id: Optional[str] = None) -> str:
+    """上一轮给自己留的活（[[next_wake:…|待办]] 存进 schedule 的那句）。没有则空串。
+    读盘失败一律当没有：这是个提醒块，为它把一轮聊天/醒来搞崩不值。"""
+    try:
+        todo = (state_store.read_schedule(char_id).get("next_wake_todo") or "").strip()
+    except Exception:
+        todo = ""
+    if not todo:
+        return ""
+    return (f"【你上一轮给自己留了活：「{todo}」\n"
+            "现在就是那个「下一轮」。要么这一轮里做掉，要么重新钉一次（写清还剩什么没做）；"
+            "不想做了就明说一句，别默默留着——留着它下一轮还会再递给你。】")
 
 
 # 聊天回复附带的移动（同居世界 C2）：[[move:房间id]]。英文 token 为主（§4 口径），
@@ -398,8 +465,17 @@ def build_prompt(messages: list[Message], catalog: Optional[list[dict]] = None,
     if sb:
         extras += ["", sb]
 
+    # 「你只有这一轮」和上一轮留的活排在**尾巴上**，不进 extras：extras 在整段最前面，
+    # 长对话一堆时间线压下来就淹了，而这条恰恰是被淹掉才出事的那条（见 one_turn_hint 的
+    # 复盘）。放在时间感之前——时间感仍然贴着新消息，那句注释的口径不动。
+    tail_rules = [one_turn_hint("chat")]
+    pending = pending_todo_block(char_id)
+    if pending:
+        tail_rules.append(pending)
+
     if not history:
-        return SplitPrompt(stable, "\n".join(extras + [""] + time_lines + ["", last.text]))
+        return SplitPrompt(stable, "\n".join(extras + [""] + tail_rules + [""]
+                                             + time_lines + ["", last.text]))
 
     lines = extras + [""]
     # 合并时间线：历史对话 + 醒来内心 + 小屋经历流（同居开着时），按时间排。
@@ -422,6 +498,8 @@ def build_prompt(messages: list[Message], catalog: Optional[list[dict]] = None,
         for m in history:
             who = config.user_name() if m.role == "user" else "你"
             lines.append(f"{who}：{m.text}")
+    lines.append("")
+    lines.extend(tail_rules)
     lines.append("")
     lines.extend(time_lines)   # 时间感贴着新消息，别被上面的长对话淹掉
     lines.append("")

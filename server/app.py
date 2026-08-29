@@ -397,16 +397,19 @@ def finalize_chat_reply(reply: str, stored: list[dict], req: ChatRequest,
     reply, sticker_sends, desc_updates = pipeline.parse_sticker_markers(reply, handle_to_id)
 
     # 聊天里他若安排了下次主动醒来 → 更新 schedule（只动 next_wake_at）+ 回灰字提示。
-    reply, next_min, next_raw = pipeline.parse_chat_next(reply)
+    reply, next_min, next_raw, next_todo = pipeline.parse_chat_next(reply)
     next_wake_hint = None
     if next_min is not None:
         at = int(time.time()) + next_min * 60
         with state_store.SCHEDULE_LOCK:
             sched = state_store.read_schedule(char_id)
             sched["next_wake_at"] = at
+            # 待办跟着时点整体替换（没写就是清空）：钉子换了地方，旧的那句活就作废了。
+            sched["next_wake_todo"] = next_todo
             state_store.write_schedule(sched, char_id)
         next_wake_hint = pipeline.next_wake_note(next_raw, at)
-        logerr(f"聊天里定了下次醒来：{next_raw} → {pipeline.fmt_ts(at)}")
+        logerr(f"聊天里定了下次醒来：{next_raw} → {pipeline.fmt_ts(at)}"
+               + (f"｜留的活：{next_todo}" if next_todo else "｜没留活"))
 
     # 同居世界：回复附带的 [[move:X]]（轮末执行，结果补醒入队；开关关着 = 剥掉当没写）。
     reply, move_target = pipeline.parse_chat_move(reply)
