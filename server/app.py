@@ -52,6 +52,7 @@ import code_bridge
 import cohabit
 import cohabit_queue
 import config
+import forge
 import game_bridge
 import jobhunt_store
 import mail_bridge
@@ -160,6 +161,21 @@ def _mail_watcher() -> None:
         time.sleep(min(gaps) if gaps else mail_bridge.poll_sec())
 
 
+# forge 运维自检结果（PLAN_sdk S0/PR3）：启动时后台跑一次，/health 只报干不干净，
+# 细节走 logerr——/health 不带鉴权，问题里的文件路径别往外递。
+_FORGE_OPS: list[str] = []
+
+
+def _forge_ops_probe() -> None:
+    global _FORGE_OPS
+    try:
+        _FORGE_OPS = forge.ops_check()
+        if _FORGE_OPS:
+            logerr("forge 运维自检不过（forge.py --fix 修）：" + "；".join(_FORGE_OPS))
+    except Exception as e:
+        logerr(f"forge 运维自检跑不动: {e}")
+
+
 @asynccontextmanager
 async def _lifespan(_app: FastAPI):
     """启动 wake 调度器（on_event 已被 FastAPI 弃用，用 lifespan）。"""
@@ -183,6 +199,7 @@ async def _lifespan(_app: FastAPI):
     threading.Thread(target=_browser_keeper_watchdog, daemon=True,
                      name="browser-keeper-watchdog").start()
     threading.Thread(target=_mail_watcher, daemon=True, name="mail-watcher").start()
+    threading.Thread(target=_forge_ops_probe, daemon=True, name="forge-ops-probe").start()
     yield
     for t in tasks:
         t.cancel()
@@ -525,7 +542,7 @@ def finalize_chat_reply(reply: str, stored: list[dict], req: ChatRequest,
 # ---------- 路由 ----------
 @app.get("/health")
 def health():
-    return {"ok": True}
+    return {"ok": True, "forge_ops_ok": not _FORGE_OPS}
 
 
 @app.get("/characters")

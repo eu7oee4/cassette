@@ -410,6 +410,11 @@
   10 单测全绿。slug 规则实测=非字母数字全转 `-`（含 `.` `_`）。
 - **PR3 运维纪律**：transcript 目录排除云同步/备份（文档+自检脚本）；600/700
   权限校验进探活。
+  ✅ 08-29 完工：`forge.ops_check()`（同步盘字样/TM 排除/600·700 三查，
+  `forge.py --fix` 顺手修）；app.py 启动后台跑一次、/health 挂 `forge_ops_ok`
+  （细节走 logerr，不带鉴权的探活不往外递路径）。真环境已 fix：TM 已排除
+  `~/.claude/projects`（此前是 Included！）、18 个松权限路径已收紧。iCloud 只管
+  Desktop/Documents，`~/.claude` 不在辖区（实测）。
 - 并行零风险项（不等本仓）：小卡专属 persona + 日记/念头池攒厚度（§0.2）。
 
 ### S1 game（PR4–7，趟熟 agent-sdk + forge 组合拳）

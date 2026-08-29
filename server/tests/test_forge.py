@@ -99,6 +99,26 @@ class ForgeTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             forge.assert_no_slug_collision(["/a/b_c", "/a/b-c"])
 
+    def test_ops_check(self):
+        """PR3 运维自检：权限松了要报、fix 能收紧、干净时零问题。TM 那条不进单测。"""
+        sid, path = self._render()
+        pdir = path.parent
+        self.assertEqual(forge.ops_check(root=self.root, check_tm=False), [])
+        pdir.chmod(0o755)
+        path.chmod(0o644)
+        probs = forge.ops_check(root=self.root, check_tm=False)
+        self.assertEqual(len(probs), 1)
+        self.assertIn("2 个路径", probs[0])
+        forge.ops_check(root=self.root, check_tm=False, fix=True)
+        self.assertEqual(forge.ops_check(root=self.root, check_tm=False), [])
+        self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+
+    def test_ops_check_sync_marker(self):
+        bad = self.root / "Dropbox" / "projects"
+        bad.mkdir(parents=True)
+        probs = forge.ops_check(root=bad, check_tm=False)
+        self.assertTrue(any("同步盘" in p for p in probs))
+
     def test_tail_window(self):
         msgs = []
         for i in range(10):

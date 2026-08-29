@@ -20,7 +20,9 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
+import sys
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -190,6 +192,64 @@ def render(messages: list[dict], *, cwd, session_id: Optional[str] = None,
     return session_id
 
 
+# ---------- 运维自检（PLAN_sdk S0/PR3：§2.5 三条纪律的机器化） ----------
+
+# 路径里见到这些字样 = transcript 躺在云同步盘里，陈旧副本盖回会把篡改当真历史
+# 继承（§2.5 风险③，自愈立断）
+_SYNC_MARKERS = ("Mobile Documents", "CloudStorage", "Dropbox", "Google Drive", "OneDrive")
+
+
+def ops_check(root: Optional[Path] = None, fix: bool = False,
+              check_tm: bool = True) -> list[str]:
+    """返回问题清单（空=健康）。查三样：① transcript 目录不在云同步盘里；
+    ② Time Machine 已排除（备份回滚=陈旧盖回的另一条路）；③ 权限 600/700
+    （组/其他一个位都不该有）。fix=True 顺手修能修的（tmutil addexclusion +
+    chmod 收紧）；探活走只读模式，修理用 `python forge.py --fix` 手动跑。"""
+    problems: list[str] = []
+    root = root or PROJECTS_ROOT
+    if not root.exists():
+        return problems
+    real = str(root.resolve())
+    for m in _SYNC_MARKERS:
+        if m in real:
+            problems.append(f"transcript 目录在同步盘里（路径含「{m}」）：{real}")
+    if check_tm and sys.platform == "darwin" and shutil.which("tmutil"):
+        def _excluded() -> bool:
+            r = subprocess.run(["tmutil", "isexcluded", str(root)],
+                               capture_output=True, text=True, timeout=15)
+            return "[Excluded]" in r.stdout
+        try:
+            if not _excluded():
+                if fix:
+                    subprocess.run(["tmutil", "addexclusion", str(root)],
+                                   capture_output=True, timeout=15)
+                if not (fix and _excluded()):
+                    problems.append("Time Machine 没排除 transcript 目录"
+                                    "（server/.venv/bin/python forge.py --fix）")
+        except Exception:
+            pass   # tmutil 抽风不算 transcript 有病，别把探活搞红
+    loose: list[Path] = []
+    dirs = [root] + [d for d in root.iterdir() if d.is_dir()]
+    for d in dirs:
+        if d.stat().st_mode & 0o077:
+            if fix:
+                os.chmod(d, d.stat().st_mode & ~0o077)
+            else:
+                loose.append(d)
+    for d in dirs[1:]:
+        for f in d.glob("*.jsonl"):
+            if f.stat().st_mode & 0o077:
+                if fix:
+                    os.chmod(f, f.stat().st_mode & ~0o077)
+                else:
+                    loose.append(f)
+    if loose:
+        heads = ", ".join(str(p) for p in loose[:3])
+        problems.append(f"{len(loose)} 个路径组/其他可读（600/700 纪律）：{heads}"
+                        + ("…" if len(loose) > 3 else ""))
+    return problems
+
+
 # ---------- resume 帮手（真机验证 / 滚动重开 ping 用） ----------
 
 def resume_once(session_id: str, cwd, prompt: str, *, timeout: int = 180,
@@ -203,3 +263,13 @@ def resume_once(session_id: str, cwd, prompt: str, *, timeout: int = 180,
     if p.returncode != 0:
         raise RuntimeError(f"claude resume 失败 rc={p.returncode}: {p.stderr[-500:]}")
     return json.loads(p.stdout).get("result", "")
+
+
+if __name__ == "__main__":
+    _fix = "--fix" in sys.argv
+    _probs = ops_check(fix=_fix)
+    for _p in _probs:
+        print("❌ " + _p)
+    print("✅ 运维自检干净" if not _probs else
+          ("（--fix 已尽力，剩下的要手动）" if _fix else "（跑 forge.py --fix 修）"))
+    sys.exit(1 if _probs else 0)
