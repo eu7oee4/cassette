@@ -57,6 +57,54 @@ REOPEN_SHOTS_N = int(os.environ.get("GAME_REOPEN_SHOTS", "50") or "50")
 REOPEN_COOLDOWN_SEC = 5 * 60      # 防连环重开（刚重开完 shots 计数已清，双保险）
 REOPEN_NOTE_TIMEOUT = 300         # 等他写完笔记本的上限
 REOPEN_PING_TIMEOUT = 120         # 新会话 ping 的上限
+# 稳定性断言（§5.1 taste 轮：降级为断言不承重）：重铸前隔一秒两帧比对，没定格就
+# 多攒几张下个边界再铸；连推两次还不稳就不再等（断言不许把重铸卡死）。
+REOPEN_DEFER_SHOTS = 5
+REOPEN_MAX_DEFERS = 2
+
+# game_tick 短轮节奏（§5.1 taste 轮）：max_turns 掐短每轮 agentic 循环，轮结束
+# 自动续弹——队列非空先喂队列（TA 插话/wake 触发），空才补 tick。插入延迟从
+# 「当前轮剩余时长（无硬顶）」缩到一个短轮。max_turns 设在正常链条极少触到的
+# 位置（章节入口 look→tap→watch 链最长）；语义在持续 client 下未真机验证
+# （§5.2 重验清单），触顶=轮被截断收掉，下一 tick 接着来，不致命。
+GAME_MAX_TURNS = int(os.environ.get("GAME_TICK_MAX_TURNS", "8") or "8")
+TICK_PAUSE_SEC = float(os.environ.get("GAME_TICK_PAUSE", "2") or "2")
+# tick 注入极简（含义在系统提示里一次性写死，别每轮念指令）。不是 TA 的话、
+# 不是系统指令，重铸时也绝不进 log——它谁都没见过。
+TICK_PROMPT = "·"
+
+# 轮节奏骨架（游戏无关的运行前提，附加进 _build_system("game") 之后；
+# 游戏相关的机制事实在小抄里：DEFAULT_TIPS + 机主/TA 自己的修正）
+TICK_SYSTEM = """
+
+【剧情会话的轮节奏（运行机制，先读懂再玩）】
+这个会话按「短轮」走：每轮做一小步，说完就停——停不是结束，画面留在原地等你，
+轮会自己续上。你会收到一个「·」：那不是任何人说话，当作你自己回过神来、目光落回
+屏幕。{user}和世界的消息随时可能插进来代替「·」，插进来就先回应人。
+
+- 常态轮：**double tap 起手**（点位照小抄）→ 看返回截图：完整文字 → 直接点评这句，
+  收轮；画面在动/半截字 → game_watch 等到终态再点评，收轮。
+- 首轮、导航轮（菜单里找路、没有上一轮点评可依赖）：look 起手，看清再动。
+- watch 的终态只有两种：**完整文字** → 点评收轮；**章节目录** → 结算轮——先
+  game_chapter_write 把这一场写成章节志、game_progress_write 更新进度，再决定
+  读下一章还是 game_end。
+- look 到非预期画面（弹窗/异常/不认识的界面）：停手，看清楚再动，拿不准问{user}。
+- 每轮只做自己这一步，说完就停，别在一轮里连读半章——节奏是你的朋友。
+"""
+
+# 小抄出厂条目（《如鸢》机制事实，起会话时空白才播种；机主/TA 之后随便改）
+DEFAULT_TIPS = """【出厂小抄·机制事实（可改可补，以实测为准）】
+- 对话推进：double tap 点屏幕上方边缘（专测过：只触发全屏推进，不会误触按钮）；wait_ms=500。
+- 打字机判据：连拍里连续两张对话框文案一字不差=这句打完了（背景动画永远在动，只看文字）。
+- 进章节时序：tap 入口 → 短暂黑屏 → UI 过渡 → 打字机开始。黑屏别当卡死，等一拍。
+- 章节末：CG/结算播完会自动回章节目录——看到目录=这一场读完了，走结算轮。
+"""
+
+
+def ensure_default_tips() -> None:
+    """小抄空白时播种出厂条目（一次性；机主写过任何东西就绝不碰）。"""
+    if not game_bridge.story_tips_read().strip():
+        game_bridge.story_tips_write(DEFAULT_TIPS)
 REOPEN_NOTE_PROMPT = (
     "〔系统提醒，不是{user}说的〕历史里攒的截图开始拖慢每一步了，马上给你做一次"
     "无缝重开：你的点评原文都会带过去，只丢掉旧截图，重开完画面原地接着读。"
@@ -124,6 +172,22 @@ def _shot_bytes():
         return jpg
     except Exception as e:
         return f"error: 截屏失败: {e}"
+
+
+def _screen_stable() -> bool:
+    """重铸前的稳定性断言（§5.1：从门控降级为断言，不承重）：隔一秒两帧字节
+    相同=画面定格。拍不到/出错一律当稳定——断言不许把重铸卡死。"""
+    try:
+        a = _shot_bytes()
+        if not isinstance(a, bytes):
+            return True
+        time.sleep(1.0)
+        b = _shot_bytes()
+        if not isinstance(b, bytes):
+            return True
+        return a == b
+    except Exception:
+        return True
 
 
 def _text(s: str) -> dict:
@@ -408,9 +472,10 @@ def build_options(char_id: str, handle: session_mgr.LoopHandle) -> ClaudeAgentOp
     # Read 白名单同 app.GAME_SESSION_TOOLS：看机主随消息发的图，只有上传目录免审
     tool_names.append("Read")
     allowed.append(f"Read(/{code_bridge.UPLOAD_DIR}/**)")
+    system = (code_bridge._build_system("game", char_id=char_id)
+              + TICK_SYSTEM.replace("{user}", config.user_name()))
     return ClaudeAgentOptions(
-        system_prompt={"type": "preset", "preset": "claude_code",
-                       "append": code_bridge._build_system("game", char_id=char_id)},
+        system_prompt={"type": "preset", "preset": "claude_code", "append": system},
         model=config.MODEL,
         cwd=code_bridge.GAME_CWD,
         mcp_servers=servers,
@@ -418,6 +483,7 @@ def build_options(char_id: str, handle: session_mgr.LoopHandle) -> ClaudeAgentOp
         tools=tool_names,
         allowed_tools=allowed,
         add_dirs=[str(code_bridge.UPLOAD_DIR)],
+        max_turns=GAME_MAX_TURNS,
     )
 
 
@@ -484,18 +550,25 @@ async def run(handle: session_mgr.LoopHandle, *,
               on_closed: Optional[Callable[[session_mgr.LoopHandle], None]] = None,
               reopen_shots: Optional[int] = None,
               user_name: str = "机主") -> None:
-    """loop 本体（session_mgr 的 runner）。
+    """loop 本体（session_mgr 的 runner），game_tick 单泵节奏（§5.1 taste 轮）：
 
-    deliver(text, stop)：一段正文回气泡；stop=True 表示这一轮说完了（Bark 判据，
-    口径同 code_segments hook 的 code-seg/code-stop）。分段语义照抄 hook：工具
-    调用之间说的话逐段发、每轮最后一段标 stop——实现上「压一段再发」：新正文/
-    工具调用到来时把压着的上一段发出去（seg），轮结束时把压着的发出去（stop）。
+    每轮收完（ResultMessage）→ 队列非空先喂队列（TA 插话/wake 触发），空则停
+    TICK_PAUSE 再补一个极简 tick——轮短弹密，TA 插入延迟=一个短轮。没有自由
+    sender：TA 中途的消息攒在队列里轮尾进（延迟有硬顶，语义已在 plan 认过）。
+    看守的 nudge/idle 对 game 随 tick 退役（轮一直来，不存在干等/idle）。
 
-    文本史 log：TA 见过的所有内容按时间序攒着（注入的 user 消息 + 上屏的 assistant
-    段落），滚动重开时整个铸成新 transcript——红线内（全是 TA 见过的原文），
-    截图/工具往返不进去（那正是要丢的东西）。
+    deliver(text, stop)：一段正文回气泡；stop=True 表示这一轮说完了。分段语义照
+    抄 code_segments hook：工具调用之间说的话逐段发、轮尾一段标 stop——实现上
+    「压一段再发」。tick 下轮尾常态化，Bark 判据不再挂 stop（app 侧已摘）。
 
-    收摊路径：①game_end 工具置旗，本轮结束后退出；②session_mgr 看守/路由 cancel；
+    文本史 log：TA 见过的所有内容按时间序攒着（注入的 user 消息 + 上屏的
+    assistant 段落），滚动重开时整个铸成新 transcript——红线内（全是 TA 见过的
+    原文）；截图/工具往返/tick 注入都不进去（tick 谁都没见过，绝不能铸）。
+
+    滚动重开前加稳定性断言（_screen_stable，两帧比对）：没定格就多攒
+    REOPEN_DEFER_SHOTS 张下个边界再试，连推 REOPEN_MAX_DEFERS 次后不再等。
+
+    收摊路径：①game_end 工具置旗，本轮结束后退出；②路由/session_mgr cancel；
     ③引擎挂了/重开失败。全部走 finally 断连+回调 on_closed。
     """
     factory = client_factory or ClaudeSDKClient
@@ -506,25 +579,33 @@ async def run(handle: session_mgr.LoopHandle, *,
         log.append({"role": "assistant", "text": text, "ts": int(time.time())})
         deliver(text, stop)
 
+    async def _feed_next(client) -> None:
+        """轮尾的下一口粮：队列优先；空则停一拍再看一眼（TA 恰好这两秒说话就别
+        浪费一轮 tick），还空才补 tick。"""
+        nxt: Optional[str] = None
+        try:
+            nxt = handle.queue.get_nowait()
+        except asyncio.QueueEmpty:
+            if TICK_PAUSE_SEC > 0:
+                await asyncio.sleep(TICK_PAUSE_SEC)
+            try:
+                nxt = handle.queue.get_nowait()
+            except asyncio.QueueEmpty:
+                nxt = None
+        if nxt is not None:
+            handle.touch()
+            log.append({"role": "user", "text": nxt, "ts": int(time.time())})
+            await client.query(nxt)
+        else:
+            await client.query(TICK_PROMPT)   # tick 不进 log：谁都没见过的注入
+
     client = factory(options)
-    sender: Optional[asyncio.Task] = None
-
-    def _start_sender() -> asyncio.Task:
-        async def _sender() -> None:
-            while True:
-                text = await handle.queue.get()
-                handle.touch()
-                log.append({"role": "user", "text": text, "ts": int(time.time())})
-                await client.query(text)
-        return asyncio.create_task(_sender())
-
     try:
         await client.connect()
         handle.touch()
         await client.query(context_text)
-        sender = _start_sender()
 
-        while True:                                   # client 世代循环
+        while True:                                   # tick 泵 × client 世代
             r = await _drain_turn(client, handle, _deliver_and_log, timeout=3600)
             if r == "eof":
                 raise RuntimeError("引擎消息流断了")
@@ -532,49 +613,48 @@ async def run(handle: session_mgr.LoopHandle, *,
                 continue                              # 一小时没收完轮：接着等，不算死
             if handle.meta.get("end_requested"):
                 return
+            # ---- 滚动重开（边界=轮尾；稳定性断言不承重）----
             shots = int(handle.meta.get("shots", 0))
-            due = (shots >= n_reopen
+            defers = int(handle.meta.get("reopen_defers", 0))
+            due = (shots >= n_reopen + defers * REOPEN_DEFER_SHOTS
                    and time.time() - handle.last_reopen > REOPEN_COOLDOWN_SEC)
-            if not due:
-                if handle.queue.empty():
-                    handle.wait_user()
-                continue
-
-            # ---- 滚动重开（marker 打上，看守停手）----
-            handle.reopening = True
-            sender.cancel()                           # 重开中 TA 消息攒在队列里
-            sender = None
-            try:
-                # ① 巩固钩子（§5.4 纪律：重铸前必须给一轮写笔记本/hold 的机会）
-                await client.query(REOPEN_NOTE_PROMPT.format(user=user_name))
-                await _drain_turn(client, handle, _deliver_and_log, REOPEN_NOTE_TIMEOUT)
-                # ② 关旧 → ③ 铸文本史 → ④ resume → ⑤ ping（失败重试一次）
+            if due and defers < REOPEN_MAX_DEFERS and not _screen_stable():
+                handle.meta["reopen_defers"] = defers + 1
+                print(f"[game_loop] 画面没定格，重铸推迟（第 {defers + 1} 次；"
+                      "节奏漂移的监测点）", file=sys.stderr)
+                due = False
+            if due:
+                handle.reopening = True               # marker：重开中别当 idle
                 try:
-                    await client.disconnect()
-                except BaseException:
-                    pass
-                try:
-                    client = await _forge_and_resume(factory, options, log,
-                                                     user_name, handle)
-                except Exception as e:
-                    print(f"[game_loop] 滚动重开首试失败，重试一次: {e}", file=sys.stderr)
-                    client = await _forge_and_resume(factory, options, log,
-                                                     user_name, handle)
-                handle.meta["shots"] = 0
-            finally:
-                handle.last_reopen = time.time()
-                handle.reopening = False
-            sender = _start_sender()
-            if handle.queue.empty():
-                handle.wait_user()
+                    # ① 巩固钩子（§5.4 纪律：重铸前给一轮更新进度页/hold 的机会）
+                    await client.query(REOPEN_NOTE_PROMPT.format(user=user_name))
+                    await _drain_turn(client, handle, _deliver_and_log,
+                                      REOPEN_NOTE_TIMEOUT)
+                    # ② 关旧 → ③ 铸文本史 → ④ resume → ⑤ ping（失败重试一次）
+                    try:
+                        await client.disconnect()
+                    except BaseException:
+                        pass
+                    try:
+                        client = await _forge_and_resume(factory, options, log,
+                                                         user_name, handle)
+                    except Exception as e:
+                        print(f"[game_loop] 滚动重开首试失败，重试一次: {e}",
+                              file=sys.stderr)
+                        client = await _forge_and_resume(factory, options, log,
+                                                         user_name, handle)
+                    handle.meta["shots"] = 0
+                    handle.meta["reopen_defers"] = 0
+                finally:
+                    handle.last_reopen = time.time()
+                    handle.reopening = False
+            await _feed_next(client)
     except asyncio.CancelledError:
-        pass                      # 看守收摊 / 路由 stop：走 finally 清场
+        pass                      # 路由 stop / mgr cancel：走 finally 清场
     except Exception as e:
         print(f"[game_loop] 引擎异常收摊: {e}", file=sys.stderr)
         handle.stop_reason = handle.stop_reason or f"engine-error: {e}"
     finally:
-        if sender is not None:
-            sender.cancel()
         try:
             await client.disconnect()
         except BaseException:

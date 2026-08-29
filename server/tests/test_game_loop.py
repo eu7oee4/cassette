@@ -62,6 +62,10 @@ class GameLoopTest(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         sm.set_event_loop(asyncio.get_running_loop())
         sm._registry.clear()
+        self._pause_orig = game_loop.TICK_PAUSE_SEC
+        self._stable_orig = game_loop._screen_stable
+        game_loop.TICK_PAUSE_SEC = 0            # 测试不等 tick 停顿
+        game_loop._screen_stable = lambda: True  # 别在单测里打 adb
         self.handle = sm.LoopHandle(char_id="cass", scene="game")
         self.delivered: list[tuple[str, bool]] = []
         self.closed: list = []
@@ -81,12 +85,14 @@ class GameLoopTest(unittest.IsolatedAsyncioTestCase):
         self.delivered.append((text, stop))
 
     async def asyncTearDown(self):
+        game_loop.TICK_PAUSE_SEC = self._pause_orig
+        game_loop._screen_stable = self._stable_orig
         if not self.task.done():
             self.task.cancel()
             await asyncio.sleep(0.01)
 
-    async def test_opening_context_and_segments(self):
-        """开场上下文进 query；工具间正文=seg、每轮最后一段=stop（hook 同款语义）。"""
+    async def test_opening_segments_then_tick(self):
+        """开场进 query；工具间正文=seg、轮尾=stop；轮尾队列空 → 自动补 tick。"""
         self.assertEqual(self.client.queries, ["〔开场〕"])
         self.client.feed(
             _asst(TextBlock(text="先看一眼画面"),
@@ -104,13 +110,17 @@ class GameLoopTest(unittest.IsolatedAsyncioTestCase):
             ("接着读下一段", False),
             ("今天读到这儿", True),
         ])
-        self.assertIsNotNone(self.handle.awaiting_user_since)   # 说完在等 TA
+        self.assertEqual(self.client.queries,
+                         ["〔开场〕", game_loop.TICK_PROMPT])   # 续弹
 
-    async def test_queue_injection(self):
+    async def test_queue_beats_tick(self):
+        """轮尾队列非空：TA 的话优先于 tick（插入延迟=一个短轮）。"""
         self.handle.queue.put_nowait("〔现在是 12:00〕\n继续吧")
+        self.client.feed(_asst(TextBlock(text="嗯")), _result())
         await asyncio.sleep(0.05)
-        self.assertEqual(self.client.queries, ["〔开场〕", "〔现在是 12:00〕\n继续吧"])
-        self.assertIsNone(self.handle.awaiting_user_since)      # 注入算动静
+        self.assertEqual(self.client.queries,
+                         ["〔开场〕", "〔现在是 12:00〕\n继续吧"])
+        self.assertNotIn(game_loop.TICK_PROMPT, self.client.queries)
 
     async def test_end_requested_closes_after_turn(self):
         self.handle.meta["end_requested"] = True                # game_end 工具置的旗
@@ -120,6 +130,7 @@ class GameLoopTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.delivered, [("收摊前道个别", True)])
         self.assertTrue(self.client.disconnected)
         self.assertEqual(self.closed, [self.handle])
+        self.assertNotIn(game_loop.TICK_PROMPT, self.client.queries)  # 收摊不再续弹
 
     async def test_cancel_cleans_up(self):
         self.task.cancel()
@@ -138,7 +149,8 @@ class GameLoopTest(unittest.IsolatedAsyncioTestCase):
 
 
 class ReopenTest(unittest.IsolatedAsyncioTestCase):
-    """滚动重开（PR6）：攒够截图 → 写笔记本 → 铸文本史 → 新 client resume → ping。"""
+    """滚动重开（PR6+tick）：攒够截图 → 稳定断言 → 写进度页 → 铸文本史 →
+    新 client resume → ping → 续弹。"""
 
     async def asyncSetUp(self):
         sm.set_event_loop(asyncio.get_running_loop())
@@ -147,6 +159,10 @@ class ReopenTest(unittest.IsolatedAsyncioTestCase):
         self.delivered: list[tuple[str, bool]] = []
         self.forged: list = []
         self._render_orig = game_loop.forge.render
+        self._pause_orig = game_loop.TICK_PAUSE_SEC
+        self._stable_orig = game_loop._screen_stable
+        game_loop.TICK_PAUSE_SEC = 0
+        game_loop._screen_stable = lambda: True
 
         def fake_render(messages, **kw):
             self.forged.append((list(messages), kw))
@@ -167,6 +183,8 @@ class ReopenTest(unittest.IsolatedAsyncioTestCase):
 
     async def asyncTearDown(self):
         game_loop.forge.render = self._render_orig
+        game_loop.TICK_PAUSE_SEC = self._pause_orig
+        game_loop._screen_stable = self._stable_orig
         if not self.task.done():
             self.task.cancel()
             await asyncio.sleep(0.01)
@@ -179,9 +197,9 @@ class ReopenTest(unittest.IsolatedAsyncioTestCase):
         # ① 巩固钩子：进度页提醒进了旧 client
         self.assertEqual(len(c1.queries), 2)
         self.assertIn("进度页", c1.queries[1])
-        c1.feed(_asst(TextBlock(text="记好了")), _result())   # 他写完笔记本
+        c1.feed(_asst(TextBlock(text="记好了")), _result())   # 他更新完进度页
         await asyncio.sleep(0.05)
-        # ② 铸文本史：user 开场 + 他说过的话，全是 TA 见过的原文
+        # ② 铸文本史：user 开场 + 他说过的话，全是 TA 见过的原文（tick 不在里面）
         self.assertEqual(len(self.forged), 1)
         msgs, kw = self.forged[0]
         self.assertEqual(kw.get("cwd"), "/tmp/game-cwd")
@@ -197,15 +215,40 @@ class ReopenTest(unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(0.05)
         self.assertFalse(self.handle.reopening)
         self.assertEqual(self.handle.meta["shots"], 0)
-        # ④ ping 的回话不上屏；笔记本轮的正文照常上屏
+        # ④ ping 的回话不上屏；进度页轮的正文照常上屏；ping 后续弹一个 tick
         texts = [t for t, _ in self.delivered]
         self.assertIn("记好了", texts)
         self.assertNotIn("好", texts)
-        # ⑤ 重开后 TA 的消息进的是新 client
+        self.assertEqual(c2.queries[1], game_loop.TICK_PROMPT)
+        # ⑤ 重开后 TA 的消息进的是新 client（tick 轮收完后轮到它）
         self.handle.queue.put_nowait("继续")
+        c2.feed(_asst(TextBlock(text="嗯")), _result())       # tick 轮收掉
         await asyncio.sleep(0.05)
         self.assertIn("继续", c2.queries)
         self.assertNotIn("继续", c1.queries)
+
+    async def test_reopen_deferred_until_stable(self):
+        """稳定性断言：没定格就推迟；连推 REOPEN_MAX_DEFERS 次后不再等。"""
+        game_loop._screen_stable = lambda: False           # 画面永远在动
+        defer_orig = game_loop.REOPEN_DEFER_SHOTS
+        game_loop.REOPEN_DEFER_SHOTS = 0                   # 阈值不抬，专测推迟计数
+        try:
+            c1 = self.clients[0]
+            self.handle.meta["shots"] = 2
+            c1.feed(_asst(TextBlock(text="一")), _result())    # 第 1 次：推迟
+            await asyncio.sleep(0.05)
+            self.assertEqual(self.handle.meta["reopen_defers"], 1)
+            self.assertEqual(self.forged, [])
+            c1.feed(_asst(TextBlock(text="二")), _result())    # 第 2 次：再推迟
+            await asyncio.sleep(0.05)
+            self.assertEqual(self.handle.meta["reopen_defers"], 2)
+            self.assertEqual(self.forged, [])
+            c1.feed(_asst(TextBlock(text="三")), _result())    # 第 3 次：不再等，重铸
+            await asyncio.sleep(0.05)
+            self.assertEqual(len(c1.queries) and len(self.clients), 1)  # 还在巩固轮
+            self.assertIn("进度页", c1.queries[-1])
+        finally:
+            game_loop.REOPEN_DEFER_SHOTS = defer_orig
 
     async def test_reopen_ping_fail_retries_then_dies(self):
         c1 = self.clients[0]
@@ -215,7 +258,7 @@ class ReopenTest(unittest.IsolatedAsyncioTestCase):
         try:
             c1.feed(_asst(TextBlock(text="读完了")), _result())
             await asyncio.sleep(0.02)
-            c1.feed(_result())                             # 笔记本轮直接结束
+            c1.feed(_result())                             # 巩固轮直接结束
             await asyncio.wait_for(self.task, 2)           # 首试+重试都失败 → 收摊
         except asyncio.TimeoutError:
             self.fail("重开失败后 loop 没退出")

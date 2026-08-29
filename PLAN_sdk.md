@@ -340,6 +340,15 @@
     失效；急停/崩溃强停本就无巩固，认了。
   - 施工：独立 loop 上就能做（改 `game_loop.run()` 续弹逻辑 + system prompt
     骨架 + 小抄条目），并入统一流（PR13）时机器原样搬。
+    ✅ 08-30 完工：run() 换单泵续弹（轮尾队列优先、空停 TICK_PAUSE=2s 再看一眼
+    才补 tick「·」，自由 sender 退役——TA 消息轮尾进，tick 绝不进 forge log）；
+    骨架 TICK_SYSTEM 附加进系统提示（含「·」语义一次性写死）；max_turns=8
+    （GAME_TICK_MAX_TURNS 可调）；小抄空白播种四条出厂机制事实
+    （ensure_default_tips，机主写过就不碰）；稳定性断言 _screen_stable（两帧
+    比对，推迟计数+REOPEN_MAX_DEFERS=2 封顶，拍不到当稳定不承重）；
+    _game_watch_policy 摘除（nudge/idle 对 game 退役）；game 轮尾 Bark 摘除
+    （tick 下轮尾常态化）。单测 9 个全绿（tick 续弹/队列优先/收摊不续弹/
+    重开后续弹/推迟计数封顶），全量 278 全绿。
 - 接口兼容：`/game/story/start` 改起 loop task（不再 kill/起 tmux）；game-story
   插件（聊天侧三件套）一行不改；急停锁/设备自愈/笔记本/模拟器互斥锁全复用。
 - **收摊自总结（08-29 拍板）**：game_end 纪律升级为——收摊前①把这一场的脉络+

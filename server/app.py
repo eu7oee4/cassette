@@ -2235,8 +2235,10 @@ _GAME_CTX_CAVEAT_SDK = (
 
 def _deliver_game_segment(cid: str):
     """SDK loop 的回传闭包：一段正文 → outbox（app 轮询上屏）+ recent_window（醒来
-    可见）+ 轮尾 Bark。语义与 /code/append 一致，但进程内单写者不需要去重锁。
-    cid 钉在闭包里不现读全局（串台六条）。"""
+    可见）。语义与 /code/append 一致，但进程内单写者不需要去重锁。
+    cid 钉在闭包里不现读全局（串台六条）。
+    轮尾不推 Bark（taste 轮）：game_tick 下轮尾每分钟都在发生，挂 stop 推送=每分钟
+    一条骚扰；「他停着等你」的产品点已随 tick 拍板退役，TA 从气泡里看得到他在说。"""
     def deliver(text: str, stop: bool) -> None:
         try:
             body = _fence_code_if_needed((text or "").strip())
@@ -2246,13 +2248,6 @@ def _deliver_game_segment(cid: str):
                                        "text": body, "sticker_ids": [], "delivered": False,
                                        "char_id": cid, "origin": "game"})
             _code_window_append("assistant", body, char_id=cid)
-            if stop:
-                now = time.time()
-                if now - _code_bark_state.get("last", 0) > CODE_BARK_GAP_SEC:
-                    _code_bark_state["last"] = now
-                    title = characters.display_name(cid)
-                    threading.Thread(target=bark_push, args=(body,),
-                                     kwargs={"title": title}, daemon=True).start()
         except Exception as e:
             logerr(f"game loop 回传失败: {e}")
     return deliver
@@ -2267,15 +2262,6 @@ def _game_loop_closed(handle) -> None:
         logerr(f"game loop 收摊补醒失败: {e}")
     if (handle.stop_reason or "").startswith("engine-error"):
         bark_push("游戏会话引擎挂了，已收摊（游戏画面原地不动，可以重新 game_start）")
-
-
-def _game_watch_policy(cid: str) -> session_mgr.WatchPolicy:
-    """看守三件事里的两件（idle 收摊 / 等回话提醒）；软提醒退役——滚动重开替掉了它。"""
-    return session_mgr.WatchPolicy(
-        idle_stop_sec=GAME_IDLE_STOP_SEC, wait_nudge_sec=GAME_WAIT_NUDGE_SEC,
-        on_idle_stop=lambda h: bark_push("游戏会话 20 分钟没动静，替 TA 收摊了"),
-        on_wait_nudge=lambda h: bark_push(
-            f"{characters.display_name(cid)} 在游戏会话里停着等你回话"))
 
 
 def _game_story_start_sdk(inp: GameStoryStartIn):
@@ -2327,9 +2313,11 @@ def _game_story_start_sdk(inp: GameStoryStartIn):
         await game_loop.run(handle, context_text=context, deliver=deliver,
                             options=opts, on_closed=_game_loop_closed, user_name=u)
 
+    game_loop.ensure_default_tips()   # 小抄空白才播种（出厂机制事实，机主可改）
+    # 看守不挂（taste 轮）：game_tick 下轮一直来，nudge/idle 两个概念对 game 消失；
+    # 「玩到停不下来」的背压只剩订阅额度窗口，拍板先不管。
     r = session_mgr.start(cid, game_loop.SCENE, runner,
-                          exclusive_group=game_loop.EXCLUSIVE_GROUP,
-                          watch=_game_watch_policy(cid))
+                          exclusive_group=game_loop.EXCLUSIVE_GROUP)
     if isinstance(r, dict):
         game_bridge.release_lock("story")
         return r
