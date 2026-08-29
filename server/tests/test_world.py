@@ -25,10 +25,14 @@ import world
 class WorldBase(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp(prefix="world_test_"))
-        self._orig = (world.ROOMS_DIR, world.REGISTRY_PATH, world.WORLD_PATH)
+        self._orig = (world.ROOMS_DIR, world.REGISTRY_PATH, world.WORLD_PATH,
+                      world.HOUSE_SETTINGS_PATH)
         world.ROOMS_DIR = self.tmp / "rooms"
         world.REGISTRY_PATH = world.ROOMS_DIR / "registry.json"
         world.WORLD_PATH = self.tmp / "world.json"
+        # 总开关也必须指临时区：漏掉它=读真 state 的 house_settings.json，机主把真
+        # 小屋闸拨关的那天整片 pet/world 用例齐挂（2026-08-29 实翻过车，别再漏）
+        world.HOUSE_SETTINGS_PATH = self.tmp / "house_settings.json"
         # 角色状态目录也指临时区：append_event 现在顺手写经历流（experience.jsonl），
         # 不改这个真 state 会被测试事件污染。
         import state_store
@@ -44,7 +48,8 @@ class WorldBase(unittest.TestCase):
 
     def tearDown(self):
         import state_store
-        world.ROOMS_DIR, world.REGISTRY_PATH, world.WORLD_PATH = self._orig
+        (world.ROOMS_DIR, world.REGISTRY_PATH, world.WORLD_PATH,
+         world.HOUSE_SETTINGS_PATH) = self._orig
         state_store.CHAR_STATE_ROOT = self._csr_orig
         pets.PETS_DIR = self._pets_orig
         shutil.rmtree(self.tmp, ignore_errors=True)
