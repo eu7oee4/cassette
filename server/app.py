@@ -2319,6 +2319,10 @@ def _deliver_game_segment(cid: str):
 def _game_loop_closed(handle) -> None:
     """loop 收摊的清场（任何退出路径都走这儿）：还模拟器使用权 + 补攒着的醒来。"""
     game_bridge.release_lock("story")
+    # 活动区间落账（PR11）：chat 重铸时给这一场回流的点评加文档框用。
+    import activity_log
+    activity_log.append_interval(handle.char_id, "game", handle.started_at,
+                                 note="《如鸢》剧情")
     try:
         cohabit_queue.code_session_closed()
     except Exception as e:

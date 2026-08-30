@@ -165,9 +165,11 @@ class ChatLoopTest(unittest.IsolatedAsyncioTestCase):
                                        f"sid-{len(self.forged)}")[1])
         chat_loop._note_usage = lambda *a: None
         chat_loop._persist_ledger = lambda *a: None
-        # 单测绝不读生产 wake_log/小屋、不探活 Ombre（tests-reading-prod-state 雷）
+        # 单测绝不读生产 wake_log/小屋/活动账、不探活 Ombre（tests-reading-prod-state 雷）
         chat_loop._seen_block = lambda cid, since: (None, since)
         chat_loop._ombre_on = lambda cid: False
+        self._frame_orig = chat_loop._frame_activities
+        chat_loop._frame_activities = lambda h, cid: h
 
         def factory(options):
             c = FakeClient(options)
@@ -189,6 +191,7 @@ class ChatLoopTest(unittest.IsolatedAsyncioTestCase):
         chat_loop._seen_block = self._seen_orig
         chat_loop._ombre_on = self._ombre_orig
         chat_loop.CHAT_HARD_TOKENS = self._hard_orig
+        chat_loop._frame_activities = self._frame_orig
         if not self.task.done():
             self.handle.stop_reason = "test-teardown"
             self.task.cancel()
@@ -395,6 +398,58 @@ class ChatLoopReforgeTest(ChatLoopTest):
             self.assertTrue(self.handle.meta.get("needs_opening"))
         finally:
             state_store.read_recent_window = rw_orig
+
+
+class ActivityFrameTest(unittest.TestCase):
+    """PR11：活动区间账 + 重铸时的两行文档框。"""
+
+    def setUp(self):
+        import activity_log
+        self.al = activity_log
+        self._path_orig = activity_log.PATH
+        import tempfile
+        self.tmp = tempfile.NamedTemporaryFile(suffix=".jsonl", delete=False)
+        self.tmp.close()
+        activity_log.PATH = Path(self.tmp.name)
+        self._read_orig = None
+
+    def tearDown(self):
+        self.al.PATH = self._path_orig
+        import os
+        os.unlink(self.tmp.name)
+
+    def test_append_and_read(self):
+        self.al.append_interval("cass", "game", 1000, 2000, note="《如鸢》剧情")
+        self.al.append_interval("default", "game", 1500, 2500, note="x")
+        got = self.al.read_intervals("cass")
+        self.assertEqual(len(got), 1)
+        self.assertEqual(got[0]["note"], "《如鸢》剧情")
+        # since_ts 过滤：结束在其前的不要
+        self.assertEqual(self.al.read_intervals("cass", since_ts=2000), [])
+
+    def test_frame_wraps_in_interval_run(self):
+        self.al.append_interval("cass", "game", 1500, 1800, note="《如鸢》剧情")
+        hist = [_m("user", "去读吧", 1400),
+                _m("assistant", "这句台词妙", 1600),
+                _m("user", "哈哈", 1650),          # TA 插话算经历一部分，留在框内
+                _m("assistant", "收摊了", 1790),
+                _m("user", "读完啦？", 1900)]
+        framed = chat_loop._frame_activities(hist, "cass")
+        texts = [m["text"] for m in framed]
+        self.assertEqual(len(framed), 7)
+        self.assertIn("你开了《如鸢》剧情会话", texts[1])
+        self.assertIn("收了摊", texts[5])
+        self.assertEqual(texts[0], "去读吧")
+        self.assertEqual(texts[6], "读完啦？")
+        # 确定性：同输入同字节
+        self.assertEqual(framed, chat_loop._frame_activities(hist, "cass"))
+
+    def test_no_interval_no_change(self):
+        hist = [_m("user", "a", 1000), _m("assistant", "b", 1100)]
+        self.assertEqual(chat_loop._frame_activities(hist, "cass"), hist)
+        # 区间存在但窗口内没有消息落进去 → 不插空框
+        self.al.append_interval("cass", "game", 5000, 6000)
+        self.assertEqual(chat_loop._frame_activities(hist, "cass"), hist)
 
 
 class ChatEngineConfigTest(unittest.TestCase):

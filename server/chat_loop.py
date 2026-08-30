@@ -316,6 +316,46 @@ def _persist_ledger(char_id: str, sid: Optional[str], ledger: list[dict]) -> Non
         print(f"[chat_loop] 账落盘失败: {e}", file=sys.stderr)
 
 
+# ---------- 活动框（§4 规则二：回流点评带上「你当时在读剧情」的框架）----------
+
+def _frame_activities(history: list[dict], char_id: str) -> list[dict]:
+    """给权威窗口里落在活动区间内的消息连段加两行文档框（user 槽感知式，
+    世界事件走文档侧，红线合法）。**只改铸造输入，不改已铸账**——账永远对
+    权威原文，框行是渲染层的选择（§4：折叠/带不带是渲染规则，字面不动）。
+    确定性：框行内容只由区间数据派生，同输入同字节。"""
+    if not history:
+        return history
+    import activity_log
+    intervals = activity_log.read_intervals(
+        char_id, since_ts=int(history[0].get("ts") or 0) - 60)
+    if not intervals:
+        return history
+
+    def _hm(ts: int) -> str:
+        return time.strftime("%H:%M", time.localtime(ts))
+
+    out: list[dict] = []
+    i, n = 0, len(history)
+    for iv in intervals:
+        s, e = int(iv["start"]), int(iv["end"])
+        note = iv.get("note") or "游戏"
+        while i < n and int(history[i].get("ts") or 0) < s:
+            out.append(history[i])
+            i += 1
+        j = i
+        while j < n and int(history[j].get("ts") or 0) <= e:
+            j += 1
+        if j > i:
+            out.append({"role": "user", "ts": s,
+                        "text": f"〔{_hm(s)} 你开了{note}会话，下面这些是你边读边说的〕"})
+            out.extend(history[i:j])
+            out.append({"role": "user", "ts": e,
+                        "text": f"〔{_hm(e)} 这一场到这儿收了摊〕"})
+            i = j
+    out.extend(history[i:])
+    return out
+
+
 # ---------- 见闻（记忆 vs 见闻轴的见闻侧，§5.2）----------
 
 def _ombre_on(char_id: str) -> bool:
@@ -377,7 +417,8 @@ async def run(handle: session_mgr.LoopHandle, *,
         client = None
         options = opts_factory(handle.char_id, catalog)
         if history:
-            sid = forge.render(history, cwd=str(options.cwd),
+            sid = forge.render(_frame_activities(history, handle.char_id),
+                               cwd=str(options.cwd),
                                model=config.MODEL)
             options = copy.copy(options)
             options.resume = sid
