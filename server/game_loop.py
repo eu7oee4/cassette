@@ -67,7 +67,9 @@ REOPEN_MAX_DEFERS = 2
 # 「当前轮剩余时长（无硬顶）」缩到一个短轮。max_turns 设在正常链条极少触到的
 # 位置（章节入口 look→tap→watch 链最长）；语义在持续 client 下未真机验证
 # （§5.2 重验清单），触顶=轮被截断收掉，下一 tick 接着来，不致命。
-GAME_MAX_TURNS = int(os.environ.get("GAME_TICK_MAX_TURNS", "8") or "8")
+# 8 真机翻车（08-30）：翻游戏内历史记录那种正当长链就有 8 轮，被硬切在动作中间。
+# 这个帽子的用途只是拦轮内失控，放到正常链条摸不到的高度。
+GAME_MAX_TURNS = int(os.environ.get("GAME_TICK_MAX_TURNS", "24") or "24")
 TICK_PAUSE_SEC = float(os.environ.get("GAME_TICK_PAUSE", "2") or "2")
 # tick 注入极简（含义在系统提示里一次性写死，别每轮念指令）。不是 TA 的话、
 # 不是系统指令，重铸时也绝不进 log——它谁都没见过。
@@ -515,6 +517,14 @@ async def _drain_turn(client, handle, on_text: Optional[Callable[[str, bool], No
                 if pending is not None and on_text:
                     on_text(pending, True)
                 pending = None
+                if getattr(msg, "is_error", False):
+                    # error_max_turns / API 报错这类：轮收在错误上但会话可能还活着
+                    # （max_turns 实测每 query 重置、触顶后下一 query 正常）。
+                    # 打日志继续跑，真死了下一步自然暴露——但要留痕（08-30 事故：
+                    # 无声路径 = 查不出的死因）。
+                    print(f"[game_loop] 轮收在错误上：subtype="
+                          f"{getattr(msg, 'subtype', '?')}（继续，没算死）",
+                          file=sys.stderr)
                 return "result"
         return "eof"
 
@@ -654,11 +664,23 @@ async def run(handle: session_mgr.LoopHandle, *,
                     handle.reopening = False
             await _feed_next(client)
     except asyncio.CancelledError:
-        pass                      # 路由 stop / mgr cancel：走 finally 清场
+        # 只有两种人会 cancel 我们：路由 stop / mgr 看守——它们都**先写 stop_reason
+        # 再 cancel**。没有 stop_reason 的 CancelledError 是外泄的（SDK 内部 anyio
+        # cancel scope 在传输层死掉时会把它抛进我们正 await 的调用）——08-30 真机
+        # 事故：error_max_turns 后引擎死，cancel 外泄被当「有人让我收摊」无声吞掉。
+        if not handle.stop_reason and not handle.meta.get("end_requested"):
+            handle.stop_reason = "engine-error: cancelled-unexpectedly"
+            print("[game_loop] 计划外 CancelledError（引擎侧取消外泄），按引擎异常收摊",
+                  file=sys.stderr)
     except Exception as e:
         print(f"[game_loop] 引擎异常收摊: {e}", file=sys.stderr)
         handle.stop_reason = handle.stop_reason or f"engine-error: {e}"
     finally:
+        # 每条退出路径都落一行日志——无声路径=查不出的死因（08-30 复盘规矩）
+        why = (handle.stop_reason
+               or ("game_end" if handle.meta.get("end_requested") else "unknown-exit"))
+        print(f"[game_loop] loop 退出：char={handle.char_id} reason={why}",
+              file=sys.stderr)
         try:
             await client.disconnect()
         except BaseException:

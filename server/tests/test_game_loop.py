@@ -138,6 +138,26 @@ class GameLoopTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(self.client.disconnected)
         self.assertEqual(self.closed, [self.handle])
 
+    async def test_foreign_cancel_marked_engine_error(self):
+        """08-30 事故回归：SDK 内部 cancel scope 外泄的 CancelledError 不能当
+        「有人让我收摊」无声吞掉——没有 stop_reason 的 cancel = 引擎异常。"""
+        class CancelLeakClient(FakeClient):
+            async def receive_messages(self):
+                raise asyncio.CancelledError()
+                yield  # noqa: unreachable —— 为了让它是个异步生成器
+
+        handle = sm.LoopHandle(char_id="cass", scene="game")
+        closed = []
+        task = asyncio.create_task(game_loop.run(
+            handle, context_text="x", deliver=lambda t, s: None,
+            options=object(), client_factory=CancelLeakClient,
+            on_closed=closed.append))
+        await asyncio.sleep(0.05)
+        self.assertTrue(task.done())
+        self.assertIn("engine-error", handle.stop_reason or "")
+        self.assertIn("cancel", handle.stop_reason or "")
+        self.assertEqual(closed, [handle])
+
     async def test_stream_eof_exits_with_reason(self):
         """引擎消息流断了 = 引擎死了：要带 stop_reason 退出，不能当轮结束空转。"""
         self.client._q.put_nowait("not-a-message")   # 非 Message 对象要被安静跳过
