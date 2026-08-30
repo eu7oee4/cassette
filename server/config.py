@@ -101,6 +101,22 @@ GAME_MODE_ENABLED = os.environ.get("GAME_MODE_ENABLED", "0") == "1"
 # 新路跑稳两周后 tmux 路和 game-story 插件的会话侧 MCP 一起退役。
 STORY_ENGINE = (os.environ.get("STORY_ENGINE", "sdk").strip() or "sdk")
 
+# 聊天引擎（PLAN_sdk S2/PR10）：按角色灰度。
+#   "p"（默认）=一次性 claude -p（今天的生产）；"sdk"=全角色走常驻 session；
+#   "sdk:<id1>,<id2>"=只这些角色走 sdk，其余 p——先切提信感的那个角色，
+#   他既是受益人也是验收人（§10 S2 PR10）。
+CHAT_ENGINE = (os.environ.get("CHAT_ENGINE", "p").strip() or "p")
+
+
+def chat_engine(char_id: str) -> str:
+    """这个角色这轮聊天走哪个引擎（"p" / "sdk"）。char_id 必须是已解析的规范 id。"""
+    if CHAT_ENGINE == "sdk":
+        return "sdk"
+    if CHAT_ENGINE.startswith("sdk:"):
+        allow = {s.strip() for s in CHAT_ENGINE[4:].split(",") if s.strip()}
+        return "sdk" if char_id in allow else "p"
+    return "p"
+
 # 可选：Bark 推送（断连补投/主动消息时通知手机；不配则静默跳过）
 BARK_URL = os.environ.get("BARK_URL", "").strip()
 BARK_ICON = os.environ.get("BARK_ICON", "").strip()   # 通知图标（公网可访问的图片 URL），空=Bark 默认

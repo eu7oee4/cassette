@@ -48,6 +48,7 @@ import urllib.parse
 
 import browser_keeper
 import characters
+import chat_loop
 import code_bridge
 import cohabit
 import cohabit_queue
@@ -352,8 +353,11 @@ class ChatResponse(BaseModel):
     game_started: bool = False           # 这轮他自己切去玩游戏了 → app 亮终端面板 + 系统灰字
 
 
-def _prepare_chat(req: ChatRequest, char_id: Optional[str] = None) -> tuple[str, dict]:
-    """校验 + 表情清单落盘 + 拼 prompt + handle 映射。失败抛 HTTPException（流开始前，能正常返 4xx）。"""
+def _prepare_chat(req: ChatRequest, char_id: Optional[str] = None) -> tuple[str, dict, dict]:
+    """校验 + 表情清单落盘 + 拼 prompt + handle 映射。失败抛 HTTPException（流开始前，能正常返 4xx）。
+    第三个返回值 ctx＝SDK 聊天路（chat_loop）要用的原材料：catalog / hints——
+    -p 路把它们拼进 prompt 就完了，session 路要分开摆（稳定段进系统提示、
+    hints 进注入段），所以原样带出去。"""
     if not req.messages:
         raise HTTPException(status_code=400, detail="messages 不能为空")
     last = req.messages[-1]
@@ -373,7 +377,8 @@ def _prepare_chat(req: ChatRequest, char_id: Optional[str] = None) -> tuple[str,
                          cohabit_queue.chat_move_hint(char_id)) if h]
     return (pipeline.build_prompt(req.messages, catalog, char_id=char_id,
                                   extra_hints=hints or None),
-            pipeline.sticker_handle_map(catalog))
+            pipeline.sticker_handle_map(catalog),
+            {"catalog": catalog, "hints": hints})
 
 
 # ---------- recent_window 的唯一口径 ----------
@@ -567,7 +572,7 @@ def chat(req: ChatRequest, x_auth: Optional[str] = Header(default=None, alias="X
     """非流式聊天（流式的回退路，两条路收尾共用 finalize 保证一致）。"""
     verify_auth(x_auth)
     cid = _resolve_char(req.char_id)
-    prompt, handle_to_id = _prepare_chat(req, cid)
+    prompt, handle_to_id, _ctx = _prepare_chat(req, cid)
     _snapshot_incoming_window(req, cid)
     # 文件转 block 在调用前做：类型不支持/解不开在这里 400，不进子进程。
     file_blocks = [_file_to_block(f) for f in (req.files or [])]
@@ -588,6 +593,11 @@ def chat(req: ChatRequest, x_auth: Optional[str] = Header(default=None, alias="X
 # 后端没在跑这轮且过了宽限 → app 收起"正在输入"并提示重发（修"请求根本没到后端"的静默丢失）。
 _ACTIVE_REQS: set[str] = set()
 
+# SDK 聊天路连败计数（PLAN_sdk §10 S2 设计稿一·降级③）：
+# 同角色连败 3 次自动回 -p 并 Bark，成功清零；重启前不再尝试。
+_SDK_CHAT_FAILS: dict[str, int] = {}
+_SDK_CHAT_OFF: set[str] = set()
+
 
 @app.get("/chat/active")
 def chat_active(x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
@@ -600,13 +610,67 @@ async def chat_stream(req: ChatRequest, x_auth: Optional[str] = Header(default=N
     """流式聊天：SSE 逐字回复。协议见 sse.py。"""
     verify_auth(x_auth)
     cid = _resolve_char(req.char_id)
-    prompt, handle_to_id = _prepare_chat(req, cid)   # 校验在流开始前，能正常返 4xx
+    prompt, handle_to_id, ctx = _prepare_chat(req, cid)   # 校验在流开始前，能正常返 4xx
     file_blocks = [_file_to_block(f) for f in (req.files or [])]   # 同上：4xx 趁早
     _snapshot_incoming_window(req, cid)
 
     def finalize(reply: str, stored: list[dict]) -> dict:
         return jsonable_encoder(finalize_chat_reply(reply, stored, req, handle_to_id,
                                                     char_id=cid))
+
+    async def _p_chunks(translate):
+        """老路：一次性 claude -p 子进程（今天的生产，SDK 灰度外的角色走这条）。"""
+        async for c in sse.stream_claude(prompt, translate, images=req.images,
+                                         file_blocks=file_blocks, char_id=cid):
+            yield c
+
+    async def _engine_chunks(translate):
+        """引擎分叉+降级（PLAN_sdk §10 S2 设计稿一）：CHAT_ENGINE 灰度到的角色走
+        常驻 session（chat_loop）；SDK 路在**发出第一个字之前**失败（首块即 error）
+        → 本轮原地退 -p 不丢轮；同角色连败 3 次关掉 SDK 路+Bark，成功清零。"""
+        if config.chat_engine(cid) != "sdk" or cid in _SDK_CHAT_OFF:
+            async for c in _p_chunks(translate):
+                yield c
+            return
+        it, first = None, None
+        try:
+            it = chat_loop.stream_turn(
+                char_id=cid, rid=(req.client_req_id or ""),
+                messages=[{"role": m.role, "text": m.text, "ts": m.ts}
+                          for m in req.messages],
+                injection=chat_loop.build_injection(req.messages, cid,
+                                                    extra_hints=ctx["hints"]),
+                finalize=finalize, images=req.images, file_blocks=file_blocks,
+                catalog=ctx["catalog"]).__aiter__()
+            first = await it.__anext__()
+        except StopAsyncIteration:
+            first = None
+        except Exception as e:
+            logerr(f"chat SDK 路起不来: {e}")
+            first = None
+        if first is None or b'"type": "error"' in first:
+            # 一个字都没吐就失败：这一轮完整退 -p（信感回旧形态一轮，不丢轮）。
+            n = _SDK_CHAT_FAILS.get(cid, 0) + 1
+            _SDK_CHAT_FAILS[cid] = n
+            logerr(f"chat SDK 路首块失败（{cid} 第 {n} 连败），本轮退 -p")
+            if it is not None:
+                try:
+                    async for _ in it:    # 把 SDK 路的收尾吃干净，别留悬挂的轮
+                        pass
+                except Exception:
+                    pass
+            if n >= 3 and cid not in _SDK_CHAT_OFF:
+                _SDK_CHAT_OFF.add(cid)
+                logerr(f"chat SDK 路连败 3 次，{cid} 自动回 -p（重启前不再尝试）")
+                bark_push(f"聊天 SDK 路连败，{cid} 已自动回 -p", title="cassette 后端")
+            async for c in _p_chunks(translate):
+                yield c
+            return
+        yield first
+        async for c in it:
+            if b'"type": "done"' in c:
+                _SDK_CHAT_FAILS[cid] = 0
+            yield c
 
     async def gen():
         rid = req.client_req_id or ""
@@ -623,8 +687,7 @@ async def chat_stream(req: ChatRequest, x_auth: Optional[str] = Header(default=N
                 try:
                     def translate(events):
                         return sse.translate_events(events, finalize)
-                    async for chunk in sse.stream_claude(prompt, translate, images=req.images,
-                                                         file_blocks=file_blocks, char_id=cid):
+                    async for chunk in _engine_chunks(translate):
                         # ⚠️ 字节嗅探依赖 sse.sse() 用 json.dumps 默认分隔符（": " 带空格）——
                         # 正文里出现同样字样会被转义成 \" 不误判；若改压缩分隔符此检测会静默失效。
                         if b'"type": "done"' in chunk:
