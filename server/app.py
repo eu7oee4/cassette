@@ -2344,7 +2344,6 @@ def _game_story_start_sdk(inp: GameStoryStartIn):
     holder = game_bridge.acquire_lock("story")
     if holder:
         return {"ok": False, "error": "任务引擎正在用模拟器跑日常，等它跑完再玩（task_status 可看进度）"}
-    task = (inp.task or "").strip()
     cid = plugins.owner_of("tmux")   # 会话归属口径同 tmux 路（见那边的注释）
     window = state_store.read_recent_window(cid)
     msgs = [{"role": w.get("role"), "text": (w.get("text") or ""),
@@ -2364,17 +2363,16 @@ def _game_story_start_sdk(inp: GameStoryStartIn):
             pre_log = []
             logerr(f"进场景铸造失败（这次退回无历史开场）: {e}")
     u = config.user_name()
-    # 开场无感化（08-30 机主拍板：切游戏/切回来都不要交接感——就是同一个人拿到了
-    # 工具）：不再复述「说好了你去玩游戏」，不再把任务当【交接单】念一遍、更不说
-    # 「已回显给{u}」——那几句会引他开口先把任务再播报一遍（实锤：「去玩游戏了，
-    # 说好的是……」气泡）。刚才的聊天已经铸在他记忆里（pre_log），任务就在其中；
-    # 这里只给感知白描 + 一句轻推。「别交接」的行为契约在 TICK_SYSTEM 一次性写死。
-    scene = (f"〔现在是 {pipeline.now_str()}。你在模拟器前坐下来了——game_* 工具"
-             f"在手上（没有电脑，跑不了命令；Read 只用来看{u}发来的图）。"
-             f"你说的话照旧走你们的聊天气泡，{u}随时会插话。〕")
-    tail = (f"\n〔要做的事刚在聊天里说定了：{task}〕" if task else
-            "\n〔先 game_notes_read 翻翻剧情本看看上次到哪了，想看什么自己挑。〕")
-    context = scene + _GAME_CTX_CAVEAT_SDK + tail
+    # 开场无感化（08-30 机主两轮拍板）：不是「切进游戏/换模式」，是**拿到了游戏**
+    # ——过程本身做成自然的形状，他就不会说交接的话（第一版写了句「别交接」的
+    # 提醒，机主毙了：刻意提醒还是在强调切换这回事）。任务转述也整个去掉：眠眠
+    # 的原话就在他记忆里（pre_log），再转述一遍既重复、又平白造出「接单」感。
+    # 开场=感知白描一行 + 翻笔记本的老习惯，别的什么都不说。
+    context = (f"〔现在是 {pipeline.now_str()}。游戏在手边了——模拟器就在眼前，"
+               f"game_* 工具能摸到（没有电脑，跑不了命令；Read 只用来看{u}发来的"
+               f"图）。你说的话照旧走你们的聊天气泡，{u}随时会插话。〕"
+               + _GAME_CTX_CAVEAT_SDK
+               + "\n〔先 game_notes_read 翻翻剧情本看看上次到哪了。〕")
     deliver = _deliver_game_segment(cid)
 
     async def runner(handle):
