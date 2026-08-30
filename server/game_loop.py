@@ -659,6 +659,11 @@ async def run(handle: session_mgr.LoopHandle, *,
                                                          handle, _deliver_and_log)
                     handle.meta["shots"] = 0
                     handle.meta["reopen_defers"] = 0
+                    # 成功也要留痕（08-30 观测缺口：只有失败打日志，铸没铸从外面
+                    # 看不出来——只能拿「推迟第 2 次之后没再推迟」倒推）。
+                    print(f"[game_loop] 滚动重开完成（{shots} 张边界"
+                          f"{'，推迟 ' + str(defers) + ' 次后强制' if defers else ''}）",
+                          file=sys.stderr)
                 finally:
                     handle.last_reopen = time.time()
                     handle.reopening = False

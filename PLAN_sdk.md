@@ -914,6 +914,43 @@ SDK 化后独立终端页失去存在理由，四个职责全有更好归宿：�
   全删（iOS 同批）；投递层按 TA 作息收敛、醒本身不按（§0.3）。
   08-30 补：wake 行为留痕（§5.2 三分流）——工具执行层落账本事件；正式账本
   PR13 才落地，PR12 先落 wake_log 扩展字段（结构同账本事件），PR13 归一迁移。
+  ✅ **08-30 晚落码（后端全量；未重启——小卡在 game 会话里）**。落法与取舍：
+  - **wake_sdk.py 新模块**：sdk 灰度角色的醒来入队聊天 session（Turn.kind="wake"），
+    -p 角色老路一行不改（双轨）；熄火开关搬进 chat_loop.SDK_CHAT_OFF，聊天连败
+    3 次退 -p 时醒来跟着退（同方向降级，不劈叉）。
+  - **注入=感知白描**，执行开始时组装（injection_factory——排队几分钟后时间那句
+    不能是死的）；scheduled 到点带待办渲染成他自己的念头（「你之前想着这会儿要…」）；
+    见闻快照/开局引子复用 chat 轮现成的 parts 管线，零新代码。
+  - **投递=〔〕内外分流**：〔〕外→outbox+窗口+Bark、〔〕内=心里活动只进 wake_log
+    （Mind 素材）；契约写死在 session 系统提示（_wake_contract，只讲机制无存在论）。
+    夜间收敛只收 Bark（消息照进历史，「TA 早上看到他凌晨留了句话」）；硬触发必推。
+    四段契约（THOUGHTS/ACTION/CONTENT/NEXT）退役，只剩 [[next_wake:]]（聊天同款）。
+  - **账的口径**：投递了→账追加恰好一条 assistant（app 拉走 outbox 后发送比对干净；
+    没拉走=stale 容忍，首晚已实证）；安静醒着→账不动，独处轮只活在 transcript 里，
+    下次重铸自然蒸发（纯内心不渲染，机制免费实现三分流的「不渲染」半边）。
+  - **醒来禁用面=PreToolUse hook**（不是 can_use_tool！SDK 实证 allowed_tools 的
+    整工具条目在回调之前自动放行——_warn_if_can_use_tool_shadowed；hook 在权限
+    判定之前跑拦得住）。按 handle.meta.turn_kind 判轮，允许集=mounted_tool_names
+    ("wake")，聊天/巩固轮全放行零改变。这是全仓第一个 can_use_tool 类实现，
+    PR13 game 轮策略照这个模式扩。
+  - **抽时刻调度器**：下界 45min+指数分布（无记忆性=「每一刻都可能想起你」），
+    均值 3.5h→1.67h 随静默收紧（间隔越久 hazard 越高）、深夜 ×1.6（世界没动静+
+    省额度，不是作息）；anchor=TA 最后发言 ts，一变即重抽（这个 guard 顺带天然
+    解决「chat 轮进行中 auto 到点」的竞态——窗口快照先落，anchor 已变）。
+    掷骰/避让 chat 轮/打扰控制三闸/每日预算/stale 抑制/unsent 憋话，sdk 路全部
+    退役；code/game 会话开着仍避让（段中插入归 PR13）。
+  - **usage 落账带轮来源**（scene="chat/wake"）：面板上「他自己醒来花的」和
+    「陪 TA 聊的」分得开。
+  - 单测 48（抽样边界/夜间因子/〔〕分流矩阵/投递七况/分路九况/泵四况/门矩阵），
+    全量 367 绿。**测试踩雷记录**：路由测试没桩 do_wake_sync_locked，走到老路的
+    用例在线程池起了**真 claude -p**（40 秒+一次真调用）——「测试必须桩掉一切
+    起模型的口子」补进纪律。
+  - **欠着的**（下批）：①iOS 侧醒来设置面删除+usage 面板（iOS 四件同批）；
+    ②小屋开着时自主醒来仍归 cohabit 队列 -p 路（本 PR 不动，等 house 重开时看）；
+    ③wake_log 扩展字段=acts 先行，PR13 归一活动账本；④醒来轮全程零正文时
+    （只调工具不说话）translate 按 error 收——罕见但会白关一次 session，观察。
+  - 顺手补 game_loop 滚动重开**成功日志**（观测缺口：今晚只看得到「画面没定格
+    推迟」，铸成没铸成要靠没再推迟倒推）。
 - **PR13 game 并入意识流（前置：重启后 forge 复活 §5.1 从后续项转正）**：
   game_start 变「本 session 进入 game 段」（拿互斥锁、can_use_tool 挂 game 轮
   策略、进场按需重铸清旧活动段）；独立 game loop 与 §4 过渡期规则一/二退役；

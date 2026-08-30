@@ -661,11 +661,6 @@ def _mail_wake_note(char_id: Optional[str] = None) -> str:
 # ---------- 预闸门（不叫模型）----------
 async def maybe_wake(char_id: Optional[str] = None) -> None:
     cid = _cid(char_id)
-    # 这个角色的 chat 轮进行中 → 避让：wake 撞进来会拿着过期 recent_window 说胡话。
-    # 只看自己的轮——别的角色在聊天不碍这个角色醒（各聊各的、各有各的窗口）。
-    if chat_turn_active(cid):
-        logerr(f"wake 避让（{cid}）：主 chat 轮进行中，本 tick 跳过")
-        return
     settings = state_store.load_settings(cid)
     if not settings.get("enabled", True):
         return
@@ -676,6 +671,55 @@ async def maybe_wake(char_id: Optional[str] = None) -> None:
     # 错误退避：上次醒来失败后冷却期内不再试（防持续失败时无限起子进程）。
     # 排在硬触发**之前**：登录态坏了的时候，到点的提醒也别对着它硬试，白起子进程还发不出去。
     if now < float(sched.get("cooldown_until") or 0):
+        return
+
+    # ---------- SDK 灰度：醒来升 A（PLAN_sdk PR12，wake_sdk）----------
+    # 聊天引擎灰度到 sdk 的角色，醒来不再起 claude -p，改注入常驻聊天 session：
+    # · chat 轮避让不需要了——同一个 query() 注入口，队列天然串行（§5.2 撞轮条）；
+    # · 打扰控制三闸/每日预算/概率掷骰整套退役——静默/最小间隔收进抽样下界，
+    #   夜间收敛只做在 Bark 投递上，节奏=抽时刻调度器（auto_wake_at）；
+    # · 邮件硬触发照旧 flag 先消费再醒；code/game 会话开着仍避让（段中插入归 PR13）；
+    # · 聊天 SDK 路熄了火（连败 3 次）→ 整个人退回下面的老路，醒来跟着回 -p。
+    if config.chat_engine(cid) == "sdk":
+        import chat_loop
+        if cid not in chat_loop.SDK_CHAT_OFF:
+            import wake_sdk
+            import world
+            mail_note = _mail_wake_note(cid)
+            if mail_note:
+                wake_sdk.enqueue_wake(cid, "mail", note=mail_note, force=True)
+                return
+            # 小屋开着时自主醒来归 cohabit 队列（照老口径整体让位，不双跑）。
+            if world.house_active():
+                return
+            owner = code_session_owner()
+            if owner is not None and owner in ("", cid):
+                if not _code_avoid.get(cid):
+                    whose = "归属探不出来的" if owner == "" else "他自己的"
+                    logerr(f"wake 避让（{cid}）：{whose} code/game 会话开着，"
+                           f"自发的醒来攒着（sdk 路；段中插入等 PR13）")
+                    _code_avoid[cid] = True
+                return
+            _code_avoid[cid] = False
+            if now - float(sched.get("last_wake_at") or 0) < MIN_WAKE_GAP_SEC:
+                return
+            next_wake = sched.get("next_wake_at")
+            if next_wake is not None and now >= float(next_wake):
+                wake_sdk.enqueue_wake(cid, "scheduled")
+                return
+            # 随机醒的独立开关照认（判 is False，None 不算关）——关的只是自醒抽样，
+            # scheduled/邮件不受影响。设置面 iOS 批次删掉后这行自然常真。
+            if settings.get("random_wake") is False:
+                return
+            wake_sdk.maybe_auto(cid, now)
+            return
+        # 熄火状态：跌穿到老路（-p 醒来），和聊天请求的降级方向一致。
+
+    # 这个角色的 chat 轮进行中 → 避让：wake 撞进来会拿着过期 recent_window 说胡话。
+    # 只看自己的轮——别的角色在聊天不碍这个角色醒（各聊各的、各有各的窗口）。
+    # 只拦老路（-p 各起各的进程才会撞）；sdk 路在上面走掉了，队列天然串行不用避。
+    if chat_turn_active(cid):
+        logerr(f"wake 避让（{cid}）：主 chat 轮进行中，本 tick 跳过")
         return
 
     # ---------- 直推口子（硬触发）----------

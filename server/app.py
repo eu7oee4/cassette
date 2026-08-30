@@ -595,8 +595,8 @@ _ACTIVE_REQS: set[str] = set()
 
 # SDK 聊天路连败计数（PLAN_sdk §10 S2 设计稿一·降级③）：
 # 同角色连败 3 次自动回 -p 并 Bark，成功清零；重启前不再尝试。
+# 熄火名单本体在 chat_loop.SDK_CHAT_OFF（PR12 起 wake_sdk 分路也要认它）。
 _SDK_CHAT_FAILS: dict[str, int] = {}
-_SDK_CHAT_OFF: set[str] = set()
 
 
 @app.get("/chat/active")
@@ -628,7 +628,7 @@ async def chat_stream(req: ChatRequest, x_auth: Optional[str] = Header(default=N
         """引擎分叉+降级（PLAN_sdk §10 S2 设计稿一）：CHAT_ENGINE 灰度到的角色走
         常驻 session（chat_loop）；SDK 路在**发出第一个字之前**失败（首块即 error）
         → 本轮原地退 -p 不丢轮；同角色连败 3 次关掉 SDK 路+Bark，成功清零。"""
-        if config.chat_engine(cid) != "sdk" or cid in _SDK_CHAT_OFF:
+        if config.chat_engine(cid) != "sdk" or cid in chat_loop.SDK_CHAT_OFF:
             async for c in _p_chunks(translate):
                 yield c
             return
@@ -659,8 +659,8 @@ async def chat_stream(req: ChatRequest, x_auth: Optional[str] = Header(default=N
                         pass
                 except Exception:
                     pass
-            if n >= 3 and cid not in _SDK_CHAT_OFF:
-                _SDK_CHAT_OFF.add(cid)
+            if n >= 3 and cid not in chat_loop.SDK_CHAT_OFF:
+                chat_loop.SDK_CHAT_OFF.add(cid)
                 logerr(f"chat SDK 路连败 3 次，{cid} 自动回 -p（重启前不再尝试）")
                 bark_push(f"聊天 SDK 路连败，{cid} 已自动回 -p", title="cassette 后端")
             async for c in _p_chunks(translate):

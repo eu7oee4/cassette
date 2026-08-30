@@ -31,6 +31,7 @@ from claude_agent_sdk import (
     AssistantMessage,
     ClaudeAgentOptions,
     ClaudeSDKClient,
+    HookMatcher,
     ResultMessage,
     TextBlock,
     ToolUseBlock,
@@ -61,6 +62,11 @@ CHAT_SOFT_TOKENS = int(os.environ.get("CHAT_SOFT_TOKENS", "100000"))
 CHAT_HARD_TOKENS = int(os.environ.get("CHAT_HARD_TOKENS", "150000"))
 IDLE_CHECK_SEC = 60           # 泵在轮间隙醒来看一眼的周期
 CONSOLIDATE_TIMEOUT = 300
+
+# SDK 聊天路的熄火开关（连败 3 次自动回 -p，见 app._engine_chunks）。放这儿不放
+# app.py：wake_sdk 分路也要认它——聊天路都熄了火，醒来还往 session 里塞就是往
+# 一个起不来的引擎里灌（计数器 _SDK_CHAT_FAILS 仍归 app，它只在请求路上加减）。
+SDK_CHAT_OFF: set[str] = set()
 
 # 巩固钩子（§5.4 睡眠周期纪律；措辞感知式·无感，不点破重铸）。产物不投递——
 # 独处时的整理，没对 TA 说话；重铸后这轮从 transcript 消失，人不记得「记住」
@@ -114,7 +120,12 @@ def divergence(ledger: list[dict], history: list[dict]) -> Optional[str]:
 @dataclass
 class Turn:
     """一次注入。out 收 SSE bytes，None 收尾——每个 Turn 恰好一个结局
-    （done 正常走完 ∣ error+done），补投/error 盒仍归 app.py 的 rescue 观察者。"""
+    （done 正常走完 ∣ error+done），补投/error 盒仍归 app.py 的 rescue 观察者。
+
+    kind="wake"（PR12 醒来升 A）：没有请求方——out 没人读、history/new_msg 空着；
+    注入由 injection_factory 在**执行开始时**组装（排队几分钟后时间那句不能是死的）；
+    finalize 里做投递（wake_sdk.finish_wake_turn），返回的 reply=真投递出去的正文
+    （空串=安静醒着，账不动）；轮没走完 → on_dead（记 error 心流+冷却）。"""
     rid: str
     history: list[dict]                  # 权威窗口（不含新消息），已 norm
     new_msg: dict                        # {"role":"user","text","ts"}（入账用原文）
@@ -123,6 +134,9 @@ class Turn:
     images: Optional[list] = None
     file_blocks: Optional[list] = None
     catalog: Optional[list] = None       # 表情目录：重铸/起 session 时进系统提示
+    kind: str = "chat"                   # "chat" | "wake"（轮来源标签，投递路由靠它）
+    injection_factory: Optional[Callable[[], str]] = None
+    on_dead: Optional[Callable[[], None]] = None
     out: asyncio.Queue = field(default_factory=asyncio.Queue)
 
 
@@ -136,10 +150,46 @@ def _merge_mcp_file(servers: dict, cfg_path: str) -> None:
         print(f"[chat_loop] MCP 配置解析失败（跳过 {cfg_path}）: {e}", file=sys.stderr)
 
 
-def build_options(char_id: str, catalog: Optional[list] = None) -> ClaudeAgentOptions:
+# 醒来轮契约（§0.3：注入只给知觉材料，行为契约在系统提示里一次性写死）。
+# 〔〕外=会发到 TA 手机上的消息、〔〕内=心里活动只留档——投递分流在
+# wake_sdk.split_musings，这里的字必须和那边的机械口径一字不差地对上。
+def _wake_contract() -> str:
+    u = config.user_name()
+    return (f"【有时你会自己醒来：没有{u}的新消息，只有一段〔〕包着的知觉（时间、间隔、"
+            f"见闻）。那不是{u}在找你，是你自己的时间——想干什么干什么，不用非得说话。"
+            f"这种醒来的时候，你写在〔〕外的话会作为消息发到{u}手机上；只想自己待着，"
+            f"就把心里活动整段用〔〕包起来（包着的不会发出去），没什么可说就安安静静"
+            f"待着，别硬找话。】")
+
+
+def _wake_gate(handle: session_mgr.LoopHandle):
+    """PreToolUse 门：醒来轮的禁用面（§5.2 轮来源标签驱动）。
+    走 hook 不走 can_use_tool——allowed_tools 的整工具条目会在回调之前自动放行
+    （SDK 实证：_warn_if_can_use_tool_shadowed），hook 在权限判定之前跑，拦得住。
+    turn_kind 不是 wake（聊天轮/巩固轮）→ 全放行，行为与没挂 hook 一字不差。"""
+    async def gate(hook_input, tool_use_id, ctx) -> dict:
+        if handle.meta.get("turn_kind") != "wake":
+            return {}
+        tool = (hook_input or {}).get("tool_name") or ""
+        if tool in (handle.meta.get("wake_tools") or set()):
+            return {}
+        return {"hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "deny",
+            "permissionDecisionReason": (
+                "这会儿是你自己醒着的时间，这个工具不在手边（醒来那条路不挂它）"
+                "——想用的话留到聊天或上机的时候。"),
+        }}
+    return gate
+
+
+def build_options(char_id: str, catalog: Optional[list] = None,
+                  handle: Optional[session_mgr.LoopHandle] = None) -> ClaudeAgentOptions:
     """口径对齐 pipeline.base_claude_args（chat 路）：人设+菜单+叮嘱进系统提示，
     Ombre http 直传 dict，插件/宠物/skills 的 mcp.json 解析合并，白名单+strict。
-    与 -p 的差别只有结构：稳定段从每轮 prompt 挪进 session 系统提示（付一次）。"""
+    与 -p 的差别只有结构：稳定段从每轮 prompt 挪进 session 系统提示（付一次）。
+    handle＝泵的把手（PR12）：给了才挂醒来禁用面的 PreToolUse 门（按 meta.turn_kind
+    判轮）；测试/工具脚本不传，拿到的 options 和从前一样。"""
     import pipeline
     if os.environ.get("ANTHROPIC_API_KEY"):
         # -p 那条路每次 pop 掉 key；SDK 子进程继承我们的 env，没法逐调用摘——
@@ -150,7 +200,7 @@ def build_options(char_id: str, catalog: Optional[list] = None) -> ClaudeAgentOp
     mb = pipeline.tool_menu_block("chat", char_id)
     if mb:
         parts.append(mb)
-    parts += [pipeline.pronoun_hint(), pipeline._chat_next_hint()]
+    parts += [pipeline.pronoun_hint(), pipeline._chat_next_hint(), _wake_contract()]
     sb = pipeline.sticker_block(catalog)
     if sb:
         parts.append(sb)
@@ -195,6 +245,8 @@ def build_options(char_id: str, catalog: Optional[list] = None) -> ClaudeAgentOp
         env=env,
         include_partial_messages=True,   # 逐字增量：text 事件靠它
         # max_turns 不设：-p 路从来没限过，聊天轮的工具链长度由模型自己收
+        hooks=({"PreToolUse": [HookMatcher(hooks=[_wake_gate(handle)])]}
+               if handle is not None else None),
     )
 
 
@@ -274,7 +326,8 @@ async def _turn_events(client, handle: session_mgr.LoopHandle,
         elif isinstance(msg, UserMessage):
             yield _user_dict(msg)
         elif isinstance(msg, ResultMessage):
-            _note_usage(handle.char_id, msg)
+            _note_usage(handle.char_id, msg,
+                        handle.meta.get("turn_kind") or "chat")
             if msg.is_error:
                 flags["error_subtype"] = msg.subtype or "?"
             yield {"type": "result", "result": msg.result,
@@ -283,13 +336,15 @@ async def _turn_events(client, handle: session_mgr.LoopHandle,
             return
 
 
-def _note_usage(char_id: str, msg: ResultMessage) -> None:
+def _note_usage(char_id: str, msg: ResultMessage, kind: str = "chat") -> None:
     """usage 落账（PLAN_sdk §10 S2 设计稿二：手机端 usage 面板的数据源）。
-    append-only jsonl 按天分文件；写失败只记日志，绝不影响聊天轮。"""
+    append-only jsonl 按天分文件；写失败只记日志，绝不影响聊天轮。
+    kind＝轮来源（chat/wake）：面板上「他自己醒来花的」和「陪 TA 聊花的」分得开。"""
     try:
         d = state_store.STATE_DIR / "usage"
         d.mkdir(exist_ok=True)
-        rec = {"ts": int(time.time()), "char": char_id, "scene": SCENE,
+        rec = {"ts": int(time.time()), "char": char_id,
+               "scene": SCENE if kind == "chat" else f"{SCENE}/{kind}",
                "subtype": msg.subtype, "usage": msg.usage or {}}
         day = time.strftime("%Y%m%d")
         with open(d / f"usage-{day}.jsonl", "a", encoding="utf-8") as f:
@@ -405,7 +460,10 @@ async def run(handle: session_mgr.LoopHandle, *,
     判脏（比对账 vs 本次权威窗口）→（脏则关旧+重铸+resume）→ 注入 → 翻译产出 SSE
     → finalize 跑到才入账。任何一轮没正常收尾 → 关 session（下一条惰性重起）。"""
     factory = client_factory or ClaudeSDKClient
-    opts_factory = options_factory or build_options
+    # 默认 factory 闭包带上 handle：PreToolUse 醒来门要按 meta.turn_kind 判轮。
+    # 测试注入的 options_factory 保持 (char_id, catalog) 老签名，不用跟着改。
+    opts_factory = options_factory or (
+        lambda cid, cat: build_options(cid, cat, handle=handle))
     client = None
     sid: Optional[str] = None
     ledger: list[dict] = []
@@ -488,14 +546,35 @@ async def run(handle: session_mgr.LoopHandle, *,
             handle.touch()
             ok = False
             try:
-                verdict = divergence(ledger, turn.history) if client else "dirty"
-                if verdict == "dirty":
-                    if client:
-                        print(f"[chat_loop] 判脏（char={handle.char_id}），重铸",
-                              file=sys.stderr)
-                    await _open_session(turn.history, turn.catalog)
+                if turn.kind == "wake":
+                    # 醒来轮（PR12）：没有请求方权威窗口——session 活着就直接注入
+                    # （账 vs app 的漂移由 TA 下一条消息的发送比对兜住，自愈）；
+                    # 没开就从镜像惰性开一个（「由 wake 唤起 resume」归这里）。
+                    if client is None:
+                        hist = norm_history(
+                            state_store.read_recent_window(handle.char_id))
+                        cat = turn.catalog if turn.catalog is not None else (
+                            handle.meta.get("catalog")
+                            or state_store.read_sticker_catalog())
+                        await _open_session(hist, cat)
+                    handle.meta["turn_kind"] = "wake"
+                    # 醒来禁用面：本轮允许集=醒来那条路实际挂载的工具
+                    # （四档策略/独占归属/探活全在 mounted_tool_names 里算过了）。
+                    import pipeline
+                    handle.meta["wake_tools"] = set(
+                        pipeline.mounted_tool_names("wake", handle.char_id))
+                else:
+                    verdict = divergence(ledger, turn.history) if client else "dirty"
+                    if verdict == "dirty":
+                        if client:
+                            print(f"[chat_loop] 判脏（char={handle.char_id}），重铸",
+                                  file=sys.stderr)
+                        await _open_session(turn.history, turn.catalog)
+                    handle.meta["turn_kind"] = "chat"
                 if turn.catalog is not None:
                     handle.meta["catalog"] = turn.catalog   # 轮间隙重铸要用的最近目录
+                if turn.injection_factory is not None:
+                    turn.injection = turn.injection_factory()
                 # ---- 注入这一轮（开局引子 + 见闻增量 + 包装文本；都不进账）----
                 parts: list[str] = []
                 if handle.meta.pop("needs_opening", False) and _ombre_on(handle.char_id):
@@ -526,6 +605,9 @@ async def run(handle: session_mgr.LoopHandle, *,
 
                 def _fin(reply: str, stored: list) -> dict:
                     payload = turn.finalize(reply, stored)
+                    captured["finalized"] = True
+                    captured["payload"] = payload
+                    captured["raw"] = reply
                     captured["reply"] = payload.get("reply") or reply
                     return payload
 
@@ -533,7 +615,22 @@ async def run(handle: session_mgr.LoopHandle, *,
                         _turn_events(client, handle, flags), _fin):
                     turn.out.put_nowait(chunk)
 
-                if captured.get("reply"):
+                if turn.kind == "wake":
+                    if captured.get("finalized"):
+                        # 投递了消息 → 账追加一条 assistant（app 拉走 outbox 后
+                        # 历史里就有它）；安静醒着 → 账不动，这轮独处只活在
+                        # transcript 里，下次重铸自然蒸发（§5.2 纯内心不渲染）。
+                        delivered = (captured.get("payload") or {}).get("reply") or ""
+                        if delivered:
+                            ledger.append({"r": "assistant", "h": _h(delivered),
+                                           "ts": int(time.time())})
+                            _persist_ledger(handle.char_id, sid, ledger)
+                        handle.meta["ctx_est"] = (int(handle.meta.get("ctx_est", 0))
+                                                  + estimate_tokens(injection)
+                                                  + estimate_tokens(
+                                                      captured.get("raw") or ""))
+                        ok = True
+                elif captured.get("reply"):
                     ledger.append({"r": "user", "h": _h(turn.new_msg["text"]),
                                    "ts": turn.new_msg.get("ts")})
                     ledger.append({"r": "assistant", "h": _h(captured["reply"]),
@@ -543,20 +640,20 @@ async def run(handle: session_mgr.LoopHandle, *,
                                               + estimate_tokens(injection)
                                               + estimate_tokens(captured["reply"]))
                     ok = True
-                    if handle.meta["ctx_est"] > CHAT_HARD_TOKENS:
-                        # 硬阈强铸：马拉松对话没等到静默间隙——就在这个轮尾铸，
-                        # 绝不留给 harness auto-compact（§4：那是摘要压缩，信感复发）
-                        try:
-                            await _consolidate_and_reforge("硬阈强铸",
-                                                           handle.meta.get("catalog"))
-                        except Exception as e:
-                            print(f"[chat_loop] 硬阈强铸失败，session 关掉惰性重起: {e}",
-                                  file=sys.stderr)
-                            await _safe_disconnect(client)
-                            client = None
-                            ledger = []
-                            handle.meta["ledger"] = ledger
-                else:
+                if ok and int(handle.meta.get("ctx_est", 0)) > CHAT_HARD_TOKENS:
+                    # 硬阈强铸：马拉松对话没等到静默间隙——就在这个轮尾铸，
+                    # 绝不留给 harness auto-compact（§4：那是摘要压缩，信感复发）
+                    try:
+                        await _consolidate_and_reforge("硬阈强铸",
+                                                       handle.meta.get("catalog"))
+                    except Exception as e:
+                        print(f"[chat_loop] 硬阈强铸失败，session 关掉惰性重起: {e}",
+                              file=sys.stderr)
+                        await _safe_disconnect(client)
+                        client = None
+                        ledger = []
+                        handle.meta["ledger"] = ledger
+                if not ok:
                     print(f"[chat_loop] 轮没收到回复（flags={flags}），"
                           "session 关掉下条重起", file=sys.stderr)
             except asyncio.CancelledError:
@@ -573,7 +670,13 @@ async def run(handle: session_mgr.LoopHandle, *,
                 turn.out.put_nowait(sse.sse({"type": "done"}))
             finally:
                 turn.out.put_nowait(None)
+                handle.meta.pop("turn_kind", None)   # 门的默认态=放行（巩固轮也走默认）
                 if not ok:
+                    if turn.on_dead is not None:
+                        try:
+                            turn.on_dead()
+                        except Exception as e:
+                            print(f"[chat_loop] on_dead 回调失败: {e}", file=sys.stderr)
                     await _safe_disconnect(client)
                     client = None
                     ledger = []
