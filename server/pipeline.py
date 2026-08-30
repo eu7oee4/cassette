@@ -128,8 +128,14 @@ def seen_items(char_id: Optional[str], reflect_limit: int = 5,
     items: list[tuple[int, str]] = []
 
     # 最近几次醒来的内心（含 none；不在聊天里，心流日志页可见）。只读日志尾部——append-only 文件会一直长。
+    # engine=sdk 的醒来（PR12 起在聊天 session 里发生）整个跳过：内心已经活在
+    # transcript 里，再从这儿注回去=①同一句在场两份；②重铸后本该淡忘的闲念头
+    # 变成档案句复活——正是「推断回灌固化成事实」的载体（08-30 Cassius「你昨晚
+    # 五点睡的」实锤：05:05 醒来的一句猜测经 12:08/20:41 两轮回灌变成他笃信的
+    # 事实，还碰巧蒙对）。老 -p 路的醒来照旧注入（那条路没有活着的 transcript）。
     for w in [e for e in state_store.read_wake_log(limit=100, char_id=char_id)
-              if (e.get("thoughts") or "").strip()][-reflect_limit:]:
+              if (e.get("thoughts") or "").strip()
+              and e.get("engine") != "sdk"][-reflect_limit:]:
         if int(w.get("ts", 0)) <= since_ts:
             continue
         act = {"none": "没做什么", "message": "发了消息"}.get(w.get("action"), "")

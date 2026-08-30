@@ -201,6 +201,25 @@ class FinishWakeTurnTest(WakeStateBase):
         self.assertEqual(self.wake_log()[-1]["action"], "error")
 
 
+class SeenItemsFilterTest(WakeStateBase):
+    def test_sdk_wake_thoughts_not_reinjected(self):
+        """engine=sdk 的醒来内心不进 seen_items：内心已活在 transcript 里，
+        注回去=重铸后闲念头变档案复活（「推断回灌固化」的载体，08-30
+        Cassius「你昨晚五点睡的」实锤——05:05 一句猜测回灌两轮变成事实）。"""
+        import pipeline
+        now = int(time.time())
+        state_store.append_wake_log({"ts": now - 100, "source": "wake",
+                                     "action": "none", "thoughts": "老路的念头"},
+                                    char_id=self.cid)
+        state_store.append_wake_log({"ts": now - 50, "source": "wake",
+                                     "action": "none", "engine": "sdk",
+                                     "thoughts": "session 里的念头"},
+                                    char_id=self.cid)
+        texts = [t for _, t in pipeline.seen_items(self.cid)]
+        self.assertTrue(any("老路的念头" in t for t in texts))
+        self.assertFalse(any("session 里的念头" in t for t in texts))
+
+
 class MaybeAutoTest(WakeStateBase):
     def test_first_call_samples_not_wakes(self):
         calls = []
