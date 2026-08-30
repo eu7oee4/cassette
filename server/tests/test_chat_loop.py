@@ -124,7 +124,10 @@ class FakeClient:
         pass
 
     async def query(self, payload):
-        # 泵传的是 async 迭代器（一条 user 消息 dict）：抽干存证
+        # 泵传 async 迭代器（一条 user 消息 dict）；巩固钩子传纯字符串。
+        if isinstance(payload, str):
+            self.queries.append(payload)
+            return
         msgs = []
         async for m in payload:
             msgs.append(m)
@@ -154,11 +157,17 @@ class ChatLoopTest(unittest.IsolatedAsyncioTestCase):
         self._forge_orig = chat_loop.forge
         self._usage_orig = chat_loop._note_usage
         self._persist_orig = chat_loop._persist_ledger
+        self._seen_orig = chat_loop._seen_block
+        self._ombre_orig = chat_loop._ombre_on
+        self._hard_orig = chat_loop.CHAT_HARD_TOKENS
         chat_loop.forge = types.SimpleNamespace(
             render=lambda msgs, **kw: (self.forged.append(list(msgs)),
                                        f"sid-{len(self.forged)}")[1])
         chat_loop._note_usage = lambda *a: None
         chat_loop._persist_ledger = lambda *a: None
+        # 单测绝不读生产 wake_log/小屋、不探活 Ombre（tests-reading-prod-state 雷）
+        chat_loop._seen_block = lambda cid, since: (None, since)
+        chat_loop._ombre_on = lambda cid: False
 
         def factory(options):
             c = FakeClient(options)
@@ -177,6 +186,9 @@ class ChatLoopTest(unittest.IsolatedAsyncioTestCase):
         chat_loop.forge = self._forge_orig
         chat_loop._note_usage = self._usage_orig
         chat_loop._persist_ledger = self._persist_orig
+        chat_loop._seen_block = self._seen_orig
+        chat_loop._ombre_on = self._ombre_orig
+        chat_loop.CHAT_HARD_TOKENS = self._hard_orig
         if not self.task.done():
             self.handle.stop_reason = "test-teardown"
             self.task.cancel()
@@ -331,6 +343,58 @@ class ChatLoopTest(unittest.IsolatedAsyncioTestCase):
             chunks.append(turn.out.get_nowait())
         blob = b"".join(c for c in chunks if c)
         self.assertIn(b'"type": "error"', blob)
+
+
+class ChatLoopReforgeTest(ChatLoopTest):
+    """10c：开局引子/见闻增量/硬阈强铸+巩固钩子。"""
+
+    async def test_opening_nudge_and_seen_snapshot(self):
+        chat_loop._ombre_on = lambda cid: True
+        chat_loop._seen_block = lambda cid, since: (
+            ("【这期间的见闻】\n[某时] 〔你醒来〕你想：想他了", 3000)
+            if since == 0 else (None, since))
+        hist = [_m("user", "早"), _m("assistant", "早，小狗")]
+        await self._play(self._turn(hist, "在吗"),
+                         *_text_events("在。"), _result("在。"))
+        sent = self.clients[0].queries[0]          # 这一轮的 user 消息
+        text = sent[0]["message"]["content"][0]["text"]
+        self.assertIn(chat_loop.OPENING_NUDGE, text)
+        self.assertIn("这期间的见闻", text)
+        self.assertIn("眠眠：在吗", text)
+        # 游标推进后第二轮不再重复注入
+        hist2 = hist + [_m("user", "在吗", 2000), _m("assistant", "在。", 2001)]
+        await self._play(self._turn(hist2, "陪我"),
+                         *_text_events("嗯。"), _result("嗯。"))
+        text2 = self.clients[0].queries[1][0]["message"]["content"][0]["text"]
+        self.assertNotIn(chat_loop.OPENING_NUDGE, text2)
+        self.assertNotIn("这期间的见闻", text2)
+
+    async def test_hard_threshold_consolidates_and_reforges(self):
+        chat_loop.CHAT_HARD_TOKENS = 1             # 一轮就过硬阈
+        chat_loop._ombre_on = lambda cid: True
+        import state_store
+        mirror = [{"role": "user", "text": "早", "ts": 1000},
+                  {"role": "assistant", "text": "早，小狗", "ts": 1001},
+                  {"role": "user", "text": "在吗", "ts": 2000},
+                  {"role": "assistant", "text": "在。", "ts": 2001}]
+        rw_orig = state_store.read_recent_window
+        state_store.read_recent_window = lambda cid=None: list(mirror)
+        try:
+            hist = [_m("user", "早"), _m("assistant", "早，小狗")]
+            turn = self._turn(hist, "在吗")
+            # 预喂：本轮正文+result，再喂巩固钩子轮的 result
+            await self._play(turn, *_text_events("在。"), _result("在。"),
+                             _result("整理好了"))
+            # 巩固钩子发给了旧 client（感知式，不点破重铸）
+            self.assertIn(chat_loop.CONSOLIDATE_PROMPT, self.clients[0].queries)
+            # 铸了第二次：材料=镜像（含刚聊完的一来一回），新 client resume 新 sid
+            self.assertEqual(len(self.clients), 2)
+            self.assertEqual([m["text"] for m in self.forged[1]],
+                             ["早", "早，小狗", "在吗", "在。"])
+            self.assertEqual(self.clients[1].options.resume, "sid-2")
+            self.assertTrue(self.handle.meta.get("needs_opening"))
+        finally:
+            state_store.read_recent_window = rw_orig
 
 
 class ChatEngineConfigTest(unittest.TestCase):

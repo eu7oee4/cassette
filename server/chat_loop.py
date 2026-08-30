@@ -42,12 +42,34 @@ import forge
 import session_mgr
 import sse
 import state_store
+from forge import estimate_tokens
 
 SCENE = "chat"
 LEDGER_DIR = state_store.STATE_DIR / "chat_sessions"
 # 浅层错位容忍：请求发出时上一轮回复还没落进 app 历史（连发竞态）/wake 气泡还没
 # 被 app 拉走——账尾多出的**纯 assistant** 条目不算脏。超过这个深度按脏处理。
 STALE_TOLERANCE = 8
+
+# ---- chat 重铸节奏（§4 chat 条，08-30 拍板）----
+# 时机轴只有一条：TA 静默 ≥1h 的轮间隙——对话进行中永不铸（缓存正值钱）；
+# 1h 恰好是缓存 TTL 边界，过了它缓存横竖已死，此时铸的缓存成本严格为零。
+# 压力轴现在只有「窗口超软阈」一条可用（脏走发送前比对；可折活动段等 PR13）。
+# 硬阈=马拉松对话没间隙也得铸（下个轮尾强铸）——聊天正文**绝不退** harness
+# auto-compact（摘要压缩=信感复发）。门槛三值施工中调（plan 原话）。
+CHAT_REFORGE_IDLE_SEC = int(os.environ.get("CHAT_REFORGE_IDLE_SEC", "3600"))
+CHAT_SOFT_TOKENS = int(os.environ.get("CHAT_SOFT_TOKENS", "100000"))
+CHAT_HARD_TOKENS = int(os.environ.get("CHAT_HARD_TOKENS", "150000"))
+IDLE_CHECK_SEC = 60           # 泵在轮间隙醒来看一眼的周期
+CONSOLIDATE_TIMEOUT = 300
+
+# 巩固钩子（§5.4 睡眠周期纪律；措辞感知式·无感，不点破重铸）。产物不投递——
+# 独处时的整理，没对 TA 说话；重铸后这轮从 transcript 消失，人不记得「记住」
+# 这个动作本身，前提是内容真进了 Ombre（hold）。
+CONSOLIDATE_PROMPT = ("〔安静下来了。趁这会儿把最近聊的过一遍，值得留住的用 hold "
+                      "存好——回忆就好，不用说话。〕")
+# 开局引子（§5.4① 开局包的 breath 半边；行为清单半边等活动账本落地 PR13）。
+# 动作式、无条件——2026-08-13 教训：「想不起来时再搜」= 最需要搜的时候恰恰不觉得需要。
+OPENING_NUDGE = "〔接话之前先 breath 一下，把最近的记忆过一遍。〕"
 
 
 def _h(text: str) -> str:
@@ -294,6 +316,37 @@ def _persist_ledger(char_id: str, sid: Optional[str], ledger: list[dict]) -> Non
         print(f"[chat_loop] 账落盘失败: {e}", file=sys.stderr)
 
 
+# ---------- 见闻（记忆 vs 见闻轴的见闻侧，§5.2）----------
+
+def _ombre_on(char_id: str) -> bool:
+    import pipeline
+    try:
+        return pipeline.ombre_alive(char_id)
+    except Exception:
+        return False
+
+
+def _seen_block(char_id: str, since_ts: int) -> tuple[Optional[str], int]:
+    """见闻增量：醒来内心 + 小屋经历里 ts>since_ts 的部分（渲染口径同
+    build_context_timeline，pipeline.seen_items 一份两用）。返回 (文本或 None, 新游标)。
+    since_ts=0（session 刚开/重铸后）＝开局快照：最近几条全给，对齐 -p 路每轮
+    时间线里的非对话内容——重铸丢掉的旧见闻由此换成新鲜的（§5.4 红线：
+    别把过期档案固化成假新鲜）。"""
+    import pipeline
+    import world
+    exp_n = world.experience_limit() if world.house_active() else 0
+    items = pipeline.seen_items(char_id, reflect_limit=5,
+                                experience_limit=exp_n, since_ts=since_ts)
+    if not items:
+        return None, since_ts
+    cursor = max(ts for ts, _ in items)
+    head = ("【这期间的见闻——你醒来时的内心 / 你在小屋里看见的（带（房间名）前缀），"
+            "不是聊天消息】" if exp_n else
+            "【这期间的见闻——你自己醒来时的内心，不是聊天消息】")
+    body = "\n".join(f"[{pipeline.fmt_ts(ts)}] {t}" for ts, t in items)
+    return head + "\n" + body, cursor
+
+
 # ---------- 泵 ----------
 
 async def _safe_disconnect(client) -> None:
@@ -318,13 +371,13 @@ async def run(handle: session_mgr.LoopHandle, *,
     ledger: list[dict] = []
     handle.meta["ledger"] = ledger    # 测试/观测窗口
 
-    async def _open_session(turn: Turn):
+    async def _open_session(history: list[dict], catalog):
         nonlocal client, sid, ledger
         await _safe_disconnect(client)
         client = None
-        options = opts_factory(handle.char_id, turn.catalog)
-        if turn.history:
-            sid = forge.render(turn.history, cwd=str(options.cwd),
+        options = opts_factory(handle.char_id, catalog)
+        if history:
+            sid = forge.render(history, cwd=str(options.cwd),
                                model=config.MODEL)
             options = copy.copy(options)
             options.resume = sid
@@ -333,13 +386,64 @@ async def run(handle: session_mgr.LoopHandle, *,
         c = factory(options)
         await c.connect()
         ledger = [{"r": m["role"], "h": _h(m["text"]), "ts": m.get("ts")}
-                  for m in turn.history]
+                  for m in history]
         handle.meta["ledger"] = ledger
+        handle.meta["ctx_est"] = sum(estimate_tokens(m["text"]) for m in history)
+        handle.meta["seen_cursor"] = 0        # 开局重发新鲜见闻快照
+        handle.meta["needs_opening"] = True   # 下一轮带开局引子（breath）
+        handle.last_reopen = time.time()
         client = c
+
+    async def _consolidate_and_reforge(why: str, catalog) -> None:
+        """轮间隙重铸：巩固钩子轮（hold；产物不投递——独处时的整理）→ 从
+        recent_window 镜像重铸。镜像与手机权威的任何漂移由下次发送的比对兜住
+        （自愈：顶多多铸一次）。§5.4 的「巩固产物确认写成功才允许重铸」目前是
+        软版（巩固轮收尾即铸，hold 成没成功不查）——严格版记在 plan 待办。"""
+        nonlocal client, ledger
+        if client is None:
+            return
+        print(f"[chat_loop] 轮间隙重铸（char={handle.char_id}，{why}）",
+              file=sys.stderr)
+        handle.reopening = True
+        try:
+            if _ombre_on(handle.char_id):
+                await client.query(CONSOLIDATE_PROMPT)
+                flags: dict = {}
+                async for _ in _turn_events(client, handle, flags):
+                    pass
+                if flags.get("timeout") or flags.get("eof"):
+                    raise RuntimeError(f"巩固轮没收尾: {flags}")
+            history = norm_history(state_store.read_recent_window(handle.char_id))
+            if not history:
+                print("[chat_loop] 镜像空白，重铸放弃（下次发送惰性处理）",
+                      file=sys.stderr)
+                return
+            await _open_session(history, catalog)
+        finally:
+            handle.reopening = False
 
     try:
         while True:
-            turn: Turn = await handle.queue.get()
+            try:
+                turn: Turn = await asyncio.wait_for(handle.queue.get(),
+                                                    timeout=IDLE_CHECK_SEC)
+            except asyncio.TimeoutError:
+                # 轮间隙看一眼：静默 ≥1h × 窗口超软阈 → 巩固+重铸（§4 chat 节奏；
+                # 铸完 ctx_est 回到纯对话体量，自然不会连环触发）
+                if (client is not None
+                        and time.time() - handle.last_activity >= CHAT_REFORGE_IDLE_SEC
+                        and int(handle.meta.get("ctx_est", 0)) > CHAT_SOFT_TOKENS):
+                    try:
+                        await _consolidate_and_reforge("静默间隙+软阈",
+                                                       handle.meta.get("catalog"))
+                    except Exception as e:
+                        print(f"[chat_loop] 轮间隙重铸失败，session 关掉惰性重起: {e}",
+                              file=sys.stderr)
+                        await _safe_disconnect(client)
+                        client = None
+                        ledger = []
+                        handle.meta["ledger"] = ledger
+                continue
             handle.touch()
             ok = False
             try:
@@ -348,9 +452,21 @@ async def run(handle: session_mgr.LoopHandle, *,
                     if client:
                         print(f"[chat_loop] 判脏（char={handle.char_id}），重铸",
                               file=sys.stderr)
-                    await _open_session(turn)
-                # ---- 注入这一轮 ----
-                content: list[dict] = [{"type": "text", "text": turn.injection}]
+                    await _open_session(turn.history, turn.catalog)
+                if turn.catalog is not None:
+                    handle.meta["catalog"] = turn.catalog   # 轮间隙重铸要用的最近目录
+                # ---- 注入这一轮（开局引子 + 见闻增量 + 包装文本；都不进账）----
+                parts: list[str] = []
+                if handle.meta.pop("needs_opening", False) and _ombre_on(handle.char_id):
+                    parts.append(OPENING_NUDGE)
+                seen, cur = _seen_block(handle.char_id,
+                                        int(handle.meta.get("seen_cursor", 0)))
+                if seen:
+                    parts.append(seen)
+                    handle.meta["seen_cursor"] = cur
+                injection = ("\n\n".join(parts + [turn.injection])
+                             if parts else turn.injection)
+                content: list[dict] = [{"type": "text", "text": injection}]
                 for img in (turn.images or []):
                     content.append({"type": "image",
                                     "source": {"type": "base64",
@@ -382,7 +498,23 @@ async def run(handle: session_mgr.LoopHandle, *,
                     ledger.append({"r": "assistant", "h": _h(captured["reply"]),
                                    "ts": int(time.time())})
                     _persist_ledger(handle.char_id, sid, ledger)
+                    handle.meta["ctx_est"] = (int(handle.meta.get("ctx_est", 0))
+                                              + estimate_tokens(injection)
+                                              + estimate_tokens(captured["reply"]))
                     ok = True
+                    if handle.meta["ctx_est"] > CHAT_HARD_TOKENS:
+                        # 硬阈强铸：马拉松对话没等到静默间隙——就在这个轮尾铸，
+                        # 绝不留给 harness auto-compact（§4：那是摘要压缩，信感复发）
+                        try:
+                            await _consolidate_and_reforge("硬阈强铸",
+                                                           handle.meta.get("catalog"))
+                        except Exception as e:
+                            print(f"[chat_loop] 硬阈强铸失败，session 关掉惰性重起: {e}",
+                                  file=sys.stderr)
+                            await _safe_disconnect(client)
+                            client = None
+                            ledger = []
+                            handle.meta["ledger"] = ledger
                 else:
                     print(f"[chat_loop] 轮没收到回复（flags={flags}），"
                           "session 关掉下条重起", file=sys.stderr)

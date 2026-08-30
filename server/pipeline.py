@@ -114,9 +114,24 @@ def build_context_timeline(conv_items: list[dict], reflect_limit: int = 5,
         who = config.user_name() if c.get("role") == "user" else "你"
         items.append((int(ts), f"{who}：{c.get('text', '')}"))
 
+    items += seen_items(char_id, reflect_limit=reflect_limit,
+                        experience_limit=experience_limit)
+    items.sort(key=lambda x: x[0])
+    return "\n".join(f"[{fmt_ts(ts)}] {txt}" for ts, txt in items)
+
+
+def seen_items(char_id: Optional[str], reflect_limit: int = 5,
+               experience_limit: int = 0, since_ts: int = 0) -> list[tuple[int, str]]:
+    """时间线里**非对话**的两路（醒来内心 + 小屋经历），按时间升序。
+    build_context_timeline 与 SDK 聊天路（chat_loop 的见闻增量注入）共用这一份
+    渲染口径——别再各写一套。since_ts>0 = 只要这之后新长出来的（增量注入用）。"""
+    items: list[tuple[int, str]] = []
+
     # 最近几次醒来的内心（含 none；不在聊天里，心流日志页可见）。只读日志尾部——append-only 文件会一直长。
     for w in [e for e in state_store.read_wake_log(limit=100, char_id=char_id)
               if (e.get("thoughts") or "").strip()][-reflect_limit:]:
+        if int(w.get("ts", 0)) <= since_ts:
+            continue
         act = {"none": "没做什么", "message": "发了消息"}.get(w.get("action"), "")
         # 被打扰控制拦下的消息：标清楚没送出去，别让他以为发过了接着那条往下聊。
         if w.get("action") == "message" and not w.get("pushed"):
@@ -132,6 +147,8 @@ def build_context_timeline(conv_items: list[dict], reflect_limit: int = 5,
         import world
         reg = world.load_registry()
         for ev in world.read_experience(char_id, limit=experience_limit):
+            if int(ev.get("ts", 0)) <= since_ts:
+                continue
             rn = (reg.get(ev.get("room", "")) or {}).get("name") or ev.get("room", "?")
             actor = ev.get("actor", "")
             name = "你" if actor == char_id else world.entity_name(actor)
@@ -145,7 +162,7 @@ def build_context_timeline(conv_items: list[dict], reflect_limit: int = 5,
             items.append((int(ev.get("ts", 0)), line))
 
     items.sort(key=lambda x: x[0])
-    return "\n".join(f"[{fmt_ts(ts)}] {txt}" for ts, txt in items)
+    return items
 
 
 # ---------- 表情包 ----------
