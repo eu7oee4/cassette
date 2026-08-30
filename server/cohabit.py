@@ -53,7 +53,7 @@ def coding_char():
     这是同居世界对「他在 code 会话里」的物理口径：人还在原房间，只是**在电脑前专注着**
     ——位置不变、状态可见。用途：①注入里给在场者标注（减少被打扰）；②队列对归属
     角色的醒来延后（cohabit_queue._pop_next）；③ /world 给 UI 出状态。
-    探测失败当没有（口径同 wake.code_session_open：宁可醒、别静默困死）。"""
+    探测失败当没有（口径同 wake.code_session_owner：宁可醒、别静默困死）。"""
     try:
         if not code_bridge.session_alive():
             return None

@@ -31,8 +31,12 @@ class QueueBase(CohabitBase):
         super().setUp()
         self._enabled_orig = config.COHABIT_ENABLED
         config.COHABIT_ENABLED = True
-        self._code_open_orig = wake.code_session_open
-        wake.code_session_open = lambda: False
+        # 「电脑前没人」要钉在 cohabit.coding_char 上：队列的避让judge走的是
+        # cq._code_owner → cohabit.coding_char，钉 wake 那边的探针是个空动作
+        # （钉完照样去探真 tmux——开发机上开着 code 会话时测试就会跟着飘）。
+        self._coding_orig = cohabit.coding_char
+        cohabit.coding_char = lambda: None
+        cq._code_cache.update(ts=0.0, owner=None)   # 探测缓存 5 秒，不清会带着上条用例的答案跑
         self._random_orig = cq.random
         # 概率必中 + 洗牌不动（判定可复现；shuffle 置空保持注册序，专门的顺序测试自己控）
         cq.random = types.SimpleNamespace(random=lambda: 0.0, shuffle=lambda x: None)
@@ -45,7 +49,7 @@ class QueueBase(CohabitBase):
         cq.uninstall()
         self._reset_queue()
         config.COHABIT_ENABLED = self._enabled_orig
-        wake.code_session_open = self._code_open_orig
+        cohabit.coding_char = self._coding_orig
         cq.random = self._random_orig
         super().tearDown()
 

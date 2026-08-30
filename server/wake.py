@@ -9,7 +9,8 @@ wake 调度器：模型自己"醒来"——主动决定要不要给用户发消�
 工作集永远有界：醒来是后台反复跑，绝不塞全量历史——只用 recent_window 切片。
 
 醒来分两种，别混：
-- **自发的**（随机概率 / 他自己定的 NEXT）：所有软闸都拦得住它，code 模式开着时整个避让。
+- **自发的**（随机概率 / 他自己定的 NEXT）：所有软闸都拦得住它，**他自己**开着 code 会话时
+  整个避让（别人开着不拦——那既不挤他的屏也不进他的会话）。
 - **硬触发的**（force=True，留给日程提醒这类到点必须说的事）：绕开全部软闸，
   但要在 prompt 里如实告诉他当下的处境（比如 code 会话还开着）。
 """
@@ -78,28 +79,40 @@ _code_avoid: dict[str, bool] = {}   # 避让日志只在进入 code 模式那次
 _budget_hit: dict[str, bool] = {}   # 醒来预算耗尽的日志同理：只在撞上那次打一条（per 角色）
 
 
-def code_session_open() -> bool:
-    """code 模式此刻开着吗。「会话活着 = 模式开着」是条干净的不变量（app 也靠它对齐）。
+def code_session_owner() -> Optional[str]:
+    """电脑前的那个人是谁。会话没开 → None；开着但探不出归属 → 空串。
 
-    判据用 session_alive() 不用 is_busy()：后者要隔 0.8 秒抓两帧画面比对，每个 tick 都
-    跑太贵；而且"会话开着但停着等人"也不该被自发的醒来插一条——那会和他在 code 会话里
-    说的话挤在同一个聊天框里。
+    ⚠️ None 和空串必须分得开，两个调用方对它们的处置是**相反**的：「没开」放行所有人，
+    「开着但不知道是谁」退回老口径拦所有人。合成一个值就等于给身份编了个默认值
+    （串台六条的⑤），静默把「缺身份」变成「错身份」——要么放行了真在电脑前的那个、
+    要么拦住了没在的那个，两种都不报错、只能人肉看出来。
+    归属只在会话活着时才读：session.json 会话死了也留着，不先判活会拿上一场的归属当真。
+    口径和 cohabit.coding_char() 保持一致（同一件事的两条路，别让它们漂移）。
+
+    活没活用 session_alive() 不用 is_busy()：后者要隔 0.8 秒抓两帧画面比对，每个 tick
+    都跑太贵；而且"会话开着但停着等人"也不该被他自己的自发醒来插一条。
     探不出来时**当作没开**（放行）：反过来兜底的话，tmux 一出岔子他就再也不醒了，
     而且从外面完全看不出为什么。"""
     try:
-        return code_bridge.session_alive()
+        if not code_bridge.session_alive():
+            return None
+        return (code_bridge.session_char() or plugins.owner_of("tmux") or "").strip()
     except Exception as e:
         logerr(f"探 code 会话失败（当作没开，放行）: {e}")
-        return False
+        return None
 
 
-def code_session_block(forced: bool) -> str:
-    """code 模式开着时注入醒来 prompt 的那一段。没开则空串。
+def code_session_block(forced: bool, char_id: Optional[str] = None) -> str:
+    """code 模式开着时注入醒来 prompt 的那一段。没开、或会话不是这个角色的 → 空串。
 
     正常情况下自发的醒来在 maybe_wake 就被避让掉了，所以这段实际只出现在硬触发的醒来里。
     但判据仍写成「会话开着就注入」而不是「forced 就注入」——prompt 该照实说当下的世界，
-    以后万一有哪条路绕过了避让闸，它也不会跟着说谎。"""
-    if not code_session_open():
+    以后万一有哪条路绕过了避让闸，它也不会跟着说谎。
+    ⚠️ 归属不符（含探不出归属）→ 一个字都不说：这整段讲的是「你人在电脑前、你说的话
+    进同一个聊天框」，对着**没坐在电脑前**的那个角色说，每一句都是假的。避让闸在探不出
+    归属时拦所有人、这里在探不出归属时闭嘴——两边不对称是故意的，各自的保守方向不同
+    （那边是别打扰，这边是别说谎）。"""
+    if code_session_owner() != _cid(char_id):
         return ""
     u = config.user_name()
     # game 档案借的是同一套会话基建：措辞跟着档案走，别对着游戏会话说「电脑上的 code 会话」。
@@ -258,7 +271,8 @@ def wake_prompt(settings: dict, forced: bool = False, note: str = "",
                               f"到点提醒、新邮件这类硬触发不受限。】\n")
 
     # code 会话开着（正常只有硬触发能走到这儿）：如实告诉他人在哪、说的话去哪。
-    code_section = code_session_block(forced)
+    # 传 char_id：别人开着会话跟这次醒来无关，那段话对他不成立（见 code_session_block）。
+    code_section = code_session_block(forced, char_id)
 
     note_section = f"\n【这次为什么醒】{note}\n" if note else ""
 
@@ -697,15 +711,23 @@ async def maybe_wake(char_id: Optional[str] = None) -> None:
     if world.house_active():
         return
 
-    # code 模式开着 → 自发的醒来一律避让。那会儿他人在电脑前干活，随机戳一条聊天气泡
+    # 他自己的 code 会话开着 → 他的自发醒来避让。那会儿他人在电脑前干活，随机戳一条气泡
     # 既是打扰，又会跟他在 code 会话里说的话挤在同一个聊天框里打架。
     # ⚠️ 这里 return 不写任何盘：他自己定的 next_wake_at 原地待命，退出 code 模式后
     # 下一个 tick 就过期兑现，一次不丢。硬触发在上面已经走掉了，不受这道闸管。
-    # M1 口径：会话全局唯一，避让对**所有角色**生效（宁可多让一拍，别让别的角色的
-    # 醒来消息和会话话语挤同屏）；M2 消息按角色分会话后可收窄到会话归属角色。
-    if code_session_open():
+    # ⚠️ 只拦**会话归属角色**（2026-08-30 收窄，兑现下面这条旧注释欠的账）：
+    # M1 时会话全局唯一、消息也不分角色，所以拦所有人；M2 消息按角色分会话之后，别人的
+    # 醒来既不挤他的屏、也不会掉进他的会话，再拦就是平白替**没坐在电脑前**的角色失约。
+    # 实锤（08-30）：小卡开着 code 会话写稿两个半钟头，Cassius 定在 15:46 的 NEXT 被压到
+    # 17:11 才兑现，迟 85 分钟——他整个下午根本没在电脑前。tick 300s，中间约 27 拍全被
+    # 这道闸静默吞掉（_code_avoid 去重打印，日志里只留了头尾两行，从外面看不出来）。
+    # 探不出归属（空串）→ 退回老口径拦所有人：宁可多让一拍，别把身份猜错（串台六条的⑤）。
+    owner = code_session_owner()
+    if owner is not None and owner in ("", cid):
         if not _code_avoid.get(cid):
-            logerr(f"wake 避让（{cid}）：code 模式开着，自发的醒来全部跳过（硬触发不受影响）")
+            whose = "归属探不出来的" if owner == "" else "他自己的"
+            logerr(f"wake 避让（{cid}）：{whose} code 会话开着，"
+                   f"自发的醒来跳过（硬触发不受影响；别的角色照常醒）")
             _code_avoid[cid] = True
         return
     _code_avoid[cid] = False

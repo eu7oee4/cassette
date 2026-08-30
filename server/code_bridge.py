@@ -369,6 +369,13 @@ def start(context_text: str, auth_key: str, cwd: Optional[str] = None,
     if r.returncode != 0:
         return {"ok": False, "error": f"tmux new-session 失败：{r.stderr[:200]}"}
 
+    # 归属**紧跟着会话建起来就落盘**，别拖到下面 send-keys 之后：session_alive() 从
+    # new-session 返回那一刻起就是真，而 wake 的避让闸是「活着 → 去问归属」——中间这
+    # 0.5 秒里 session.json 还是上一场的，会拿前一个角色的归属去拦人（串台六条的②：
+    # 身份要在发起那一刻就跟值成对落地，别留给一个可变的全局去回答）。
+    _write_session_state({"profile": profile, "session": session,
+                          "started_at": int(time.time()), "char_id": cid})
+
     time.sleep(0.5)   # 等 shell 起来，不然这条命令会敲在半个提示符上
     cmd = f"claude --model {config.MODEL}"
     for c in (mcp_configs or []):
@@ -390,9 +397,7 @@ def start(context_text: str, auth_key: str, cwd: Optional[str] = None,
     cmd += f' --append-system-prompt "$(cat {_shq(SYSTEM_PATH)})"'
     if profile == "code":
         cmd += f' "$(cat {_shq(CONTEXT_PATH)})"'
-    _tmux("send-keys", "-t", session, cmd, "Enter")
-    _write_session_state({"profile": profile, "session": session,
-                          "started_at": int(time.time()), "char_id": cid})
+    _tmux("send-keys", "-t", session, cmd, "Enter")   # 会话状态已在上面落过盘
     if profile == "game":
         ready = _wait_mcp_ready()
         r2 = send(context_text)
