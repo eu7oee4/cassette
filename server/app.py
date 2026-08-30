@@ -2311,7 +2311,7 @@ def _game_story_start_sdk(inp: GameStoryStartIn):
         if forged_sid:
             opts.resume = forged_sid
         await game_loop.run(handle, context_text=context, deliver=deliver,
-                            options=opts, on_closed=_game_loop_closed, user_name=u)
+                            options=opts, on_closed=_game_loop_closed)
 
     game_loop.ensure_default_tips()   # 小抄空白才播种（出厂机制事实，机主可改）
     # 看守不挂（taste 轮）：game_tick 下轮一直来，nudge/idle 两个概念对 game 消失；

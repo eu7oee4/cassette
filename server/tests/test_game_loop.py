@@ -178,7 +178,7 @@ class ReopenTest(unittest.IsolatedAsyncioTestCase):
             self.handle, context_text="〔开场〕",
             deliver=lambda t, s: self.delivered.append((t, s)),
             options=type("O", (), {"cwd": "/tmp/game-cwd"})(),
-            client_factory=factory, reopen_shots=2, user_name="眠眠"))
+            client_factory=factory, reopen_shots=2))
         await asyncio.sleep(0.01)
 
     async def asyncTearDown(self):
@@ -194,9 +194,11 @@ class ReopenTest(unittest.IsolatedAsyncioTestCase):
         self.handle.meta["shots"] = 2                     # 工具层计的账，测试直填
         c1.feed(_asst(TextBlock(text="这章读完了")), _result())
         await asyncio.sleep(0.05)
-        # ① 巩固钩子：进度页提醒进了旧 client
+        # ① 巩固钩子：感知白描提示（无感化：不出现「重开」，是他自己的念头）
         self.assertEqual(len(c1.queries), 2)
-        self.assertIn("进度页", c1.queries[1])
+        self.assertIn("进度记一笔", c1.queries[1])
+        self.assertNotIn("重开", c1.queries[1])
+        self.assertNotIn("系统", c1.queries[1])
         c1.feed(_asst(TextBlock(text="记好了")), _result())   # 他更新完进度页
         await asyncio.sleep(0.05)
         # ② 铸文本史：user 开场 + 他说过的话，全是 TA 见过的原文（tick 不在里面）
@@ -206,19 +208,19 @@ class ReopenTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([m["role"] for m in msgs],
                          ["user", "assistant", "assistant"])
         self.assertEqual(msgs[1]["text"], "这章读完了")
-        # ③ 新 client resume 了铸出的 sid，ping 进去了
+        # ③ 新 client resume 了铸出的 sid，首个 tick 即 ping（没有自检文案）
         self.assertEqual(len(self.clients), 2)
         c2 = self.clients[1]
         self.assertEqual(c2.options.resume, "sid-forged")
-        self.assertIn("自检", c2.queries[0])
-        c2.feed(_asst(TextBlock(text="好")), _result())       # ping 回了
+        self.assertEqual(c2.queries[0], game_loop.TICK_PROMPT)
+        c2.feed(_asst(TextBlock(text="接上了，继续读")), _result())
         await asyncio.sleep(0.05)
         self.assertFalse(self.handle.reopening)
         self.assertEqual(self.handle.meta["shots"], 0)
-        # ④ ping 的回话不上屏；进度页轮的正文照常上屏；ping 后续弹一个 tick
+        # ④ ping 轮是真轮，说的话正常上屏；收完继续续弹
         texts = [t for t, _ in self.delivered]
         self.assertIn("记好了", texts)
-        self.assertNotIn("好", texts)
+        self.assertIn("接上了，继续读", texts)
         self.assertEqual(c2.queries[1], game_loop.TICK_PROMPT)
         # ⑤ 重开后 TA 的消息进的是新 client（tick 轮收完后轮到它）
         self.handle.queue.put_nowait("继续")
@@ -246,7 +248,7 @@ class ReopenTest(unittest.IsolatedAsyncioTestCase):
             c1.feed(_asst(TextBlock(text="三")), _result())    # 第 3 次：不再等，重铸
             await asyncio.sleep(0.05)
             self.assertEqual(len(c1.queries) and len(self.clients), 1)  # 还在巩固轮
-            self.assertIn("进度页", c1.queries[-1])
+            self.assertIn("进度记一笔", c1.queries[-1])
         finally:
             game_loop.REOPEN_DEFER_SHOTS = defer_orig
 

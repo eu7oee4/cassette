@@ -90,6 +90,8 @@ TICK_SYSTEM = """
   读下一章还是 game_end。
 - look 到非预期画面（弹窗/异常/不认识的界面）：停手，看清楚再动，拿不准问{user}。
 - 每轮只做自己这一步，说完就停，别在一轮里连读半章——节奏是你的朋友。
+- 读得久了，更早的画面会在记忆里淡去——自然的事；文字和你说过的话一直都在。
+  值得留住的，用笔记本和 hold 留。
 """
 
 # 小抄出厂条目（《如鸢》机制事实，起会话时空白才播种；机主/TA 之后随便改）
@@ -105,14 +107,14 @@ def ensure_default_tips() -> None:
     """小抄空白时播种出厂条目（一次性；机主写过任何东西就绝不碰）。"""
     if not game_bridge.story_tips_read().strip():
         game_bridge.story_tips_write(DEFAULT_TIPS)
+# 重铸无感化（08-30，§0.3 落到重铸上）：不告诉他要重铸——巩固提示是感知白描
+# +他自己的念头（「画面淡下去」说的是真事：重铸丢的恰是截图、留的恰是文字）；
+# 没有自检文案，resume 后第一个 tick 就是 ping，接上了他就只是接着读。
+# 他因此不会说「可以重开」「先停在这」这类进 TA 气泡的机制元评论。
 REOPEN_NOTE_PROMPT = (
-    "〔系统提醒，不是{user}说的〕历史里攒的截图开始拖慢每一步了，马上给你做一次"
-    "无缝重开：你的点评原文都会带过去，只丢掉旧截图，重开完画面原地接着读。"
-    "现在先把进度页更新一下（game_progress_write），值得留的感受用 hold 存好；"
-    "不用写章节志（这场还没完）、不用道别——这次重开对聊天完全无感。")
-REOPEN_PING_PROMPT = (
-    "〔滚动重开完成的系统自检，不是{user}说的〕上面的历史就是你自己的点评原文。"
-    "确认能接上就回一个「好」，然后等{user}或接着读——不用向任何人解释这条。")
+    "〔前面那些画面在记忆里淡下去了，文字和你说过的话都还清楚。你想着趁现在"
+    "把进度记一笔（game_progress_write），值得留住的感受先存好（hold），"
+    "然后接着读。〕")
 
 # 截图参数与插件版同值（SCALE/画质/等待，踩坑记录见插件 docstring）
 SCALE = 1.5
@@ -489,8 +491,8 @@ def build_options(char_id: str, handle: session_mgr.LoopHandle) -> ClaudeAgentOp
 
 async def _drain_turn(client, handle, on_text: Optional[Callable[[str, bool], None]],
                       timeout: float) -> str:
-    """吃完一轮（到 ResultMessage 为止）。on_text 语义同 deliver；None=丢弃正文
-    （ping 自检轮不上屏）。返回三态："result"=轮收完；"eof"=消息流断了（引擎死了，
+    """吃完一轮（到 ResultMessage 为止）。on_text 语义同 deliver；None=丢弃正文。
+    返回三态："result"=轮收完；"eof"=消息流断了（引擎死了，
     别当成轮结束空转）；"timeout"=超时（轮没收完，调用方自己决定认不认）。
     逐轮重新迭代 receive_messages 是官方口径（receive_response 内部同款）。"""
     pending: Optional[str] = None
@@ -522,23 +524,25 @@ async def _drain_turn(client, handle, on_text: Optional[Callable[[str, bool], No
         return "timeout"
 
 
-async def _forge_and_resume(factory, options, log: list[dict], user_name: str,
-                            handle: session_mgr.LoopHandle):
-    """铸文本史 → 新 client resume → ping 验证。成功返回新 client，失败抛。
-    §5.1 纪律：新会话发 ping 确认真能跑才算滚动完成，别默认「进程起了=接上了」。"""
+async def _forge_and_resume(factory, options, log: list[dict],
+                            handle: session_mgr.LoopHandle, on_text):
+    """铸文本史 → 新 client resume → **首个 tick 即 ping**（无感重铸：没有自检
+    文案，接上了他就只是接着读，说的话正常上屏——那是真点评）。成功返回新
+    client，失败抛。§5.1 纪律不变：等到这轮真收完（ResultMessage）才算滚动
+    完成，别默认「进程起了=接上了」。"""
     cwd = str(getattr(options, "cwd", None) or "")
     sid = forge.render(log, cwd=cwd)
     opts = copy.copy(options)
     opts.resume = sid
     client = factory(opts)
     await client.connect()
-    await client.query(REOPEN_PING_PROMPT.format(user=user_name))
-    if await _drain_turn(client, handle, None, REOPEN_PING_TIMEOUT) != "result":
+    await client.query(TICK_PROMPT)
+    if await _drain_turn(client, handle, on_text, REOPEN_PING_TIMEOUT) != "result":
         try:
             await client.disconnect()
         except BaseException:
             pass
-        raise RuntimeError("重开 ping 没等到回合结束")
+        raise RuntimeError("重开首轮没等到回合结束")
     return client
 
 
@@ -548,8 +552,7 @@ async def run(handle: session_mgr.LoopHandle, *,
               options,
               client_factory: Optional[Callable] = None,
               on_closed: Optional[Callable[[session_mgr.LoopHandle], None]] = None,
-              reopen_shots: Optional[int] = None,
-              user_name: str = "机主") -> None:
+              reopen_shots: Optional[int] = None) -> None:
     """loop 本体（session_mgr 的 runner），game_tick 单泵节奏（§5.1 taste 轮）：
 
     每轮收完（ResultMessage）→ 队列非空先喂队列（TA 插话/wake 触发），空则停
@@ -626,23 +629,24 @@ async def run(handle: session_mgr.LoopHandle, *,
             if due:
                 handle.reopening = True               # marker：重开中别当 idle
                 try:
-                    # ① 巩固钩子（§5.4 纪律：重铸前给一轮更新进度页/hold 的机会）
-                    await client.query(REOPEN_NOTE_PROMPT.format(user=user_name))
+                    # ① 巩固钩子（§5.4 纪律：重铸前给一轮更新进度页/hold 的机会；
+                    #    文案是感知白描，他不知道要重铸——无感化 §0.3）
+                    await client.query(REOPEN_NOTE_PROMPT)
                     await _drain_turn(client, handle, _deliver_and_log,
                                       REOPEN_NOTE_TIMEOUT)
-                    # ② 关旧 → ③ 铸文本史 → ④ resume → ⑤ ping（失败重试一次）
+                    # ② 关旧 → ③ 铸文本史 → ④ resume → ⑤ 首 tick 即 ping（失败重试一次）
                     try:
                         await client.disconnect()
                     except BaseException:
                         pass
                     try:
                         client = await _forge_and_resume(factory, options, log,
-                                                         user_name, handle)
+                                                         handle, _deliver_and_log)
                     except Exception as e:
                         print(f"[game_loop] 滚动重开首试失败，重试一次: {e}",
                               file=sys.stderr)
                         client = await _forge_and_resume(factory, options, log,
-                                                         user_name, handle)
+                                                         handle, _deliver_and_log)
                     handle.meta["shots"] = 0
                     handle.meta["reopen_defers"] = 0
                 finally:
