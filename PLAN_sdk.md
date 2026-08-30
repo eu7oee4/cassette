@@ -885,6 +885,14 @@ SDK 化后独立终端页失去存在理由，四个职责全有更好归宿：�
   ③breath 补集偏置未做（Ombre 侧时间过滤未验，§5.4 待实测）；④行为清单半边
   等账本（PR13）；⑤app 若把表情气泡单独存成 assistant 消息会造成假脏（自愈但
   费一次铸），真机看「判脏」日志频率定夺。
+- **补（08-30 机主提议，排期随灰度批次）：聊天/醒来挂只读代码工具**。
+  Read/Grep/Glob 白名单进 chat/wake 工具面——他聊着天就能翻自己的仓库，
+  不用为了看一眼代码切 code 段。口径三条：**只读**（无 Bash/无写，带外门
+  仍只管 code 段的解锁）；**路径圈定**（白名单限定到仓库目录，别全盘 Read
+  ——聊天场景能读任意盘上文件是隐私面扩大）；**@-mention 防线重看**（
+  neutral_cwd 挡自动附文件的防线在挂 Read+add_dirs 后语义变化，pipeline
+  neutral_cwd 注释里那个 @State 实锤别再踩一遍）。SDK 路挂载点=chat_loop
+  build_options 一处；-p 路若同挂要动 base_claude_args。
 - **PR11 铸回两条（过渡期机制，§4 注）**：游戏点评回流铸 assistant 轮 + 两行
   文档事件框住；wake 过渡态 B——独立短 loop 醒来，说的话铸回聊天 transcript。
   触发机制一行不改。PR12/PR13 落地后分别退役。
