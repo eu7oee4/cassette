@@ -59,6 +59,31 @@ class ForgeTest(unittest.TestCase):
             # 红线：字面严格等于权威原句
             self.assertEqual(ev["message"]["content"][0]["text"], m["text"])
 
+    def test_consecutive_same_role_merged(self):
+        """连续同角色合并成一轮（08-30 game 污染根修）：铸出来的历史必须严格
+        user/assistant 交替——几十个连续 assistant 事件会让 CLI 在缝里塞合成
+        user 槽，模型学舌把「user·system<total_tokens>…」缀在话尾。"""
+        msgs = [
+            {"role": "user", "text": "去读两章", "ts": 100},
+            {"role": "assistant", "text": "好"},
+            {"role": "assistant", "text": "这句妙"},
+            {"role": "assistant", "text": "读完了"},
+            {"role": "user", "text": "怎么样？", "ts": 200},
+            {"role": "user", "text": "喂？", "ts": 201},
+            {"role": "assistant", "text": "在想", "ts": 205},
+        ]
+        _, path = self._render(msgs=msgs)
+        evs = self._events(path)
+        self.assertEqual([e["type"] for e in evs], ["user", "assistant",
+                                                    "user", "assistant"])
+        # 字面=逐字拼接（\n\n），一个字不动
+        self.assertEqual(evs[1]["message"]["content"][0]["text"],
+                         "好\n\n这句妙\n\n读完了")
+        self.assertEqual(evs[2]["message"]["content"][0]["text"],
+                         "怎么样？\n\n喂？")
+        # 合并轮的时间戳=首条的（时间是权威源的事实）
+        self.assertTrue(evs[2]["timestamp"].startswith("1970-01-01T00:03:20"))
+
     def test_assistant_event_shape(self):
         _, path = self._render()
         ev = self._events(path)[1]

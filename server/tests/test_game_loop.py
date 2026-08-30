@@ -63,9 +63,7 @@ class GameLoopTest(unittest.IsolatedAsyncioTestCase):
         sm.set_event_loop(asyncio.get_running_loop())
         sm._registry.clear()
         self._pause_orig = game_loop.TICK_PAUSE_SEC
-        self._stable_orig = game_loop._screen_stable
         game_loop.TICK_PAUSE_SEC = 0            # 测试不等 tick 停顿
-        game_loop._screen_stable = lambda: True  # 别在单测里打 adb
         self.handle = sm.LoopHandle(char_id="cass", scene="game")
         self.delivered: list[tuple[str, bool]] = []
         self.closed: list = []
@@ -86,7 +84,6 @@ class GameLoopTest(unittest.IsolatedAsyncioTestCase):
 
     async def asyncTearDown(self):
         game_loop.TICK_PAUSE_SEC = self._pause_orig
-        game_loop._screen_stable = self._stable_orig
         if not self.task.done():
             self.task.cancel()
             await asyncio.sleep(0.01)
@@ -180,9 +177,7 @@ class ReopenTest(unittest.IsolatedAsyncioTestCase):
         self.forged: list = []
         self._render_orig = game_loop.forge.render
         self._pause_orig = game_loop.TICK_PAUSE_SEC
-        self._stable_orig = game_loop._screen_stable
         game_loop.TICK_PAUSE_SEC = 0
-        game_loop._screen_stable = lambda: True
 
         def fake_render(messages, **kw):
             self.forged.append((list(messages), kw))
@@ -204,7 +199,6 @@ class ReopenTest(unittest.IsolatedAsyncioTestCase):
     async def asyncTearDown(self):
         game_loop.forge.render = self._render_orig
         game_loop.TICK_PAUSE_SEC = self._pause_orig
-        game_loop._screen_stable = self._stable_orig
         if not self.task.done():
             self.task.cancel()
             await asyncio.sleep(0.01)
@@ -249,28 +243,53 @@ class ReopenTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("继续", c2.queries)
         self.assertNotIn("继续", c1.queries)
 
-    async def test_reopen_deferred_until_stable(self):
-        """稳定性断言：没定格就推迟；连推 REOPEN_MAX_DEFERS 次后不再等。"""
-        game_loop._screen_stable = lambda: False           # 画面永远在动
-        defer_orig = game_loop.REOPEN_DEFER_SHOTS
-        game_loop.REOPEN_DEFER_SHOTS = 0                   # 阈值不抬，专测推迟计数
-        try:
-            c1 = self.clients[0]
-            self.handle.meta["shots"] = 2
-            c1.feed(_asst(TextBlock(text="一")), _result())    # 第 1 次：推迟
-            await asyncio.sleep(0.05)
-            self.assertEqual(self.handle.meta["reopen_defers"], 1)
-            self.assertEqual(self.forged, [])
-            c1.feed(_asst(TextBlock(text="二")), _result())    # 第 2 次：再推迟
-            await asyncio.sleep(0.05)
-            self.assertEqual(self.handle.meta["reopen_defers"], 2)
-            self.assertEqual(self.forged, [])
-            c1.feed(_asst(TextBlock(text="三")), _result())    # 第 3 次：不再等，重铸
-            await asyncio.sleep(0.05)
-            self.assertEqual(len(c1.queries) and len(self.clients), 1)  # 还在巩固轮
-            self.assertIn("进度记一笔", c1.queries[-1])
-        finally:
-            game_loop.REOPEN_DEFER_SHOTS = defer_orig
+    async def test_seam_pollution_scrubbed_before_deliver_and_log(self):
+        """引擎缝隙学舌（08-30 真机实锤）：话尾的 user·/token 标记/截断提示
+        在投递前刷掉——TA 看不到，也绝不进重铸材料（防自我放大）。"""
+        c1 = self.clients[0]
+        self.handle.meta["shots"] = 2
+        c1.feed(_asst(TextBlock(text=(
+            "这句台词妙\n\nuser·\n\n"
+            "system<total_tokens>15000000 tokens left</total_tokens>"))),
+            _asst(TextBlock(text=(
+                "user·\n\n(Content truncated in the middle to save tokens)"))),
+            _result())
+        await asyncio.sleep(0.05)
+        texts = [t for t, _ in self.delivered]
+        self.assertEqual(texts, ["这句台词妙"])    # 第二段刷完全空=整段不投
+        c1.feed(_asst(TextBlock(text="记好了")), _result())   # 巩固轮
+        await asyncio.sleep(0.05)
+        msgs, _ = self.forged[0]
+        self.assertNotIn("total_tokens", str(msgs))
+        self.assertNotIn("user·", str(msgs))
+
+    async def test_reopen_carries_pre_log(self):
+        """pre_log（进场景铸过的聊天尾窗）每次重开都在最前——重铸不丢
+        「游戏开始前的对话」（08-30 小卡实告的缺口）。"""
+        self.task.cancel()
+        await asyncio.sleep(0.01)
+        sm._registry.clear()
+        self.handle = sm.LoopHandle(char_id="cass", scene="game")
+        self.clients.clear()
+        pre = [{"role": "user", "text": "去读两章剧情", "ts": 100},
+               {"role": "assistant", "text": "好，我去", "ts": 101}]
+        self.task = asyncio.create_task(game_loop.run(
+            self.handle, context_text="〔开场〕", pre_log=pre,
+            deliver=lambda t, s: self.delivered.append((t, s)),
+            options=type("O", (), {"cwd": "/tmp/game-cwd"})(),
+            client_factory=lambda o: (self.clients.append(FakeClient(o))
+                                      or self.clients[-1]),
+            reopen_shots=2))
+        await asyncio.sleep(0.01)
+        c1 = self.clients[0]
+        self.handle.meta["shots"] = 2
+        c1.feed(_asst(TextBlock(text="这章读完了")), _result())
+        await asyncio.sleep(0.05)
+        c1.feed(_asst(TextBlock(text="记好了")), _result())    # 巩固轮
+        await asyncio.sleep(0.05)
+        msgs, _ = self.forged[0]
+        self.assertEqual([m["text"] for m in msgs][:3],
+                         ["去读两章剧情", "好，我去", "〔开场〕"])
 
     async def test_reopen_ping_fail_retries_then_dies(self):
         c1 = self.clients[0]

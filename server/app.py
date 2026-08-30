@@ -2354,22 +2354,26 @@ def _game_story_start_sdk(inp: GameStoryStartIn):
     live = pipeline.strip_markers(state_store.get_live_reply()).strip()
     if live:
         msgs.append({"role": "assistant", "text": live, "ts": int(time.time())})
+    pre_log: list[dict] = []
     forged_sid = None
     if msgs:
         try:
-            forged_sid = forge.render(forge.tail_window(msgs), cwd=code_bridge.GAME_CWD)
+            pre_log = forge.tail_window(msgs)
+            forged_sid = forge.render(pre_log, cwd=code_bridge.GAME_CWD)
         except Exception as e:
+            pre_log = []
             logerr(f"进场景铸造失败（这次退回无历史开场）: {e}")
     u = config.user_name()
-    scene = (f"【场景】刚才在聊天里说好了你去玩游戏，你自己调 game_start 切过来了——还是你，"
-             "现在这个会话里你手上有模拟器里的游戏（game_* 工具 + 你的记忆；没有电脑，"
-             f"跑不了命令，Read 只用来看 {u} 发来的图）。这个会话是常驻的：{u}随时会插话，"
-             "你说的每段话都实时回到 TA 的聊天气泡里。")
-    tail = (f"\n【这次去干什么】\n〔现在是 {pipeline.now_str()}〕\n{task}\n"
-            f"〔这段是你在聊天里自己说的打算，已经原样回显给{u}了，说歪了 TA 会来纠正。〕"
-            if task else
-            f"\n〔现在是 {pipeline.now_str()}〕先 game_notes_read 翻翻剧情本看看上次到哪了，"
-            "想看什么自己挑。")
+    # 开场无感化（08-30 机主拍板：切游戏/切回来都不要交接感——就是同一个人拿到了
+    # 工具）：不再复述「说好了你去玩游戏」，不再把任务当【交接单】念一遍、更不说
+    # 「已回显给{u}」——那几句会引他开口先把任务再播报一遍（实锤：「去玩游戏了，
+    # 说好的是……」气泡）。刚才的聊天已经铸在他记忆里（pre_log），任务就在其中；
+    # 这里只给感知白描 + 一句轻推。「别交接」的行为契约在 TICK_SYSTEM 一次性写死。
+    scene = (f"〔现在是 {pipeline.now_str()}。你在模拟器前坐下来了——game_* 工具"
+             f"在手上（没有电脑，跑不了命令；Read 只用来看{u}发来的图）。"
+             f"你说的话照旧走你们的聊天气泡，{u}随时会插话。〕")
+    tail = (f"\n〔要做的事刚在聊天里说定了：{task}〕" if task else
+            "\n〔先 game_notes_read 翻翻剧情本看看上次到哪了，想看什么自己挑。〕")
     context = scene + _GAME_CTX_CAVEAT_SDK + tail
     deliver = _deliver_game_segment(cid)
 
@@ -2378,6 +2382,7 @@ def _game_story_start_sdk(inp: GameStoryStartIn):
         if forged_sid:
             opts.resume = forged_sid
         await game_loop.run(handle, context_text=context, deliver=deliver,
+                            pre_log=pre_log,
                             options=opts, on_closed=_game_loop_closed)
 
     game_loop.ensure_default_tips()   # 小抄空白才播种（出厂机制事实，机主可改）

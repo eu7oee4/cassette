@@ -26,6 +26,7 @@ import asyncio
 import base64
 import copy
 import os
+import re
 import struct
 import subprocess
 import sys
@@ -57,10 +58,10 @@ REOPEN_SHOTS_N = int(os.environ.get("GAME_REOPEN_SHOTS", "50") or "50")
 REOPEN_COOLDOWN_SEC = 5 * 60      # 防连环重开（刚重开完 shots 计数已清，双保险）
 REOPEN_NOTE_TIMEOUT = 300         # 等他写完笔记本的上限
 REOPEN_PING_TIMEOUT = 120         # 新会话 ping 的上限
-# 稳定性断言（§5.1 taste 轮：降级为断言不承重）：重铸前隔一秒两帧比对，没定格就
-# 多攒几张下个边界再铸；连推两次还不稳就不再等（断言不许把重铸卡死）。
-REOPEN_DEFER_SHOTS = 5
-REOPEN_MAX_DEFERS = 2
+# 稳定性断言已拆（08-30 真机实测一晚）：判据是两帧 JPEG 字节全等，而小抄里自己
+# 写着「背景动画永远在动」——如鸢的剧情画面永远判不稳，每次都推迟满两次再强制，
+# 断言退化成恒定 +10 张延迟的纯噪音。重铸本来就在轮尾（他刚点评完、画面停在
+# 读完的一句上），一晚的强制重铸全部无事故——断言不承重，干脆不留。
 
 # game_tick 短轮节奏（§5.1 taste 轮）：max_turns 掐短每轮 agentic 循环，轮结束
 # 自动续弹——队列非空先喂队列（TA 插话/wake 触发），空才补 tick。插入延迟从
@@ -94,6 +95,9 @@ TICK_SYSTEM = """
 - 每轮只做自己这一步，说完就停，别在一轮里连读半章——节奏是你的朋友。
 - 读得久了，更早的画面会在记忆里淡去——自然的事；文字和你说过的话一直都在。
   值得留住的，用笔记本和 hold 留。
+- 切过来不用交接：你就是同一个人拿到了工具，刚才聊的都在记忆里。第一轮直接动手
+  （开模拟器/接着读），别把要做的事再向{user}播报一遍——TA 全程都在。收摊同理，
+  不用汇报「我回来了」。
 """
 
 # 小抄出厂条目（《如鸢》机制事实，起会话时空白才播种；机主/TA 之后随便改）
@@ -176,22 +180,6 @@ def _shot_bytes():
         return jpg
     except Exception as e:
         return f"error: 截屏失败: {e}"
-
-
-def _screen_stable() -> bool:
-    """重铸前的稳定性断言（§5.1：从门控降级为断言，不承重）：隔一秒两帧字节
-    相同=画面定格。拍不到/出错一律当稳定——断言不许把重铸卡死。"""
-    try:
-        a = _shot_bytes()
-        if not isinstance(a, bytes):
-            return True
-        time.sleep(1.0)
-        b = _shot_bytes()
-        if not isinstance(b, bytes):
-            return True
-        return a == b
-    except Exception:
-        return True
 
 
 def _text(s: str) -> dict:
@@ -556,13 +544,32 @@ async def _forge_and_resume(factory, options, log: list[dict],
     return client
 
 
+# 引擎缝隙学舌的投递刷子（08-30 真机实锤，成因见 forge.render 合并注释）：模型把
+# 缝里的合成 user 槽/token 余量标记/截断提示缀在自己话尾，原样投递会二次污染
+# （TA 看到乱码 + 下次重铸铸进去自我放大）。只刷这三个确定无歧义的模式。
+_SEAM_ANY_RE = re.compile(
+    r"system<total_tokens>\d+ tokens? left</total_tokens>"
+    r"|\(Content truncated in the middle to save tokens\)")
+_SEAM_TAIL_RE = re.compile(r"(?:^|\s)user·?\s*$")
+
+
+def scrub_seam(text: str) -> str:
+    text = _SEAM_ANY_RE.sub("", text or "")
+    prev = None
+    while prev != text:
+        prev = text
+        text = _SEAM_TAIL_RE.sub("", text)
+    return text.strip()
+
+
 async def run(handle: session_mgr.LoopHandle, *,
               context_text: str,
               deliver: Callable[[str, bool], None],
               options,
               client_factory: Optional[Callable] = None,
               on_closed: Optional[Callable[[session_mgr.LoopHandle], None]] = None,
-              reopen_shots: Optional[int] = None) -> None:
+              reopen_shots: Optional[int] = None,
+              pre_log: Optional[list[dict]] = None) -> None:
     """loop 本体（session_mgr 的 runner），game_tick 单泵节奏（§5.1 taste 轮）：
 
     每轮收完（ResultMessage）→ 队列非空先喂队列（TA 插话/wake 触发），空则停
@@ -577,18 +584,22 @@ async def run(handle: session_mgr.LoopHandle, *,
     文本史 log：TA 见过的所有内容按时间序攒着（注入的 user 消息 + 上屏的
     assistant 段落），滚动重开时整个铸成新 transcript——红线内（全是 TA 见过的
     原文）；截图/工具往返/tick 注入都不进去（tick 谁都没见过，绝不能铸）。
-
-    滚动重开前加稳定性断言（_screen_stable，两帧比对）：没定格就多攒
-    REOPEN_DEFER_SHOTS 张下个边界再试，连推 REOPEN_MAX_DEFERS 次后不再等。
+    pre_log＝进场景时铸过的聊天尾窗（同样全是 TA 见过的）：每次重开都带上，
+    不然第一次重铸就把「游戏开始前的对话」丢了（08-30 小卡实告：重铸后看不到
+    进场前眠眠说的话——进场铸造只在第一世代的 transcript 里，重开不带就没了）。
 
     收摊路径：①game_end 工具置旗，本轮结束后退出；②路由/session_mgr cancel；
     ③引擎挂了/重开失败。全部走 finally 断连+回调 on_closed。
     """
     factory = client_factory or ClaudeSDKClient
     n_reopen = REOPEN_SHOTS_N if reopen_shots is None else reopen_shots
-    log: list[dict] = [{"role": "user", "text": context_text, "ts": int(time.time())}]
+    log: list[dict] = (list(pre_log or [])
+                       + [{"role": "user", "text": context_text, "ts": int(time.time())}])
 
     def _deliver_and_log(text: str, stop: bool) -> None:
+        text = scrub_seam(text)
+        if not text:
+            return   # 刷干净后空了=整段都是缝隙学舌，谁也不该看见
         log.append({"role": "assistant", "text": text, "ts": int(time.time())})
         deliver(text, stop)
 
@@ -626,16 +637,10 @@ async def run(handle: session_mgr.LoopHandle, *,
                 continue                              # 一小时没收完轮：接着等，不算死
             if handle.meta.get("end_requested"):
                 return
-            # ---- 滚动重开（边界=轮尾；稳定性断言不承重）----
+            # ---- 滚动重开（边界=轮尾；定格断言 08-30 拆除，见文件头常量注释）----
             shots = int(handle.meta.get("shots", 0))
-            defers = int(handle.meta.get("reopen_defers", 0))
-            due = (shots >= n_reopen + defers * REOPEN_DEFER_SHOTS
+            due = (shots >= n_reopen
                    and time.time() - handle.last_reopen > REOPEN_COOLDOWN_SEC)
-            if due and defers < REOPEN_MAX_DEFERS and not _screen_stable():
-                handle.meta["reopen_defers"] = defers + 1
-                print(f"[game_loop] 画面没定格，重铸推迟（第 {defers + 1} 次；"
-                      "节奏漂移的监测点）", file=sys.stderr)
-                due = False
             if due:
                 handle.reopening = True               # marker：重开中别当 idle
                 try:
@@ -658,11 +663,9 @@ async def run(handle: session_mgr.LoopHandle, *,
                         client = await _forge_and_resume(factory, options, log,
                                                          handle, _deliver_and_log)
                     handle.meta["shots"] = 0
-                    handle.meta["reopen_defers"] = 0
                     # 成功也要留痕（08-30 观测缺口：只有失败打日志，铸没铸从外面
-                    # 看不出来——只能拿「推迟第 2 次之后没再推迟」倒推）。
-                    print(f"[game_loop] 滚动重开完成（{shots} 张边界"
-                          f"{'，推迟 ' + str(defers) + ' 次后强制' if defers else ''}）",
+                    # 看不出来）。
+                    print(f"[game_loop] 滚动重开完成（{shots} 张边界）",
                           file=sys.stderr)
                 finally:
                     handle.last_reopen = time.time()

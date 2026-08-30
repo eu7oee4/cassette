@@ -135,6 +135,21 @@ def render(messages: list[dict], *, cwd, session_id: Optional[str] = None,
             raise ValueError("第一条消息必须带 ts（时间是权威源的事实，不在这里发明）")
         norm.append((role, text, float(ts)))
 
+    # 连续同角色合并成一轮（08-30 game 实锤的污染根修）：铸出来的历史必须长得像
+    # 引擎自己会写的历史——严格 user/assistant 交替。游戏点评那种一口气几十条
+    # assistant 铸成几十个连续事件后，CLI 加载时会在缝里塞合成 user 槽（空槽+
+    # token 余量标记+截断提示），模型看满屏这种缝就学舌，把「user·system<total_
+    # tokens>…」缀在自己每段话结尾，投递→再铸→自我放大。合并=逐字拼接（\n\n），
+    # 字面不动，红线合规（口径同 sse 把一轮多段拼成 full_reply）。
+    merged: list[tuple[str, str, float]] = []
+    for role, text, t in norm:
+        if merged and merged[-1][0] == role:
+            prev_role, prev_text, prev_t = merged[-1]
+            merged[-1] = (prev_role, prev_text + "\n\n" + text, prev_t)
+        else:
+            merged.append((role, text, t))
+    norm = merged
+
     if session_id is None:
         digest = hashlib.sha256(
             json.dumps([slug(cwd)] + [[r, t, s] for r, t, s in norm],
