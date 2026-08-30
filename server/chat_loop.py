@@ -207,7 +207,7 @@ def build_injection(messages, char_id: Optional[str],
     import pipeline
     last = messages[-1]
     lines = [h for h in (extra_hints or []) if h]
-    lines.append(pipeline.one_turn_hint("chat"))
+    lines.append(pipeline.one_turn_hint("chat_session"))
     pending = pipeline.pending_todo_block(char_id)
     if pending:
         lines.append(pending)

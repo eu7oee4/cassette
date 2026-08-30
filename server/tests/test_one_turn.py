@@ -148,12 +148,24 @@ class TestOneTurnHint(unittest.TestCase):
         self.assertNotIn("[[next_wake:", h)
 
     def test_both_state_the_two_options(self):
+        """机主 08-30：存在论开场白（你只有这一轮/进程结束）全线删掉，只留机制两条。"""
         for kind in ("chat", "wake"):
             h = pipeline.one_turn_hint(kind)
-            self.assertIn("你只有这一轮", h)
-            self.assertIn("我现在就去", h)   # 点名要禁的句式
+            self.assertNotIn("你只有这一轮", h)
+            self.assertNotIn("进程", h)
             self.assertIn("①", h)
             self.assertIn("②", h)
+            self.assertIn("别把这件事说出口", h)
+
+    def test_session_variant_usage_only(self):
+        """SDK 常驻路（机主 08-30 拍板）：只留 next_wake 用法，
+        「你只有这一轮/进程结束/这轮那轮」的存在论解释全删。"""
+        h = pipeline.one_turn_hint("chat_session")
+        self.assertIn("[[next_wake:", h)
+        self.assertNotIn("只有这一轮", h)
+        self.assertNotIn("进程", h)
+        self.assertNotIn("这轮", h)
+        self.assertNotIn("①", h)
 
 
 class TestWakeOutputTodo(StateBase):
@@ -222,7 +234,7 @@ class TestWakeOutputTodo(StateBase):
             p = str(wake.wake_prompt(settings, char_id=self.cid))
         finally:
             pipeline.tool_menu_block, pipeline.ombre_alive = orig_menu, orig_ombre
-        self.assertIn("你只有这一轮", p)
+        self.assertIn("别把这件事说出口", p)   # 一轮规矩还在（存在论开场白已删）
         self.assertIn("给安瞬回信", p)
         self.assertIn("3小时 | 给安瞬回信", p)   # NEXT 那行的写法示例
 

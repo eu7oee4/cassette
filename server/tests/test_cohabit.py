@@ -427,7 +427,7 @@ class TestExecute(CohabitBase):
         self.assertEqual(state_store.read_schedule(self.cid)["next_wake_todo"], "给安瞬回信")
         self.wake_once(out("none"))
         self.assertIn("给安瞬回信", self.prompts[-1])
-        self.assertIn("你只有这一轮", self.prompts[-1])
+        self.assertIn("别把这件事说出口", self.prompts[-1])   # 一轮规矩还在（存在论开场白已删）
 
     def test_next_todo_not_in_wake_note(self):
         # 灰字/日志里只有时间：待办是他给自己留的话，不往用户那边漏
