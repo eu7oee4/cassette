@@ -279,7 +279,7 @@ def wake_prompt(settings: dict, forced: bool = False, note: str = "",
     # 「你只有这一轮」+ 上一轮给自己留的活：紧挨着 NEXT 那两句放——二选一的②说的就是
     # 怎么写 NEXT，隔开了等于让他自己去拼。
     one_turn_section = f"\n{pipeline.one_turn_hint('wake')}\n"
-    todo = pipeline.pending_todo_block(char_id)
+    todo = pipeline.pending_todo_block(char_id, kind="wake")
     todo_section = f"\n{todo}\n" if todo else ""
 
     return pipeline.SplitPrompt(stable, f"""【这是一次你自己的醒来，不是{u}发来的消息】
@@ -561,11 +561,16 @@ def do_wake_sync(settings: dict, trigger: str, force: bool = False, note: str = 
         state_store.append_wake_log({"ts": now_ts, "time": pipeline.now_str(), "source": "wake",
                                      "action": "error", "trigger": trigger}, char_id=char_id)
         # 错误退避 30 分钟：最小间隔闸(180s)小于 tick(300s) 拦不住重试——claude 登录态过期
-        # 这类持续失败场景会每个 tick 起一次注定失败的子进程。不动他自定的 next_wake_at。
+        # 这类持续失败场景会每个 tick 起一次注定失败的子进程。
         with state_store.SCHEDULE_LOCK:
             sched = state_store.read_schedule(char_id)
             sched["last_wake_at"] = now_ts
             sched["cooldown_until"] = now_ts + 1800
+            # 他自定的 next_wake_at 原来一动不动，现在只有「醒的就是这个钟」时才挪，
+            # 挪到冷却结束（口径同 wake_sdk._wake_dead，理由见那儿）：冷却已经不拦
+            # scheduled 了，不挪的话坏引擎会被每 tick 硬试一次。
+            if trigger == "scheduled" and sched.get("next_wake_at") is not None:
+                sched["next_wake_at"] = sched["cooldown_until"]
             state_store.write_schedule(sched, char_id)
         return {"action": "error"}
 
@@ -669,9 +674,22 @@ async def maybe_wake(char_id: Optional[str] = None) -> None:
     sched = state_store.read_schedule(cid)
 
     # 错误退避：上次醒来失败后冷却期内不再试（防持续失败时无限起子进程）。
-    # 排在硬触发**之前**：登录态坏了的时候，到点的提醒也别对着它硬试，白起子进程还发不出去。
-    if now < float(sched.get("cooldown_until") or 0):
+    # 排在硬触发**之前**：登录态坏了的时候，邮件这类提醒也别对着它硬试，
+    # 白起子进程还发不出去（flag 不消费，躺着等下次）。
+    # ⚠️ 唯独放行**他自己钉的点**（2026-09-01 收窄）：失败退避是「别对着坏引擎硬试」，
+    # 而「他自己答应过的时刻」不是可以顺手推迟 30 分钟的东西。旧口径一次失败就把冷却窗内
+    # 到点的钟静默吞掉，日志里一个字没有——08-31 22:34 那次醒来死掉、冷却压到 23:04:59，
+    # 窗内的钟最快也要等到 23:09 才兑现，从外面看只是「他没醒」。
+    # 不会变成每 tick 硬试：scheduled 醒来若也死了，错误分支会把钟往后挪到冷却结束
+    # （见 wake_sdk._wake_dead / do_wake_sync 的 raw is None 那支），钉子不丢、30 分钟才重来一次。
+    cooling = now < float(sched.get("cooldown_until") or 0)
+    nail = sched.get("next_wake_at")
+    nail_due = nail is not None and now >= float(nail)
+    if cooling and not nail_due:
         return
+    if cooling:
+        logerr(f"wake 冷却中（{cid}）但他自己钉的点到了：这次照醒，"
+               f"自发醒来和邮件硬触发仍然退避")
 
     # ---------- SDK 灰度：醒来升 A（PLAN_sdk PR12，wake_sdk）----------
     # 聊天引擎灰度到 sdk 的角色，醒来不再起 claude -p，改注入常驻聊天 session：
@@ -685,7 +703,9 @@ async def maybe_wake(char_id: Optional[str] = None) -> None:
         if cid not in chat_loop.SDK_CHAT_OFF:
             import wake_sdk
             import world
-            mail_note = _mail_wake_note(cid)
+            # 冷却期只放行到点的钟：邮件 flag 一个字都不碰（读了就等于消费掉，
+            # 而这会儿引擎正坏着，醒不成信就白丢了）。
+            mail_note = "" if cooling else _mail_wake_note(cid)
             if mail_note:
                 wake_sdk.enqueue_wake(cid, "mail", note=mail_note, force=True)
                 return
@@ -714,6 +734,8 @@ async def maybe_wake(char_id: Optional[str] = None) -> None:
             if next_wake is not None and now >= float(next_wake):
                 wake_sdk.enqueue_wake(cid, "scheduled")
                 return
+            if cooling:
+                return   # 冷却期走到这儿＝钟刚被别的闸挡了，自发醒来照旧退避
             if pump_mid:
                 return   # 自发抽签醒泵中不掷：他本来就醒着在玩；放下游戏后恢复
             # 随机醒的独立开关照认（判 is False，None 不算关）——关的只是自醒抽样，
@@ -747,7 +769,7 @@ async def maybe_wake(char_id: Optional[str] = None) -> None:
     # 机主来问照样看得见；反着写会在持续失败时每个 tick 都硬起一次注定失败的子进程。
     # 信箱一人一个（2026-08-15 起不再是独占资源）：flag 各存各的角色目录，
     # 消费自己那份就行——不会再出现「一个角色把写给另一个角色的信的唤醒吞掉」。
-    mail_note = _mail_wake_note(cid)
+    mail_note = "" if cooling else _mail_wake_note(cid)   # 冷却期不碰 flag，同 sdk 路
     if mail_note:
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(
@@ -797,6 +819,8 @@ async def maybe_wake(char_id: Optional[str] = None) -> None:
     trigger = None
     if next_wake is not None and now >= float(next_wake):
         trigger = "scheduled"
+    elif cooling:
+        return   # 冷却期只放行到点的钟（同 sdk 路）
     else:
         # 用户刚说过话就别随机戳（往回找最后一条 user 消息——window 末条通常是模型自己的回复）。
         q = settings.get("quiet_after_user_min")

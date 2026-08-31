@@ -392,13 +392,37 @@ def one_turn_hint(kind: str = "chat") -> str:
             "两个都不选，就别把这件事说出口。】")
 
 
-def pending_todo_block(char_id: Optional[str] = None) -> str:
-    """上一轮给自己留的活（[[next_wake:…|待办]] 存进 schedule 的那句）。没有则空串。
-    读盘失败一律当没有：这是个提醒块，为它把一轮聊天/醒来搞崩不值。"""
+def pending_todo_block(char_id: Optional[str] = None, kind: str = "chat") -> str:
+    """现在钉着的那个钟 + 上一轮给自己留的活（schedule 的 next_wake_at/_todo）。都没有则空串。
+    kind 只管定点写法分叉（'wake'＝老路的 NEXT 段，其余＝[[next_wake:]] 标记），口径同 one_turn_hint。
+    读盘失败一律当没有：这是个提醒块，为它把一轮聊天/醒来搞崩不值。
+
+    两种形态，按「到点没到」分：
+    · **还没到点**（聊天里看见它）：报钟点，并说清再写一次定点是**把这个钟挪走**、不是另加一个。
+      2026-09-01 补的，欠的账是这次：08-31 20:59 他自己钉了 22:59 的钟，21:24 在聊天里
+      又写了一句 [[next_wake:8小时]]——schedule 只有一个 next_wake_at 槽，
+      finalize_chat_reply 无条件覆盖，22:59 当场作废，从外面看像「闹钟没响」。
+      在此之前这块只递「留的活」不递钟点：钟没配待办时整块都不出现，他重钉的时候
+      手上一个字都没有，等于闭着眼睛顶掉自己的承诺。
+    · **已经到点**（scheduled 醒来那轮走到这儿，钟还没被 finish_wake_turn 消费）：原文照旧，
+      现在就是那个「下一轮」。没留活就不说话——一个空钟没什么可交代的。"""
     try:
-        todo = (state_store.read_schedule(char_id).get("next_wake_todo") or "").strip()
+        sched = state_store.read_schedule(char_id)
+        todo = (sched.get("next_wake_todo") or "").strip()
+        at = sched.get("next_wake_at")
+        at = float(at) if at is not None else None
     except Exception:
-        todo = ""
+        return ""
+
+    if at is not None and at > time.time():
+        how = "在 NEXT 那段重写一个时间" if kind == "wake" else "写 [[next_wake:…]]"
+        # 「N 后」不写「还有 N」：fmt_gap 最小档是「不到 1 分钟」，拼成「还有 不到 1 分钟」难看。
+        head = f"【你现在钉着一个钟：{fmt_ts(int(at))}（{fmt_gap(int(at - time.time()))}后）"
+        head += f"，到点要做的是：「{todo}」\n" if todo else "，没配待办。\n"
+        return (head +
+                f"钟只有一个：这一轮再{how}，是把这个钟**挪到新时间**，不是另加一个闹钟。"
+                "想留着原来那个点，这轮就别再定；要改就当成改钟来写（连带留的活一并写全）。】")
+
     if not todo:
         return ""
     return (f"【你上一轮给自己留了活：「{todo}」\n"

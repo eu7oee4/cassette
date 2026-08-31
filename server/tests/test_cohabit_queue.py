@@ -386,6 +386,23 @@ class TestSolo(QueueBase):
         cq._solo_tick(time.time())
         self.assertEqual(cq._pending[self.cid][0]["kind"], "scheduled")   # 定时照醒
 
+    def test_cooldown_blocks_solo_but_not_the_due_nail(self):
+        """错误退避只退避自发的（2026-09-01，口径同 wake.maybe_wake）：一次失败
+        不该把 30 分钟内到点的钟静默吞掉——那是他自己答应过的时刻。"""
+        state_store.write_schedule({"cooldown_until": time.time() + 600}, self.cid)
+        cq._solo_tick(time.time())
+        self.assertNotIn(self.cid, cq._pending)            # 自主醒照旧被拦
+        state_store.write_schedule({"cooldown_until": time.time() + 600,
+                                    "next_wake_at": time.time() - 5}, self.cid)
+        cq._solo_tick(time.time())
+        self.assertEqual(cq._pending[self.cid][0]["kind"], "scheduled")
+
+    def test_cooldown_blocks_a_nail_that_is_not_due(self):
+        state_store.write_schedule({"cooldown_until": time.time() + 600,
+                                    "next_wake_at": time.time() + 600}, self.cid)
+        cq._solo_tick(time.time())
+        self.assertNotIn(self.cid, cq._pending)            # 放行的是「到点」不是「有钟」
+
     def test_code_session_defers_owner_only(self):
         # 归属角色在电脑前：他的自主醒跳过，别的角色照常（M2 后不再全体避让）
         cohabit.coding_char = lambda: (self.cid, "code")

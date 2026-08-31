@@ -113,17 +113,44 @@ class StateBase(unittest.TestCase):
 
 
 class TestPendingTodoBlock(StateBase):
-    """上一轮留的活，下一轮递回去。"""
+    """钉着的钟 + 上一轮留的活，下一轮递回去。
 
-    def test_empty_when_no_todo(self):
-        state_store.write_schedule({"next_wake_at": int(time.time()) + 60}, self.cid)
+    「钟点也要递」是 2026-09-01 补的：08-31 20:59 钉了 22:59 的钟，21:24 在聊天里
+    又写了一句 [[next_wake:8小时]]，单槽位无条件覆盖 → 22:59 当场作废、看着像闹钟没响。
+    钟没配待办时旧版整块不出现，等于让他闭着眼睛顶掉自己的承诺。"""
+
+    def test_future_clock_is_announced_even_without_todo(self):
+        state_store.write_schedule({"next_wake_at": int(time.time()) + 7200}, self.cid)
+        block = pipeline.pending_todo_block(self.cid)
+        self.assertIn("钉着一个钟", block)        # ← 没待办也得报，这条就是那次覆盖
+        self.assertIn("挪到新时间", block)         # 再写一次是改钟，不是加钟
+
+    def test_nothing_pinned_is_empty(self):
+        state_store.write_schedule({}, self.cid)
         self.assertEqual(pipeline.pending_todo_block(self.cid), "")
 
-    def test_block_quotes_the_todo(self):
+    def test_future_clock_carries_the_todo(self):
+        self.set_todo("给安瞬回信")               # 默认钟点在一小时后
+        block = pipeline.pending_todo_block(self.cid)
+        self.assertIn("给安瞬回信", block)
+        self.assertIn("钉着一个钟", block)
+
+    def test_marker_wording_forks_by_scene(self):
         self.set_todo("给安瞬回信")
+        self.assertIn("[[next_wake:", pipeline.pending_todo_block(self.cid))
+        self.assertIn("NEXT", pipeline.pending_todo_block(self.cid, kind="wake"))
+
+    def test_due_clock_reads_as_this_is_that_next_turn(self):
+        # 到点那轮（钟还没被 finish_wake_turn 消费）：口径不变，递的是活不是钟点
+        self.set_todo("给安瞬回信", at=int(time.time()) - 10)
         block = pipeline.pending_todo_block(self.cid)
         self.assertIn("给安瞬回信", block)
         self.assertIn("上一轮", block)
+        self.assertNotIn("钉着一个钟", block)
+
+    def test_due_clock_without_todo_is_empty(self):
+        state_store.write_schedule({"next_wake_at": int(time.time()) - 10}, self.cid)
+        self.assertEqual(pipeline.pending_todo_block(self.cid), "")
 
     def test_read_failure_is_swallowed(self):
         orig = state_store.read_schedule

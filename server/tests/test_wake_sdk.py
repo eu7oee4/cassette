@@ -218,6 +218,22 @@ class FinishWakeTurnTest(WakeStateBase):
         self.assertGreater(float(sched["cooldown_until"]), time.time())
         self.assertEqual(self.wake_log()[-1]["action"], "error")
 
+    def test_dead_auto_leaves_the_nail_alone(self):
+        at = int(time.time()) + 3600
+        state_store.write_schedule({"next_wake_at": at, "next_wake_todo": "回信"}, self.cid)
+        wake_sdk._wake_dead(self.cid, "auto")
+        self.assertEqual(state_store.read_schedule(self.cid)["next_wake_at"], at)
+
+    def test_dead_scheduled_pushes_the_nail_to_cooldown_end(self):
+        """到点的钟醒失败 → 挪到冷却结束（2026-09-01）。钉子不丢，
+        又不会因为「冷却不再拦 scheduled」变成每 tick 对着坏引擎硬试一次。"""
+        state_store.write_schedule({"next_wake_at": int(time.time()) - 5,
+                                    "next_wake_todo": "回信"}, self.cid)
+        wake_sdk._wake_dead(self.cid, "scheduled")
+        sched = state_store.read_schedule(self.cid)
+        self.assertEqual(sched["next_wake_at"], sched["cooldown_until"])
+        self.assertEqual(sched["next_wake_todo"], "回信")   # 活跟着钟走，没做成不等于不算数
+
 
 class SeenItemsFilterTest(WakeStateBase):
     def test_sdk_wake_thoughts_not_reinjected(self):
@@ -392,6 +408,58 @@ class MaybeWakeRoutingTest(unittest.IsolatedAsyncioTestCase, WakeStateBase):
             self.assertEqual(self.enq, [(self.cid, "scheduled", False)])
         finally:
             wake.chat_turn_end(self.cid)
+
+    # ---------- 错误退避只退避自发的（2026-09-01 收窄）----------
+    # 欠的账：08-31 22:34 一次自醒死掉 → 冷却压到 23:04:59，冷却窗内到点的钟被这道闸
+    # 整个吞掉、日志里一个字没有。失败退避是「别对着坏引擎硬试」，不是「他答应的时刻可以顺延」。
+
+    async def test_cooldown_still_blocks_auto(self):
+        state_store.write_schedule({"cooldown_until": time.time() + 600}, self.cid)
+        await wake.maybe_wake(self.cid)
+        self.assertEqual(self.auto, [])
+        self.assertEqual(self.enq, [])
+
+    async def test_cooldown_lets_the_due_nail_through(self):
+        state_store.write_schedule({"cooldown_until": time.time() + 600,
+                                    "next_wake_at": int(time.time()) - 5}, self.cid)
+        await wake.maybe_wake(self.cid)
+        self.assertEqual(self.enq, [(self.cid, "scheduled", False)])
+
+    async def test_cooldown_with_future_nail_blocks_everything(self):
+        """钟还没到点 → 冷却照旧全拦（放行的是「到点」，不是「有钟」）。"""
+        state_store.write_schedule({"cooldown_until": time.time() + 600,
+                                    "next_wake_at": int(time.time()) + 600}, self.cid)
+        await wake.maybe_wake(self.cid)
+        self.assertEqual(self.enq, [])
+        self.assertEqual(self.auto, [])
+
+    async def test_cooldown_does_not_consume_mail_flag(self):
+        """冷却期不碰邮件 flag：读了就是消费掉，而这会儿引擎正坏着，醒不成信就白丢了。"""
+        seen: list[str] = []
+        wake._mail_wake_note = lambda cid: seen.append(cid) or "来自安瞬的新邮件"
+        state_store.write_schedule({"cooldown_until": time.time() + 600,
+                                    "next_wake_at": int(time.time()) - 5}, self.cid)
+        await wake.maybe_wake(self.cid)
+        self.assertEqual(seen, [])
+        self.assertEqual(self.enq, [(self.cid, "scheduled", False)])
+
+    async def test_cooldown_old_path_also_lets_the_nail_through(self):
+        config.CHAT_ENGINE = ""                  # -p 角色：两条路同一个口径
+        state_store.write_schedule({"cooldown_until": time.time() + 600,
+                                    "next_wake_at": int(time.time()) - 5}, self.cid)
+        await wake.maybe_wake(self.cid)
+        self.assertEqual(self.old_path, ["scheduled"])
+
+    async def test_cooldown_old_path_still_blocks_probability(self):
+        config.CHAT_ENGINE = ""
+        state_store.write_schedule({"cooldown_until": time.time() + 600}, self.cid)
+        orig = wake.random.random
+        wake.random.random = lambda: 0.0         # 掷骰必中，被拦住才算数
+        try:
+            await wake.maybe_wake(self.cid)
+        finally:
+            wake.random.random = orig
+        self.assertEqual(self.old_path, [])
 
     async def test_random_wake_off_skips_auto(self):
         self.settings["random_wake"] = False

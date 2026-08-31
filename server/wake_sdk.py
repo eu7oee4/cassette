@@ -255,6 +255,11 @@ def _wake_dead(cid: str, trigger: str) -> None:
         sched = state_store.read_schedule(cid)
         sched["last_wake_at"] = now_ts
         sched["cooldown_until"] = now_ts + 1800
+        # 到点的钟醒失败了 → 把钟往后挪到冷却结束（2026-09-01）。钉子不丢（到时自然重来），
+        # 又不会因为「scheduled 不受冷却管」（maybe_wake 的收窄）变成每 tick 对着坏引擎硬试。
+        # 待办跟着钟走，原样留着——他答应的事没做成，不是不算数了。
+        if trigger == "scheduled" and sched.get("next_wake_at") is not None:
+            sched["next_wake_at"] = sched["cooldown_until"]
         state_store.write_schedule(sched, cid)
 
 

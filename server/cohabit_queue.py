@@ -403,7 +403,12 @@ def _solo_check(cid: str, now: float) -> None:
     if wake.chat_turn_active(cid):
         return
     sched = state_store.read_schedule(cid)
-    if now < float(sched.get("cooldown_until") or 0):
+    # 错误退避只退避**自发的**（口径同 wake.maybe_wake，2026-09-01 一起收窄）：
+    # 到点的 NEXT 是他自己答应过的时刻，不该被一次失败顺手推迟 30 分钟、还一声不吭。
+    # 失败了也不会每 tick 硬试——do_cohabit_wake 出错那支会把钟挪到冷却结束（见 _drain）。
+    nw = sched.get("next_wake_at")
+    nail_due = nw is not None and now >= float(nw)
+    if now < float(sched.get("cooldown_until") or 0) and not nail_due:
         return
     if now - float(sched.get("last_wake_at") or 0) < wake.MIN_WAKE_GAP_SEC:
         return
@@ -411,8 +416,7 @@ def _solo_check(cid: str, now: float) -> None:
     budget = settings.get("wake_daily_budget")
     if budget is not None and solo_wakes_today(cid) >= int(budget):
         return
-    nw = sched.get("next_wake_at")
-    if nw is not None and now >= float(nw):
+    if nail_due:   # 用上面那个判据，别重算——重算就可能出现「冷却放了行、这儿又不认」的缝
         # 他自己定的点：到点必醒，不要求独处（「写了我保证到那个点把你醒一次」）。
         enqueue(cid, {"kind": "scheduled",
                       "text": "你之前给自己定了这个点醒来，现在到点了"}, system=False)
@@ -512,6 +516,11 @@ def _drain() -> None:
                 with state_store.SCHEDULE_LOCK:
                     sched = state_store.read_schedule(cid)
                     sched["cooldown_until"] = int(time.time()) + 1800
+                    # 死掉的正是「到点那次」→ 钟挪到冷却结束（口径同 wake_sdk._wake_dead）：
+                    # 冷却已经不拦 scheduled 了（_solo_check），不挪就会每 tick 硬试一次。
+                    if any(r.get("kind") == "scheduled" for r in reasons) \
+                            and sched.get("next_wake_at") is not None:
+                        sched["next_wake_at"] = sched["cooldown_until"]
                     state_store.write_schedule(sched, cid)
         except wake.Overloaded as e:
             # 模型那头过载（已隔 30s 重试过一次）：**不压冷却**——不是我们坏了，压 30 分钟
