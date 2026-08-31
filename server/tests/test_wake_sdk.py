@@ -194,6 +194,22 @@ class FinishWakeTurnTest(WakeStateBase):
         log = self.wake_log()[-1]
         self.assertEqual(log["acts"][0]["tool"], "mail_read")
 
+    def test_acts_mirror_vocabulary(self):
+        """S3 补线①：行为账判线=碰没碰外部世界（external_stored）——发信要留痕、
+        hold 不留。借 NON_MEMORY_TOOLS 那版后果是反的（发过信不留痕）。"""
+        import activity_log
+        orig = activity_log.ACT_DIR
+        activity_log.ACT_DIR = self.tmp / "activity"
+        try:
+            stored = [{"tool": "mail", "ok": True, "text": "给安瞬：回信"},
+                      {"tool": "hold", "ok": True, "text": "一条记忆"}]
+            wake_sdk.finish_wake_turn(self.cid, "auto", False, 5000,
+                                      "〔回了封信〕", stored)
+            acts = activity_log.recent_acts(self.cid)
+            self.assertEqual([a["tool"] for a in acts], ["mail"])
+        finally:
+            activity_log.ACT_DIR = orig
+
     def test_dead_writes_cooldown(self):
         wake_sdk._wake_dead(self.cid, "auto")
         sched = state_store.read_schedule(self.cid)

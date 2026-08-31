@@ -171,13 +171,14 @@ def finish_wake_turn(cid: str, trigger: str, force: bool, started_ts: int,
     acts = [{"tool": s.get("tool"), "ok": bool(s.get("ok", True)),
              "text": (s.get("text") or "")[:80]} for s in (stored or [])]
     # PR13 归一：碰外部世界的行为同时落活动行为账（开局「行为清单」的机械来源）。
-    # 判线 §5.2：纯内部记忆操作（hold/feel 等 Ombre 侧）不留——人不记得自己回忆过
-    # 什么；现阶段外部行为的词表=NON_MEMORY_TOOLS（stored 里出现的外部动作类），
-    # 邮件等不进 stored 的工具等真机看到缺口再从执行层补线（记档设计稿三）。
+    # 判线 §5.2：对外部对象的读写都留；纯内部记忆操作（hold/feel 等 Ombre 侧）不留
+    # ——人不记得自己回忆过什么。词表=pipeline.external_stored（S3 补线①：显式
+    # 判线，别再借 NON_MEMORY_TOOLS——那管的是灰字过滤，后果曾是反的：开过网页
+    # 留痕、发过信不留痕）。mail_read 等不进 stored 的读操作，真机见缺口再从执行层补。
     try:
         import activity_log
         for a in acts:
-            if a.get("tool") in pipeline.NON_MEMORY_TOOLS:
+            if pipeline.external_stored(a.get("tool")):
                 activity_log.append_act(cid, "wake", a.get("tool") or "?",
                                         a.get("text") or "", ok=a.get("ok", True))
     except Exception as e:

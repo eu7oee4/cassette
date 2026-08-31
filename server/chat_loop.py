@@ -397,11 +397,58 @@ def _user_dict(msg: UserMessage) -> dict:
     return {"type": "user", "message": {"content": blocks}}
 
 
+# ---------- 执行层 tool 落账（S3 补线②：§5.3 四类表一、三类的确定性载体） ----------
+
+def _tool_summary(name: str, inp: dict) -> str:
+    """事件账里的对象摘要：常用工具取关键字段（读取侧聚合要认它），其余压成
+    一行 json。截断交给 append_event（EVENT_TEXT_CAP，第一类「原文级」的量纲）。"""
+    try:
+        if name in ("Read", "Edit", "Write", "NotebookEdit"):
+            return str(inp.get("file_path") or inp.get("notebook_path") or "")
+        if name in ("Grep", "Glob"):
+            pat, path = str(inp.get("pattern") or ""), str(inp.get("path") or "")
+            return f"{pat}（{path}）" if path else pat
+        if name == "Bash":
+            return str(inp.get("command") or "")
+        return json.dumps(inp, ensure_ascii=False)
+    except Exception:
+        return ""
+
+
+class _ToolTrace:
+    """一轮消息流里 tool_use 配上 tool_result → 落一条事件到开着的活动段
+    （时间+轮来源+工具+对象摘要+成败）。确定性落账，不靠他自觉——重铸后
+    transcript 里的工具块物理无法复原（forge 断言拒 tool 块），这本账是干活
+    留痕唯一的家。没开段=不落（账要有地址；轮死在半路配不上对的也不落，
+    账丢一条不影响轮）。每轮一个实例，不跨轮攒状态。"""
+
+    def __init__(self, handle: session_mgr.LoopHandle):
+        self.handle = handle
+        self.pend: dict = {}
+
+    def use(self, block_id: str, name: str, inp: Optional[dict]) -> None:
+        self.pend[block_id] = (name, _tool_summary(name, inp or {}))
+
+    def result(self, block_id: str, is_error) -> None:
+        name, summary = self.pend.pop(block_id, (None, ""))
+        seg = (self.handle.meta.get("game_pump") or {}).get("seg_id")
+        if not seg or not name:
+            return
+        import activity_log
+        import pipeline
+        activity_log.append_event(
+            seg, "tool", name=name, text=summary, ok=not bool(is_error),
+            ext=pipeline.external_tool(name),
+            ro=name in pipeline.READONLY_BUILTINS,
+            turn=self.handle.meta.get("turn_kind") or "chat")
+
+
 async def _turn_events(client, handle: session_mgr.LoopHandle,
                        flags: dict) -> AsyncIterator[dict]:
     """吃一轮（到 ResultMessage 止），产出 translate_events 认识的事件 dict。
     空闲超时/流断都产 __idle_timeout__ 哨兵（translate 会以 error+done 收尾），
     并在 flags 里留痕给泵决定 session 生死。"""
+    trace = _ToolTrace(handle)
     agen = client.receive_messages().__aiter__()
     while True:
         try:
@@ -421,8 +468,14 @@ async def _turn_events(client, handle: session_mgr.LoopHandle,
             yield {"type": "stream_event", "event": msg.event}
         elif isinstance(msg, AssistantMessage):
             handle.touch()
+            for b in msg.content:
+                if isinstance(b, ToolUseBlock):
+                    trace.use(b.id, b.name, b.input)
             yield _assistant_dict(msg)
         elif isinstance(msg, UserMessage):
+            for b in (msg.content if isinstance(msg.content, list) else []):
+                if isinstance(b, ToolResultBlock):
+                    trace.result(b.tool_use_id, b.is_error)
             yield _user_dict(msg)
         elif isinstance(msg, ResultMessage):
             _note_usage(handle.char_id, msg,
@@ -480,6 +533,50 @@ def _persist_ledger(char_id: str, sid: Optional[str], ledger: list[dict]) -> Non
 
 # ---------- 活动框（§4 规则二：回流点评带上「你当时在读剧情」的框架）----------
 
+def _fold_trace_lines(iv: dict) -> str:
+    """折叠段的经历摘要（S3 补线③）：从这一场的事件账 derive「亲手做过什么」，
+    附进折叠框——不再只有「细节淡下去了」。写类逐条（§5.3 第一类原文级，
+    天然稀疏，帽 12 防边界）、读类聚合一行事实（第三类：留事实不留内容）。
+    确定性：同事件账同字节。事件账过了保留窗（30 天）→ 空串，折叠框回到
+    光框，与从前一致。game 段的点按被 ext 判线挡在外面（第四类试错），
+    这里真正的客户是 code 段——工具不上屏不进消息库，重铸后只有这本账。"""
+    import activity_log
+    seg = activity_log.interval_seg_id(
+        iv.get("char") or "", iv.get("scene") or "", int(iv.get("start") or 0))
+    evs = [e for e in activity_log.read_events(seg)
+           if e.get("kind") == "tool" and e.get("ext")]
+    if not evs:
+        return ""
+
+    def _hm(ts) -> str:
+        return time.strftime("%H:%M", time.localtime(int(ts or 0)))
+
+    def _short(name: str) -> str:
+        return (name or "?").rsplit("__", 1)[-1]
+
+    acts = [e for e in evs if not e.get("ro")]
+    reads = [e for e in evs if e.get("ro")]
+    lines: list[str] = []
+    for e in acts[:12]:
+        t = (e.get("text") or "").strip().replace("\n", " ")[:80]
+        fail = "" if e.get("ok", True) else "（没成）"
+        lines.append(f"[{_hm(e.get('ts'))}] {_short(e.get('name'))}"
+                     + (f"：{t}" if t else "") + fail)
+    if len(acts) > 12:
+        lines.append(f"……还有 {len(acts) - 12} 件")
+    if reads:
+        objs: list[str] = []
+        for e in reads:
+            t = (e.get("text") or "").strip().replace("\n", " ")[:40]
+            if t and t not in objs:
+                objs.append(t)
+        if objs:
+            head = "、".join(objs[:8])
+            tail = f" 等共 {len(objs)} 处" if len(objs) > 8 else ""
+            lines.append(f"翻看过：{head}{tail}")
+    return "\n".join(lines)
+
+
 def _frame_activities(history: list[dict], char_id: str) -> list[dict]:
     """活动段的渲染层处理（§4 折叠规则，PR13 补全）：**最近一场**加两行文档框、
     点评原文逐条保留（那正是当下的对话）；**更早的场**整段折叠成一行框（含 TA
@@ -518,10 +615,14 @@ def _frame_activities(history: list[dict], char_id: str) -> list[dict]:
                 out.append({"role": "user", "ts": e,
                             "text": f"〔{_hm(e)} 这一场到这儿收了摊〕"})
             else:
-                out.append({"role": "user", "ts": s,
-                            "text": (f"〔{_hm(s)}–{_hm(e)} 你拿着{note}读了一场——"
-                                     "细节在记忆里淡下去了，这一场的脉络和感想"
-                                     "你当时写进了章节志〕")})
+                body = (f"〔{_hm(s)}–{_hm(e)} 你拿着{note}读了一场——"
+                        "细节在记忆里淡下去了，这一场的脉络和感想"
+                        "你当时写进了章节志〕")
+                trace = _fold_trace_lines(iv)
+                if trace:
+                    body += ("\n〔这一场你亲手做过的——记录，不是印象：\n"
+                             + trace + "〕")
+                out.append({"role": "user", "ts": s, "text": body})
             i = j
     out.extend(history[i:])
     return out
@@ -748,6 +849,7 @@ async def run(handle: session_mgr.LoopHandle, *,
         """吃完一个泵轮（口径同 game_loop._drain_turn：分段投递、错误结果留痕
         不算死）。False=超时/流断——调用方按 chat_loop 保守纪律关 session。"""
         pending: Optional[str] = None
+        trace = _ToolTrace(handle)
         agen = client.receive_messages().__aiter__()
         while True:
             try:
@@ -767,9 +869,14 @@ async def run(handle: session_mgr.LoopHandle, *,
                             _pump_deliver_and_log(pending, False)
                         pending = block.text.strip()
                     elif isinstance(block, ToolUseBlock):
+                        trace.use(block.id, block.name, block.input)
                         if pending is not None:
                             _pump_deliver_and_log(pending, False)
                         pending = None
+            elif isinstance(msg, UserMessage):
+                for block in (msg.content if isinstance(msg.content, list) else []):
+                    if isinstance(block, ToolResultBlock):
+                        trace.result(block.tool_use_id, block.is_error)
             elif isinstance(msg, ResultMessage):
                 if pending is not None:
                     _pump_deliver_and_log(pending, True)

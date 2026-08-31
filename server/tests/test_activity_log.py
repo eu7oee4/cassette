@@ -47,6 +47,11 @@ class ActivityLogTest(unittest.TestCase):
         self.assertEqual(ivs[0]["start"], 1700000000)
         self.assertEqual(ivs[0]["note"], "《如鸢》剧情")
 
+    def test_interval_seg_id_matches_open_segment(self):
+        """区间行 → 事件账地址必须和 open_segment 同源（S3 补线③的找回路径）。"""
+        seg = al.open_segment("cass", "game", 1700000000)
+        self.assertEqual(al.interval_seg_id("cass", "game", 1700000000), seg)
+
     def test_event_text_cap(self):
         seg = al.open_segment("cass", "game")
         al.append_event(seg, "comment", text="喵" * 5000)

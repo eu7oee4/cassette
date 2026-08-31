@@ -792,5 +792,154 @@ class ChatEngineConfigTest(unittest.TestCase):
             config.CHAT_ENGINE = orig
 
 
+class TraceVocabTest(unittest.TestCase):
+    """S3 补线①：留痕判线词表（别再借 NON_MEMORY_TOOLS——那管灰字过滤）。"""
+
+    def test_external_stored(self):
+        import pipeline
+        for t in ("mail", "mail_draft", "browse", "webpage", "codemode",
+                  "gamemode", "gametask"):
+            self.assertTrue(pipeline.external_stored(t), t)
+        for t in ("hold", "feel", "grow", "trace", "i", "", None):
+            self.assertFalse(pipeline.external_stored(t), t)
+
+    def test_external_tool(self):
+        import pipeline
+        for n in ("Edit", "Bash", "Read", "mcp__cassette-mail__mail_send",
+                  "mcp__galatea-garden__create_reply"):
+            self.assertTrue(pipeline.external_tool(n), n)
+        for n in ("mcp__game__game_tap", "mcp__ombre-brain__hold",
+                  "mcp__skills__skill_read", "ToolSearch", ""):
+            self.assertFalse(pipeline.external_tool(n), n)
+
+
+class _AlTmpBase(unittest.TestCase):
+    """activity_log 全目录打到临时地（S3 留痕用例：事件账/行为账都要落）。"""
+
+    def setUp(self):
+        import tempfile
+        import activity_log
+        self.al = activity_log
+        self.tmp = tempfile.TemporaryDirectory()
+        root = Path(self.tmp.name)
+        self._orig = (activity_log.PATH, activity_log.ACT_DIR,
+                      activity_log.SEG_DIR, activity_log.SHOT_DIR,
+                      activity_log.OPEN_PATH)
+        activity_log.PATH = root / "activity_log.jsonl"
+        activity_log.ACT_DIR = root / "activity"
+        activity_log.SEG_DIR = activity_log.ACT_DIR / "segments"
+        activity_log.SHOT_DIR = activity_log.ACT_DIR / "shots"
+        activity_log.OPEN_PATH = activity_log.ACT_DIR / "open_segments.json"
+
+    def tearDown(self):
+        (self.al.PATH, self.al.ACT_DIR, self.al.SEG_DIR, self.al.SHOT_DIR,
+         self.al.OPEN_PATH) = self._orig
+        self.tmp.cleanup()
+
+
+class ToolTraceTest(_AlTmpBase):
+    """S3 补线②：执行层 tool 落账——配对成事件、地址=开着的段、判线字段齐。"""
+
+    def test_pairs_land_in_open_segment(self):
+        handle = sm.LoopHandle(char_id="cass", scene="chat")
+        handle.meta["game_pump"] = {"seg_id": "cass-game-1000"}
+        handle.meta["turn_kind"] = "wake"
+        tr = chat_loop._ToolTrace(handle)
+        tr.use("t1", "Bash", {"command": "git status"})
+        tr.result("t1", False)
+        tr.use("t2", "mcp__game__game_tap", {"x": 1})
+        tr.result("t2", False)
+        tr.use("t3", "Read", {"file_path": "server/x.py"})
+        tr.result("t3", True)
+        evs = self.al.read_events("cass-game-1000")
+        self.assertEqual([e["name"] for e in evs],
+                         ["Bash", "mcp__game__game_tap", "Read"])
+        self.assertEqual(evs[0]["text"], "git status")
+        self.assertTrue(evs[0]["ext"])
+        self.assertFalse(evs[0]["ro"])
+        self.assertTrue(evs[0]["ok"])
+        self.assertEqual(evs[0]["turn"], "wake")
+        self.assertFalse(evs[1]["ext"])          # game 点按=第四类，读取侧不上摘要
+        self.assertTrue(evs[2]["ro"])
+        self.assertFalse(evs[2]["ok"])           # is_error=True → ok False
+
+    def test_no_segment_no_event(self):
+        handle = sm.LoopHandle(char_id="cass", scene="chat")
+        tr = chat_loop._ToolTrace(handle)
+        tr.use("t1", "Bash", {"command": "ls"})
+        tr.result("t1", False)
+        self.assertEqual(self.al.read_events("cass-game-1000"), [])
+
+    def test_unpaired_result_ignored(self):
+        handle = sm.LoopHandle(char_id="cass", scene="chat")
+        handle.meta["game_pump"] = {"seg_id": "cass-game-1000"}
+        tr = chat_loop._ToolTrace(handle)
+        tr.result("never-seen", False)
+        self.assertEqual(self.al.read_events("cass-game-1000"), [])
+
+
+class FoldTraceTest(_AlTmpBase):
+    """S3 补线③：折叠段从事件账 derive 经历摘要（写类逐条、读类聚合、
+    第四类不上、没账回光框）。"""
+
+    HIST = [_m("user", "去读吧", 1400),
+            _m("assistant", "这句台词妙", 1600),
+            _m("assistant", "第二场的点评", 3200),
+            _m("user", "读完啦？", 3600)]
+
+    def _two_intervals(self):
+        self.al.append_interval("cass", "game", 1500, 1800, note="《如鸢》剧情")
+        self.al.append_interval("cass", "game", 3000, 3500, note="《如鸢》剧情")
+
+    def test_folded_frame_carries_trace(self):
+        self._two_intervals()
+        seg = self.al.interval_seg_id("cass", "game", 1500)
+        self.al.append_event(seg, "tool", name="Edit", text="server/x.py",
+                             ok=True, ext=True, ro=False, turn="chat")
+        self.al.append_event(seg, "tool", name="Bash", text="pytest -q",
+                             ok=False, ext=True, ro=False, turn="chat")
+        self.al.append_event(seg, "tool", name="Read", text="server/y.py",
+                             ok=True, ext=True, ro=True, turn="chat")
+        self.al.append_event(seg, "tool", name="Read", text="server/y.py",
+                             ok=True, ext=True, ro=True, turn="chat")
+        self.al.append_event(seg, "tool", name="mcp__game__game_tap", text="{}",
+                             ok=True, ext=False, ro=False, turn="wake")
+        self.al.append_event(seg, "comment", text="一条点评")
+        out = chat_loop._frame_activities(self.HIST, "cass")
+        folded = out[1]["text"]
+        self.assertIn("读了一场", folded)                 # 原光框还在
+        self.assertIn("亲手做过的", folded)
+        self.assertIn("Edit：server/x.py", folded)
+        self.assertIn("Bash：pytest -q（没成）", folded)
+        self.assertIn("翻看过：server/y.py", folded)      # 读类聚合+去重
+        self.assertEqual(folded.count("server/y.py"), 1)
+        self.assertNotIn("game_tap", folded)              # 第四类不上摘要
+        self.assertNotIn("一条点评", folded)              # 点评不进摘要（气泡自有）
+        # 最近一场照旧两行框，不带摘要
+        self.assertIn("你开了《如鸢》剧情会话", out[2]["text"])
+        self.assertNotIn("亲手", out[2]["text"])
+        # 确定性：同输入同字节
+        self.assertEqual(out, chat_loop._frame_activities(self.HIST, "cass"))
+
+    def test_no_events_plain_frame(self):
+        """事件账空（或过了保留窗被清）→ 折叠框与从前一字不差。"""
+        self._two_intervals()
+        out = chat_loop._frame_activities(self.HIST, "cass")
+        folded = out[1]["text"]
+        self.assertIn("读了一场", folded)
+        self.assertNotIn("亲手", folded)
+
+    def test_act_cap_with_overflow_line(self):
+        self._two_intervals()
+        seg = self.al.interval_seg_id("cass", "game", 1500)
+        for i in range(15):
+            self.al.append_event(seg, "tool", name="Bash", text=f"cmd-{i}",
+                                 ok=True, ext=True, ro=False, turn="chat")
+        folded = chat_loop._frame_activities(self.HIST, "cass")[1]["text"]
+        self.assertIn("cmd-11", folded)
+        self.assertNotIn("cmd-12", folded)
+        self.assertIn("还有 3 件", folded)
+
+
 if __name__ == "__main__":
     unittest.main()

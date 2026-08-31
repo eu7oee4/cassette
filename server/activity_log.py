@@ -97,12 +97,19 @@ def _mkdir700(p: Path) -> None:
         pass
 
 
+def interval_seg_id(char_id: str, scene: str, start: int) -> str:
+    """区间行 → 事件账地址。区间行不存 seg_id，但 open_segment 的构造是确定的
+    （char-scene-start）——读取侧靠这个从折叠段找回它的事件账（S3 补线③）。
+    和 open_segment 必须同源，别各拼各的。"""
+    return f"{_safe_id(char_id)}-{_safe_id(scene)}-{int(start)}"
+
+
 def open_segment(char_id: str, scene: str, start_ts: Optional[float] = None) -> str:
     """开一场：登记进 open_segments.json（启动清扫的账），返回 seg_id。
     身份钉进 seg_id，后续 append 不再需要 char/scene。目录 700（§2.5 扩面：
     账本与 transcript 同在 Mac，权限纪律同款）。"""
     start = int(start_ts or time.time())
-    seg_id = f"{_safe_id(char_id)}-{_safe_id(scene)}-{start}"
+    seg_id = interval_seg_id(char_id, scene, start)
     with _LOCK:
         _mkdir700(ACT_DIR)
         _mkdir700(SEG_DIR)

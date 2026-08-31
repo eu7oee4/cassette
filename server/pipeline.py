@@ -1055,6 +1055,38 @@ def _stored_from_tool_use(name: str, inp: dict) -> Optional[dict]:
 # 自己的聚合灰字和 browse_log，逐条进心流日志只会刷屏——都不进。
 NON_MEMORY_TOOLS = {"webpage", "codemode", "browse", "gametask", "gamemode"}
 
+# ---------- 留痕判线（PLAN_sdk §5.3 S3 补线①，08-31）----------
+# 行为账/经历留痕的判线=「碰没碰外部世界」（§5.2：对外部对象的读写都留——「读过」
+# 这个事实防失约；纯内部记忆操作不留，人不记得自己回忆过什么）。这跟上面
+# NON_MEMORY_TOOLS 管的「哪些 stored 不进灰字/心流日志」是两件事——借用过一版，
+# 后果是反的（开过网页留痕、发过信不留痕）。写成内部白名单取补集：新插件的外部
+# 动作（花园发帖/写日记）自动算外部；多收一行行为清单的代价，远小于反向漏掉
+# （失约：「发了信然后说没发过」）。
+INTERNAL_STORED = {"hold", "feel", "grow", "trace", "i"}
+
+
+def external_stored(tag: Optional[str]) -> bool:
+    """stored 标签级判线：这条产物是不是「碰了外部世界」的动作（行为账镜像用）。"""
+    return bool(tag) and tag not in INTERNAL_STORED
+
+
+# 工具名级判线（执行层事件账用，S3 补线②；stored 标签级在 external_stored）。
+# 内部=纯记忆（Ombre）/取用法（skills、ToolSearch）/游戏操作细节——game 的经历由
+# 点评+截图+章节志承载，逐次点按是 §5.3 第四类试错，不值得留。
+_INTERNAL_TOOL_PREFIXES = ("mcp__ombre-brain__", "mcp__game__", "mcp__skills__")
+_INTERNAL_TOOL_NAMES = {TOOL_SEARCH_TOOL}
+
+
+def external_tool(name: str) -> bool:
+    """这个工具调用碰没碰外部世界（折叠段经历摘要认它；白名单外都算碰了）。"""
+    return bool(name) and (name not in _INTERNAL_TOOL_NAMES
+                           and not name.startswith(_INTERNAL_TOOL_PREFIXES))
+
+
+# 只读内置工具（§5.3 只读常驻面的成员；留痕侧当「读/写」分界用：读类聚合留事实
+# （四类表第三类）、写类逐条留原文（第一类））。
+READONLY_BUILTINS = {"Read", "Grep", "Glob"}
+
 
 # ---------- 工具「调用结果」定案 ----------
 # 只解析 tool_use（输入）的老口径抓的是**调用意图**：失败的调用照样被记成「📥 记住了一件事」，
