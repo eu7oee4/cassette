@@ -1368,6 +1368,13 @@ class CodeKeysIn(BaseModel):
     keys: str
 
 
+class PermitDecideIn(BaseModel):
+    """写权限拍板（PLAN_sdk §5.3 PR14-c 带外门：批准走这儿落后端状态，
+    门查记录不查对话）。id=待批单号（/code/permit 里看）。"""
+    id: str
+    allow: bool
+
+
 class CodeAppendIn(BaseModel):
     """会话里的 hook 上报的一段正文（server/hooks/code_segments.py 发的）。"""
     role: str = "assistant"
@@ -1454,6 +1461,31 @@ def code_status(busy: int = 0, x_auth: Optional[str] = Header(default=None, alia
             "profile": code_bridge.active_profile(),
             "owner": owner, "owner_name": characters.display_name(owner),
             "session_char": code_bridge.session_char()}
+
+
+@app.get("/code/permit")
+def code_permit_status(char: Optional[str] = None,
+                       x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
+    """写权限现状（PR14-c）：app 权限卡/弹窗的数据源。pending=待批单（含 id），
+    granted=这一场已批的。不挂 _require_code——带外门服务的是统一 session，
+    与 tmux 那套 code 模式开不开无关。"""
+    verify_auth(x_auth)
+    import code_permits
+    cid = _resolve_char(char)
+    return {"char": cid, **code_permits.status(cid)}
+
+
+@app.post("/code/permit/decide")
+def code_permit_decide(inp: PermitDecideIn, char: Optional[str] = None,
+                       x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
+    """TA 拍板一张待批单。单号对不上（多半已超时自动拒）→ 409 有声报。"""
+    verify_auth(x_auth)
+    import code_permits
+    cid = _resolve_char(char)
+    r = code_permits.decide(cid, inp.id, inp.allow)
+    if not r.get("ok"):
+        raise HTTPException(status_code=409, detail=r.get("error", "拍板失败"))
+    return r
 
 
 @app.post("/code/start")

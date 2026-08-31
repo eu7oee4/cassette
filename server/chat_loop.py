@@ -204,41 +204,46 @@ def _wake_gate(handle: session_mgr.LoopHandle):
     - 聊天轮/巩固轮 → 其余全放行，行为与没挂 hook 一字不差。"""
     import pipeline
 
+    def _deny(reason: str) -> dict:
+        return {"hookSpecificOutput": {"hookEventName": "PreToolUse",
+                                       "permissionDecision": "deny",
+                                       "permissionDecisionReason": reason}}
+
     async def gate(hook_input, tool_use_id, ctx) -> dict:
         tool = (hook_input or {}).get("tool_name") or ""
+        tool_input = (hook_input or {}).get("tool_input") or {}
         if tool in pipeline.READONLY_BUILTINS:
             # 只读常驻（PR14-b）：任何轮来源都能看一眼（§2 核实纪律），
             # 但过路径闸（限根目录+黑名单，§5.3 安全面）——先于醒来禁用面，
             # 只读工具不在 wake 挂载表里，不挡在这儿 wake 轮就全拒了。
-            why = pipeline.readonly_path_guard(
-                (hook_input or {}).get("tool_input") or {}, handle.char_id)
-            if why is None:
-                return {}
-            return {"hookSpecificOutput": {
-                "hookEventName": "PreToolUse",
-                "permissionDecision": "deny",
-                "permissionDecisionReason": why,
-            }}
+            why = pipeline.readonly_path_guard(tool_input, handle.char_id)
+            return {} if why is None else _deny(why)
+        if tool in pipeline.WRITE_BUILTINS:
+            # 写类轮级门（PR14-c）：查后端带外批准记录，**不查对话**——批准只能
+            # 从 TA 手上来（app 弹窗/权限卡），邮件/网页里的注入文本够不到。
+            # 批了也照过路径闸：写更不能出仓/碰黑名单（Bash 没路径参数，闸对它
+            # 放空——granted 即 TA 拍板过的信任面，命令级细分真机见刚需再补）。
+            import code_permits
+            if code_permits.active(handle.char_id):
+                why = pipeline.readonly_path_guard(tool_input, handle.char_id)
+                return {} if why is None else _deny(why)
+            r = code_permits.request(handle.char_id,
+                                     reason=_tool_summary(tool, tool_input)[:80])
+            note = ("刚替你把申请递上去了" if r.get("renewed")
+                    else "申请已经递过了、还在等批")
+            return _deny(f"动手改东西要{config.user_name()}先批一份写权限——{note}"
+                         "（TA 在 app/Bark 能看到，15 分钟内有效）。批下来之前，"
+                         "看和查随时可以（Read/Grep/Glob）。")
         if tool.startswith("mcp__game__"):
             if handle.meta.get("game_pump"):
                 return {}
-            return {"hookSpecificOutput": {
-                "hookEventName": "PreToolUse",
-                "permissionDecision": "deny",
-                "permissionDecisionReason": (
-                    "游戏这会儿不在手边——想玩的话先用 game_start 把游戏拿过来。"),
-            }}
+            return _deny("游戏这会儿不在手边——想玩的话先用 game_start 把游戏拿过来。")
         if handle.meta.get("turn_kind") != "wake":
             return {}
         if tool in (handle.meta.get("wake_tools") or set()):
             return {}
-        return {"hookSpecificOutput": {
-            "hookEventName": "PreToolUse",
-            "permissionDecision": "deny",
-            "permissionDecisionReason": (
-                "这会儿是你自己醒着的时间，这个工具不在手边（醒来那条路不挂它）"
-                "——想用的话留到聊天或上机的时候。"),
-        }}
+        return _deny("这会儿是你自己醒着的时间，这个工具不在手边（醒来那条路不挂它）"
+                     "——想用的话留到聊天或上机的时候。")
     return gate
 
 
@@ -1272,6 +1277,12 @@ async def run(handle: session_mgr.LoopHandle, *,
             await _pump_close(f"loop-exit: {why}")   # 拿着游戏时 loop 死了：锁/账别悬着
         except Exception as e:
             print(f"[chat_loop] 退出时放下游戏失败: {e}", file=sys.stderr)
+        try:
+            # 一场一批、收摊即失效（PR14-c）：loop 退出=这一场完了，写批准别悬着。
+            import code_permits
+            code_permits.revoke(handle.char_id, f"loop-exit: {why}")
+        except Exception as e:
+            print(f"[chat_loop] 退出时撤写批准失败: {e}", file=sys.stderr)
         await _safe_disconnect(client)
 
 

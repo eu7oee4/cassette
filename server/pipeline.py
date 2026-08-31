@@ -1087,6 +1087,11 @@ def external_tool(name: str) -> bool:
 # （四类表第三类）、写类逐条留原文（第一类））。
 READONLY_BUILTINS = {"Read", "Grep", "Glob"}
 
+# 写类内置工具（§5.3：走轮级带外批准门，code_permits/PR14-c）。Bash 整个算写类
+# ——命令级读写分类是走不稳的路（真机撞见「只读 Bash」的刚需再从执行层补），
+# 看东西有 Read/Grep/Glob。
+WRITE_BUILTINS = {"Edit", "Write", "NotebookEdit", "Bash"}
+
 # 只读常驻的安全面（§5.3 机主 08-31 拍板：限根目录+黑名单，不做全盘放行）。
 # 「只读 ≠ 无害」：聊天上下文里的注入面（邮件/论坛/网页）可以指使他去读任意
 # 文件再说进气泡——外泄路径是气泡本身，带外门拦不住，只能限读面。
