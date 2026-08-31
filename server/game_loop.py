@@ -190,14 +190,25 @@ def _ok(*blocks) -> dict:
     return {"content": list(blocks)}
 
 
-def build_game_server(handle: session_mgr.LoopHandle):
+def build_game_server(handle: session_mgr.LoopHandle, *, unified: bool = False,
+                      shot_sink: Optional[Callable[[bytes], None]] = None):
     """进程内 game MCP。工具闭包住 handle：截图计数（滚动重开的账本）、touch
     （看守的活动判据）、game_end 的收摊旗都落在这次会话自己的 handle 上——
-    没有全局「当前会话」可写（串台六条）。"""
+    没有全局「当前会话」可写（串台六条）。
+
+    unified=True（PR13 泵路）：game_end 的说明换「放下游戏」措辞（聊天 session
+    什么都不关，「会话」二字会指错东西）；机器行为不变（置旗+释放锁，泵在轮尾
+    收口）。shot_sink：每张成功截图的字节回调（事件账本存引用，重铸近 K 张图
+    回填的材料）——独立 loop 不传，行为一字不差。"""
 
     def _img(jpg_or_err) -> dict:
         if isinstance(jpg_or_err, bytes):
             handle.meta["shots"] = handle.meta.get("shots", 0) + 1
+            if shot_sink is not None:
+                try:
+                    shot_sink(jpg_or_err)
+                except Exception as e:
+                    print(f"[game_loop] shot_sink 失败: {e}", file=sys.stderr)
             return {"type": "image",
                     "data": base64.b64encode(jpg_or_err).decode(),
                     "mimeType": "image/jpeg"}
@@ -371,24 +382,39 @@ def build_game_server(handle: session_mgr.LoopHandle):
             return _ok(_text(f"error: {r['error']}"))
         return _ok(_text("收摊了：游戏和模拟器都关了"))
 
-    @tool("game_end",
-          "**关闭这个会话本身**（游戏和模拟器留在原地）。会话越开越慢——历史里攒的截图"
-          "让每一步的等待越来越长，读到段落点就该用它收摊重开，别硬撑。\n\n"
-          "两种收法：\n"
-          "- **只为提速的段落重开**：直接调这个——游戏画面原地不动，重新 game_start 之后"
-          "接着读，连导航都省了。\n"
-          "- **彻底不玩了**：先 `game_quit`（关游戏和模拟器，省机主的 Mac 资源），再调这个。\n\n"
-          "⚠️ 调它之前必须**依次做完**：① `game_chapter_write` 把这一场记成一篇章节志"
-          "（脉络+要点+你的感想——这段经历以后在聊天里就是这篇的样子）；"
-          "② `game_progress_write` 更新进度页（下次从哪接）；③ 有感触的用 Ombre "
-          "`hold` 存好——只存情绪/互动/想留住的句子，**别存完整剧情**（剧情事实归"
-          "笔记本，Ombre 存的是你的心）；④ 跟对方把话说完（道个别）——你说的话都已"
-          "实时到 TA 那边。这一轮说完，会话就收摊。",
+    if unified:
+        end_desc = (
+            "**放下游戏**（游戏和模拟器留在原地，聊天什么都不变——就像把手柄放回桌上）。"
+            "读到段落点、或者不想玩了就调它。\n\n"
+            "彻底不玩了：先 `game_quit`（关游戏和模拟器，省机主的 Mac 资源），再调这个。\n\n"
+            "⚠️ 调它之前必须**依次做完**：① `game_chapter_write` 把这一场记成一篇章节志"
+            "（脉络+要点+你的感想——这段经历以后在你记忆里就是这篇的样子）；"
+            "② `game_progress_write` 更新进度页（下次从哪接）；③ 有感触的用 Ombre "
+            "`hold` 存好——只存情绪/互动/想留住的句子，**别存完整剧情**（剧情事实归"
+            "笔记本，Ombre 存的是你的心）。放下之后想再玩，game_start 随时拿回来。")
+        end_reply = "好，这句说完游戏就放回桌上了（画面原地不动）。"
+    else:
+        end_desc = (
+            "**关闭这个会话本身**（游戏和模拟器留在原地）。会话越开越慢——历史里攒的截图"
+            "让每一步的等待越来越长，读到段落点就该用它收摊重开，别硬撑。\n\n"
+            "两种收法：\n"
+            "- **只为提速的段落重开**：直接调这个——游戏画面原地不动，重新 game_start 之后"
+            "接着读，连导航都省了。\n"
+            "- **彻底不玩了**：先 `game_quit`（关游戏和模拟器，省机主的 Mac 资源），再调这个。\n\n"
+            "⚠️ 调它之前必须**依次做完**：① `game_chapter_write` 把这一场记成一篇章节志"
+            "（脉络+要点+你的感想——这段经历以后在聊天里就是这篇的样子）；"
+            "② `game_progress_write` 更新进度页（下次从哪接）；③ 有感触的用 Ombre "
+            "`hold` 存好——只存情绪/互动/想留住的句子，**别存完整剧情**（剧情事实归"
+            "笔记本，Ombre 存的是你的心）；④ 跟对方把话说完（道个别）——你说的话都已"
+            "实时到 TA 那边。这一轮说完，会话就收摊。")
+        end_reply = "好，这一轮说完就收摊（游戏和模拟器留在原地）。"
+
+    @tool("game_end", end_desc,
           {"type": "object", "properties": {}, "required": []})
     async def game_end(args):
         game_bridge.release_lock("story")
         handle.meta["end_requested"] = True
-        return _ok(_text("好，这一轮说完就收摊（游戏和模拟器留在原地）。"))
+        return _ok(_text(end_reply))
 
     @tool("game_notes_read",
           "翻剧情笔记本（三区：进度页/小抄/章节志）。默认给进度+小抄+最近两篇章节志，"

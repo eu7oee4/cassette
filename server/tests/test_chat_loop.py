@@ -451,6 +451,280 @@ class ActivityFrameTest(unittest.TestCase):
         self.al.append_interval("cass", "game", 5000, 6000)
         self.assertEqual(chat_loop._frame_activities(hist, "cass"), hist)
 
+    def test_old_interval_folds_latest_frames(self):
+        """PR13 折叠：非最近一场整段折成一行（含 TA 插话，§8.6 拍板）；
+        最近一场照旧两行框+原文。只改铸造输入——原 hist 不动。"""
+        self.al.append_interval("cass", "game", 1500, 1800, note="《如鸢》剧情")
+        self.al.append_interval("cass", "game", 3000, 3500, note="《如鸢》剧情")
+        hist = [_m("user", "去读吧", 1400),
+                _m("assistant", "这句台词妙", 1600),
+                _m("user", "哈哈", 1650),
+                _m("assistant", "第二场的点评", 3200),
+                _m("user", "读完啦？", 3600)]
+        out = chat_loop._frame_activities(hist, "cass")
+        texts = [m["text"] for m in out]
+        # 旧场 3 条 → 1 行折叠框；新场 1 条 → 2 行框夹原文
+        self.assertEqual(len(out), 6)
+        self.assertIn("读了一场", texts[1])
+        self.assertIn("章节志", texts[1])
+        self.assertNotIn("这句台词妙", "".join(texts))     # 旧场原文折掉了
+        self.assertIn("第二场的点评", texts)               # 最近一场保原文
+        self.assertIn("你开了《如鸢》剧情会话", texts[2])
+        self.assertEqual(out, chat_loop._frame_activities(hist, "cass"))  # 确定性
+        self.assertEqual(len(hist), 5)                     # 输入不被改写
+
+    def test_foldable_max_end(self):
+        self.assertEqual(chat_loop._foldable_max_end("cass", 0), 0)
+        self.al.append_interval("cass", "game", 1500, 1800)
+        self.assertEqual(chat_loop._foldable_max_end("cass", 0), 0)   # 只有最近一场
+        self.al.append_interval("cass", "game", 3000, 3500)
+        self.assertEqual(chat_loop._foldable_max_end("cass", 0), 1800)
+
+
+class GamePumpGateTest(unittest.IsolatedAsyncioTestCase):
+    """设计稿三：门查表（三种来源×泵×挂载）+ 容忍深度 + usage 场景标。"""
+
+    async def test_game_tools_follow_pump(self):
+        handle = sm.LoopHandle(char_id="cass", scene="chat")
+        gate = chat_loop._wake_gate(handle)
+        deny = await gate({"tool_name": "mcp__game__game_tap"}, "t", None)
+        self.assertEqual(deny["hookSpecificOutput"]["permissionDecision"], "deny")
+        self.assertIn("game_start", deny["hookSpecificOutput"]
+                      ["permissionDecisionReason"])
+        handle.meta["game_pump"] = {"seg_id": "s"}
+        for kind in (None, "chat", "wake"):     # 三种轮来源一致放行
+            handle.meta["turn_kind"] = kind
+            self.assertEqual(await gate({"tool_name": "mcp__game__game_tap"},
+                                        "t", None), {})
+        # 醒来禁用面照 PR12：非 game 工具在 wake 轮仍查 wake_tools
+        handle.meta["turn_kind"] = "wake"
+        handle.meta["wake_tools"] = {"mcp__mail__mail_read"}
+        self.assertEqual(await gate({"tool_name": "mcp__mail__mail_read"},
+                                    "t", None), {})
+        deny2 = await gate({"tool_name": "mcp__mail__mail_send"}, "t", None)
+        self.assertEqual(deny2["hookSpecificOutput"]["permissionDecision"], "deny")
+
+    def test_stale_depth_from_outbox(self):
+        import state_store
+        handle = sm.LoopHandle(char_id="cass", scene="chat")
+        self.assertIsNone(chat_loop._stale_depth(handle))    # 泵没开走默认
+        handle.meta["game_pump"] = {"seg_id": "s"}
+        orig = state_store.read_outbox
+        state_store.read_outbox = lambda: (
+            [{"char_id": "cass", "delivered": False}] * 20
+            + [{"char_id": "cass", "delivered": True}] * 5
+            + [{"char_id": "default", "delivered": False}] * 3)
+        try:
+            self.assertEqual(chat_loop._stale_depth(handle), 22)
+            # 点评连发 20 条没拉走：默认 8 会误脏，上浮后 stale
+            led = _led(("user", "a"), *[("assistant", f"点评{i}") for i in range(20)])
+            hist = [_m("user", "a")]
+            self.assertEqual(chat_loop.divergence(led, hist), "dirty")
+            self.assertEqual(chat_loop.divergence(
+                led, hist, stale_depth=chat_loop._stale_depth(handle)), "stale")
+        finally:
+            state_store.read_outbox = orig
+
+    def test_usage_scene(self):
+        self.assertEqual(chat_loop._usage_scene("chat", False), "chat")
+        self.assertEqual(chat_loop._usage_scene("wake", False), "chat/wake")
+        self.assertEqual(chat_loop._usage_scene("wake", True), "chat/wake/game")
+        self.assertEqual(chat_loop._usage_scene("chat", True), "chat/game")
+
+
+class GamePumpLoopTest(ChatLoopTest):
+    """设计稿三：泵供弹/投递入账/关泵排序/N 张重铸。复用 ChatLoopTest 桩架。"""
+
+    async def asyncSetUp(self):
+        await super().asyncSetUp()
+        from claude_agent_sdk import AssistantMessage, TextBlock
+        self._Asst, self._Text = AssistantMessage, TextBlock
+        # 泵会碰的生产面全部桩掉（tests-reading-prod-state 雷）
+        import activity_log
+        import game_bridge
+        import cohabit_queue
+        import pipeline
+        import state_store
+        self._al_events: list[tuple] = []
+        self._order: list[str] = []
+        self._al_orig = (activity_log.open_segment, activity_log.append_event,
+                         activity_log.close_segment, activity_log.recent_shot_refs)
+        activity_log.open_segment = lambda c, s, ts=None: f"{c}-{s}-1"
+        activity_log.append_event = (
+            lambda seg, kind, **kw: self._al_events.append((seg, kind, kw)))
+        activity_log.close_segment = (
+            lambda seg, note="": self._order.append(f"close:{seg}"))
+        activity_log.recent_shot_refs = lambda seg, k: []
+        self._gb_orig = game_bridge.release_lock
+        game_bridge.release_lock = lambda who: self._order.append(f"unlock:{who}")
+        self._cq_orig = cohabit_queue.code_session_closed
+        cohabit_queue.code_session_closed = lambda: self._order.append("flush")
+        self._mt_orig = pipeline.mounted_tool_names
+        pipeline.mounted_tool_names = lambda ctx, cid=None: []
+        self._rw_orig = state_store.read_recent_window
+        self._cat_orig = state_store.read_sticker_catalog
+        state_store.read_recent_window = lambda cid=None: [
+            {"role": "user", "text": "去读两章", "ts": 1000},
+            {"role": "assistant", "text": "好，我去拿游戏", "ts": 1001}]
+        state_store.read_sticker_catalog = lambda: []
+        self._pause_orig = chat_loop.GAME_TICK_PAUSE
+        chat_loop.GAME_TICK_PAUSE = 0.01
+        # 注册进 registry：start_game_pump 走正门（sm.get 查得到）
+        sm._registry[("cass", "chat")] = self.handle
+        self.delivered: list[tuple] = []
+
+        def deliver(text, stop):
+            self.delivered.append((text, stop))
+            return text
+
+        r = chat_loop.start_game_pump("cass", note="《如鸢》剧情", deliver=deliver)
+        self.assertTrue(r["ok"])
+
+    async def asyncTearDown(self):
+        import activity_log
+        import game_bridge
+        import cohabit_queue
+        import pipeline
+        import state_store
+        (activity_log.open_segment, activity_log.append_event,
+         activity_log.close_segment, activity_log.recent_shot_refs) = self._al_orig
+        game_bridge.release_lock = self._gb_orig
+        cohabit_queue.code_session_closed = self._cq_orig
+        pipeline.mounted_tool_names = self._mt_orig
+        state_store.read_recent_window = self._rw_orig
+        state_store.read_sticker_catalog = self._cat_orig
+        chat_loop.GAME_TICK_PAUSE = self._pause_orig
+        await super().asyncTearDown()
+
+    async def _wait(self, cond, n=200):
+        for _ in range(n):
+            await asyncio.sleep(0.005)
+            if cond():
+                return True
+        return False
+
+    async def test_tick_reopens_delivers_and_ledgers(self):
+        """队列空 → 补「·」；session 没开先从镜像重起；点评 scrub 后投递+入账+
+        事件账；tick 注入不进账不进铸造材料。"""
+        self.assertTrue(await self._wait(
+            lambda: self.clients and "·" in self.clients[-1].queries))
+        c = self.clients[-1]
+        # 镜像铸造：材料只有权威两条，没有「·」
+        self.assertEqual([m["text"] for m in self.forged[0]],
+                         ["去读两章", "好，我去拿游戏"])
+        c.feed(self._Asst(content=[self._Text(text="这句妙 user·")], model="t"),
+               _result("x"))
+        self.assertTrue(await self._wait(lambda: self.delivered))
+        self.assertEqual(self.delivered[0], ("这句妙", True))    # 缝隙学舌刷掉了
+        led = self.handle.meta["ledger"]
+        self.assertEqual(led[-1]["h"], chat_loop._h("这句妙"))
+        self.assertEqual([e[1] for e in self._al_events], ["comment"])
+        # 下一 tick 继续供弹（同一 client，不重铸）
+        n_forge = len(self.forged)
+        self.assertTrue(await self._wait(
+            lambda: self.clients[-1].queries.count("·") >= 2))
+        self.assertEqual(len(self.forged), n_forge)
+
+    async def test_game_end_teardown_order(self):
+        """关泵排序（⑤）：关账 → 释放锁 → 清泵 → 冲补醒；聊天 session 不动。"""
+        self.assertTrue(await self._wait(
+            lambda: self.clients and "·" in self.clients[-1].queries))
+        self.clients[-1].feed(
+            self._Asst(content=[self._Text(text="今天读到这儿")], model="t"),
+            _result("x"))
+        self.assertTrue(await self._wait(lambda: self.delivered))
+        self.handle.meta["end_requested"] = True
+        # 可能有一发 tick 已在飞：喂一个收尾让 loop 回到轮间边界
+        self.clients[-1].feed(_result("x"))
+        self.assertTrue(await self._wait(
+            lambda: self.handle.meta.get("game_pump") is None))
+        self.assertEqual(self._order,
+                         ["close:cass-game-1", "unlock:story", "flush"])
+        self.assertFalse(self.clients[-1].disconnected)   # 聊天 session 活着
+        # 泵停后回聊天节奏：不再补 tick
+        n = self.clients[-1].queries.count("·")
+        await asyncio.sleep(0.05)
+        self.assertEqual(self.clients[-1].queries.count("·"), n)
+
+    async def test_shots_reforge_with_image_tail(self):
+        """N 张段内重铸：巩固轮（感知白描）→ 从镜像重铸+近 K 张图回填（render_tail
+        只进铸造不进账）→ shots 清零。"""
+        import activity_log
+        self.assertTrue(await self._wait(
+            lambda: self.clients and "·" in self.clients[-1].queries))
+        c0 = self.clients[-1]
+        c0.feed(self._Asst(content=[self._Text(text="第一句点评")], model="t"),
+                _result("x"))
+        self.assertTrue(await self._wait(lambda: self.delivered))
+        # 攒满 N 张；喂两个收尾（一发给可能在飞的 tick、一发给巩固轮）
+        activity_log.recent_shot_refs = lambda seg, k: []   # 图退纯文本（引用为空）
+        self.handle.meta["shots"] = chat_loop.GAME_REOPEN_SHOTS_N
+        self.handle.last_reopen = 0
+        c0.feed(self._Asst(content=[self._Text(text="记好了")], model="t"),
+                _result("x"), _result("x"))
+        self.assertTrue(await self._wait(lambda: len(self.clients) >= 2))
+        self.assertIn("把进度记一笔",
+                      "".join(q for q in c0.queries if isinstance(q, str)))
+        self.assertEqual(int(self.handle.meta["shots"]), 0)
+        self.assertTrue(self.clients[0].disconnected)
+        # 新 client 接着供弹
+        self.assertTrue(await self._wait(
+            lambda: "·" in self.clients[-1].queries))
+
+    async def test_reforge_image_tail_not_in_ledger(self):
+        """图尾巴：铸造材料末尾多一行带 images 的 user 框；账里没有它。"""
+        import activity_log
+        self.assertTrue(await self._wait(
+            lambda: self.clients and "·" in self.clients[-1].queries))
+        c0 = self.clients[-1]
+        c0.feed(self._Asst(content=[self._Text(text="点评一")], model="t"),
+                _result("x"))
+        self.assertTrue(await self._wait(lambda: self.delivered))
+        import base64
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as f:
+            f.write(b"fakejpg")
+            ref = f.name
+        activity_log.recent_shot_refs = lambda seg, k: [ref, ref]
+        self.handle.meta["shots"] = chat_loop.GAME_REOPEN_SHOTS_N
+        self.handle.last_reopen = 0
+        c0.feed(self._Asst(content=[self._Text(text="记好了")], model="t"),
+                _result("x"), _result("x"))
+        self.assertTrue(await self._wait(lambda: len(self.clients) >= 2))
+        tail = self.forged[-1][-1]
+        self.assertIn("眼前的画面", tail["text"])
+        self.assertEqual(len(tail["images"]), 2)
+        self.assertEqual(tail["images"][0]["data"],
+                         base64.b64encode(b"fakejpg").decode())
+        # 账=权威镜像投影（2 条）；渲染尾巴不入账
+        self.assertEqual(len(self.handle.meta["ledger"]), 2)
+        import os
+        os.unlink(ref)
+
+    async def test_pump_survives_queued_chat_turn(self):
+        """泵开着时 TA 插话：队列优先（tick 收完立刻轮到人）、照走 SSE、泵不受影响。"""
+        self.assertTrue(await self._wait(
+            lambda: self.clients and "·" in self.clients[-1].queries))
+        c = self.clients[-1]
+        hist = [_m("user", "去读两章", 1000), _m("assistant", "好，我去拿游戏", 1001)]
+        turn = self._turn(hist, "读到哪了")
+        self.handle.queue.put_nowait(turn)      # 先排队，tick 还在飞
+        c.feed(self._Asst(content=[self._Text(text="点评")], model="t"),
+               _result("x"))                    # 收掉在飞的 tick → 轮尾队列优先
+        self.assertTrue(await self._wait(
+            lambda: any(isinstance(q, list) for q in c.queries)))
+        c.feed(*_text_events("刚开头。"), _result("刚开头。"))
+        chunks = []
+        while True:
+            ch = await asyncio.wait_for(turn.out.get(), timeout=2)
+            if ch is None:
+                break
+            chunks.append(ch)
+        self.assertIn(b'"type": "done"', b"".join(chunks))
+        self.assertTrue(self.handle.meta.get("game_pump"))   # 插话不影响泵
+        led = self.handle.meta["ledger"]
+        self.assertEqual(led[-1]["h"], chat_loop._h("刚开头。"))   # 插话照常入账
+
 
 class ChatEngineConfigTest(unittest.TestCase):
     """CHAT_ENGINE 灰度解析（config.chat_engine）。"""

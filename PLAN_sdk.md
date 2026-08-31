@@ -1012,6 +1012,9 @@ SDK 化后独立终端页失去存在理由，四个职责全有更好归宿：�
   thinking，写成断言（出现即失败）；tool_use/tool_result 双向无孤儿、顺序
   不重排；首事件必须 user（tail_window 已保证，进校验）；空 thinking/孤儿
   tool 块=首次请求 400，结构校验过了也要 ping（FIRST_REQUEST_OK 才算数）。
+  **→ 设计稿三（08-30 二轮改判「三种轮次」）已落字并 ✅ 全量落码（400 测试绿，
+  未重启；生效=STORY_ENGINE=unified，默认仍 sdk）——图块腿真机验通在先，
+  施工记录在设计稿三末尾。**
 - **S2 验收**：PR9 演练清单全绿；编辑 → 脏标记 → 惰性重铸，「编辑后第一条多等
   几秒」符合 §6 预期；三路时间线与缓存断点不回退；信感主观验证——在允许元诚实
   的语境直接问他。**重铸记忆三类问（08-30）**：重铸后各问一题——尾窗内原文
@@ -1087,6 +1090,180 @@ transcript=缓存。「同步」唯一要保证的是铸进 transcript 的对话
 - **真机演练清单（PR9 验收即此表）**：{断网、锁屏、杀 app、后端重启、订阅打满}
   × {轮进行中、轮间隙}，每格预期行为先写死、逐格打勾；外加一格「wake 轮进行中
   TA 消息到」（队列天然串行，wake 说完 TA 轮接上，§5.2 撞轮条的实证）。
+
+### S2 设计稿三（PR13）：game 并入意识流（08-30 定稿·二轮改判「三种轮次」，待机主过目）
+
+**结论先行（二轮，机主提案覆盖首轮「game 段+四种轮」）：轮来源的本义是「谁
+触发的」——TA（chat）／他自己（wake）／带外批准的上机（code），封闭三种，
+不会再长。game 不是第四种来源，是他自己的时间里干的一件事（§0.3「半夜醒来玩
+游戏正是 AI 的活法」早把话说了）：**玩游戏的轮就是 wake 型轮**，泵只是往 wake
+允许集里并一个 game_*。因此「段」瘦成一个**泵状态**（锁+续弹节奏+shots 计数），
+不是轮类型、不是 options flavor、没有进出场换 client——08-30 那类事故全长在
+边界换 client 上，少两个边界就少一类死法。独立 game loop 的机器（工具直包/
+巩固钩子/scrub_seam/笔记本）原样搬进 chat_loop，退役的是「独立会话＋进场景
+铸造＋铸回＋段 flavor」整层壳。三个老问题结构性消失：pre_log 退役（聊天历史
+天然是前缀，「重铸丢进场前对话」不再可能）；进场景铸尾轮退役；点评回流已被
+PR8 发送前比对免费吃掉（PR11 实证）。**
+
+- **泵状态**：`handle.meta["game_pump"]`（None|{start_ts, seg_id, shots}）。
+  长在该角色的 chat handle 上，没有全局「当前泵」（串台六条）。code（PR14）
+  另有自己的状态位，互斥收在 code_bridge 门面。
+- **schema 并集常驻（taste ④ 原案照做，不再收窄）**：配了 game-story 插件的
+  角色（不论开关状态），chat options 常驻挂进程内 game MCP（build_game_server
+  闭包换 chat handle，shots 计数现成）+ TICK_SYSTEM 并入聊天系统提示常驻
+  （措辞改条件式：「游戏在手边的时候…」，~300 token 稳定段吃缓存）。挂载
+  开关/泵状态都只进门，不动 schema——中途拨开关不用换 client。
+- **max_turns 不设（08-30 机主拍板：删）**：chat client 本来就不设帽，game 轮
+  跟着不设。轮节奏靠 prompt 骨架+泵的短轮供弹自律；「轮内失控」失去机械backstop
+  ——认了：08-30 事故里这顶帽子本身差点害死会话（触顶后 CLI 真死过），删掉
+  等于把那个风险面整个拿走。GAME_MAX_TURNS 常数与触顶处理路径随之退役。
+- **game_start=拿锁+开泵（不再是段边界）**：插件按钮不退休——stdio
+  game_start→HTTP `/game/story/start` 管线原样，路由改判：角色在 sdk 聊天
+  灰度 → ①game_bridge.acquire_lock（拿不到原话轮内返回，「任务引擎正在用」
+  语义不变）②activity_log 开段 ③置 game_pump——完事，没有重铸、没有换
+  client、没有开场注入（他正在对话里，游戏「到手边」就是工具能用了这件事
+  本身）。非灰度角色退独立 loop（回退姿态）。旧活动段的折叠不在进场做，
+  交给 chat 已有的压力轴（「有可折段」下个间隙铸）。
+- **门（PreToolUse，_wake_gate 泛化为三种来源查表）**：game_* 操作类工具
+  的放行条件=**泵开着**（锁在手），三种轮一致；泵没开一律拒（「游戏不在
+  手边——先 game_start」），任务引擎互斥由此顺带成立。wake 轮禁用面照
+  PR12（泵开着时允许集=mounted_tool_names("wake") ∪ game_*——醒来插话
+  时看一眼画面也自然）；菜单照 tool_menu_block/shadowed_tools 现成过滤链，
+  「不挂」=执行层拒+菜单不显示。
+- **泵改动（chat_loop.run）**：泵开着时队列空 → TICK_PAUSE 后再看一眼，还空
+  补一个 tick Turn——**tick 不是第四种轮**：turn_kind="wake"（存在论=他自己
+  的时间），注入 TICK_PROMPT（·），差异全在自带的 finalize（scrub_seam→
+  outbox+窗口→**入账 append assistant**，账记 _fence_code_if_needed 之后
+  投递出去的那份）；不跑 wake 簿记（NEXT 解析/wake_log/重抽是真醒来轮的
+  收尾，tick 不沾）。队列非空先喂（TA 插话/wake 注入，延迟=一个短轮），
+  TA 的 chat 轮照走 SSE 流。泵开着时 1h 静默×软阈 idle 检查停用（重铸只认
+  N 张）。判脏 stale 容忍精确化：容忍集合=账尾**未 delivered 的 outbox
+  条目**（我们知道哪些还没被 app 拉走），替代拍数字的 STALE_TOLERANCE
+  深度——点评连发快过 TA 拉取时不误脏。
+- **usage 归属按泵状态标（轮 kind 与 usage 标签解耦）**：泵开着的轮落账
+  scene 加 "/game"（chat/game、chat/wake/game）——面板上「他玩游戏花的」
+  与「陪聊/醒来花的」分得开，kind 不用为记账多一种。
+- **分段重铸（§4 节奏落地，唯一保留的边界）**：轮尾 shots≥N(70) → 巩固轮
+  （REOPEN_NOTE_PROMPT，写进度页/hold）→ 走 chat 现成的
+  _consolidate_and_reforge 机器：关 client → 从镜像重铸+**近 K 张图回填**
+  （K 默认 8，env）→ resume → ping。铸完还是 chat options（无 flavor 可换，
+  比首轮设计更顺）；失败重试一次，两败=泵收口（关账/释放锁/Bark）+聊天
+  惰性重起。材料：点评原文已经由 outbox→recent_window 天然在镜像里；图从
+  活动事件账本的截图引用铸 user 槽 image 块（感知框行包着，见闻侧红线
+  合规）。同 sid 覆盖写+确定性 uuid → 前缀逐字、缓存只从折叠点断（§4 防
+  手滑纪律照钉）。**§9 换模型只剩这一个切点**（重铸=换 client=可换 model），
+  「进游戏换 Sonnet」的干净段边界随四种轮方案一起放弃——那口径本来也没过。
+- **活动事件账本（区间账升级，§4 真相库扩容落地)**：activity_log 扩三口——
+  `open_segment(char,scene,ts)→seg_id`、`append_event(seg,kind,payload)`
+  （comment/user_msg/tool/shot；截图落 `state/activity/shots/` 存引用，大结果
+  截 ~2k）、`close_segment(seg,note)`（写现有区间行，chat 框零改动）。保留
+  30 天清（口径同 uploads），章节志永存；缺原文的老段渲染器无条件走折叠
+  （§4）。目录进 ops_check（600/700+备份纪律，§2.5 扩面）。wake 的 acts
+  （PR12 wake_log 扩展字段）改为同时落账本；**开局包「行为清单」半边接通**
+  （PR10 欠账④）：开局注入从账本机械读近期世界效应事件，不走检索。
+- **折叠接通（chat 压力轴补全）**：铸造输入变换（不动账、不动权威）——已结束
+  且非最近一场的区间，区间内消息连段替换成两行框+该场章节志标题/摘要；
+  ctx_est 按折叠后计。压力轴「有可折活动段」触发接通（meta.folded_upto_ts
+  游标判「窗里还有没折的旧段」）。
+- **校验矩阵（forge 硬化，⑥）**：render 前断言——首事件 user；合并后严格
+  交替、无空文本；**永不铸 thinking（出现即失败）**；tool_use/tool_result
+  现阶段禁止出现（我们不铸 tool 对；Tool Primer 记为真机撞见工具变形时的
+  后手）；image 字节参与 digest（确定性单测）；结构校验过了也要 ping——
+  FIRST_REQUEST_OK 才算数（重铸后 resume 即 ping，现成）。回灌链警报：
+  scrub_seam 沿用，刷掉未知机制文本时**报警日志不静默传**。
+  **动工第一件事**：forge_regress 加图块腿——带 image 块的伪造 transcript
+  resume 后正常接续才算通；验不过则「近 K 张图回填」整条降级为纯文本史
+  （框行说「画面淡去」），其余设计不动。
+- **两处判据改判（统一后「会话活着」永真，单点收口兑现）**：
+  ①`code_bridge.sdk_loop_handle` 改「扫 chat 注册表找泵/上机状态占用」（回退
+  路保留期间独立 loop 也问，两处都空才 None）；active_profile 按状态位报
+  game/code、session_char/started_at 读泵元数据——四个消费方（wake 避让/
+  cohabit 在场/app 对齐/占用检查）零改动。独占组 "computer" 随独立 loop
+  退役；共存期「泵开着」与「独立 loop 开着」互相拒，都收在 code_bridge 门面。
+  ②补醒语义挪到泵停：`cohabit_queue.code_session_closed()` 的调用点从
+  loop 收摊挪到关泵；区间账 close 同点。
+- **关泵排序（⑤的新形态）**：game_end 置旗 → 轮尾依次：写区间账 close →
+  释放模拟器锁 → 清 game_pump → **冲攒着的补醒**（code_session_closed）→
+  才接受下一次 game_start。顺序由泵单点保证，背靠背（关游戏→上机）不会把
+  补醒无限顺延。泵开着时的插入：wake.py 的 sdk 分路改两行——scheduled(NEXT)/
+  mail 硬触发**不看**占用直接入队（队列串行，下个短轮到）；自发抽签醒照旧
+  避让（他本来就醒着在玩，关泵后重抽）。game_end 工具语义微调：「放下游戏」
+  ——会话/聊天什么都没关（工具描述改措辞，插件仓同文那份一起）。
+- **重启前置与清扫**：「重启后 forge 复活」chat 版已由 PR8/PR10 达成（重启=
+  账亡=下次注入重铸复活），前置转正。PR13 只补启动钩子：发现未收口的账
+  （区间未 close/锁悬着）→ 补 close+释放锁+攒补醒；泵不自动复活（进度在
+  笔记本，重新 game_start 接上——与独立 loop 现状同）。
+- **退役与回退**：退役 game_loop.run 泵/_forge_and_resume/_feed_next/
+  pre_log/GAME_MAX_TURNS 与独立注册（build_game_server/TICK_SYSTEM/
+  scrub_seam/巩固文案/常数搬用，TICK_SYSTEM 措辞改条件式）；§4 过渡期
+  规则一/二正式退役。回退开关：STORY_ENGINE=unified|sdk|tmux——默认先
+  sdk，真机验收过再拨 unified；非 sdk 聊天灰度角色自动退 sdk 独立 loop
+  并打日志。新路跑稳两周才删旧路（仓规）。
+- **验收**：单测——门查表（三种来源×泵×挂载）/关泵排序（end→补醒→start）/
+  折叠渲染确定性/图块 digest/账本读写与 30 天清理/点评连发不误脏/tick 不进
+  账不进铸造材料。真机——拿起游戏无感（不说交接的话，也没有任何「进入」的
+  停顿）；插话延迟≈一个短轮；N 张重铸后游戏前那句叮嘱**逐字在窗**、他无断感
+  接着读（S2 验收原话）；game_end 后补醒秒级冲、接着聊无 game 腔、聊天历史
+  完整；泵开着时杀后端→锁清/区间补 close/聊天惰性复活/重新 game_start
+  接上；STORY_ENGINE=sdk 一键回独立 loop。
+
+✅ **08-30 深夜落码（未 commit 未重启；生效=STORY_ENGINE=unified+重启，默认
+仍 sdk）**。施工记录：
+
+- **图块腿先行验证（动工第一件事，全绿）**：forge_regress 加 D/D2 腿——伪造
+  transcript 的 user 事件塞纯红 PNG（API 标准 image 块形状），CLI 2.1.251 与
+  agent-sdk 0.2.148 两条路 resume 后问颜色都答 Red——**图真到模型眼前**，
+  「近 K 张图回填」按原设计建，不降级；A/B/C 三腿当前版本重验同绿。
+- 落码清单：**forge** 图块正门（images 只许 user 槽、字节进 digest、合并保图）
+  +校验断言（有 user 则去 assistant 头；`_assert_native_block_types` 禁
+  thinking/tool 块出现即失败）；**activity_log** 三层账（区间账原样/事件账
+  open·append·close+截图引用+30 天清理/行为账 append_act·recent_acts）+目录
+  700；**chat_loop** 泵全量——`start_game_pump`（拿锁在路由、这里开段账+置泵
+  +_KICK 踢醒长等）、tick=wake 型轮（`_pump_tick`/`_pump_drain`，注入「·」不
+  入账不进铸造、投递走 scrub→app 闭包→账+事件账、连挂三轮自动放下游戏）、
+  `_wake_gate` 泛化门（game_* 只认泵状态，三种轮一致）、N 张段内重铸
+  （`_game_reforge`：巩固→镜像+`_game_shot_tail` K 图回填→resume，失败重试
+  一次再败关 session 惰性重起）、折叠接通（`_frame_activities` 旧段一行框、
+  最近一场保原文；`_fold_pending` 进压力轴）、开局行为清单（`_acts_block`
+  机械注入）、stale 容忍=未拉走 outbox 条数上浮（`_stale_depth`）、usage
+  scene 泵标（`_usage_scene`）、loop 退出 finally 兜底放下游戏；**game_loop**
+  `build_game_server(unified=, shot_sink=)`（game_end 换「放下游戏」措辞、
+  截图落账本）；**app** unified 分派（sdk 灰度且没熄火才走泵，否则退独立
+  loop 打日志）+`_game_story_start_unified`（hint 走工具返回值 in-band 提示
+  翻笔记本）+deliver 回传正文+`/code/stop` 泵分支（置旗不 cancel 聊天）+
+  `_activity_sweep` 启动清扫（补收段/释放锁/冲补醒/30 天清理）；**code_bridge**
+  `GamePumpView` 投影（scene=game、request_stop=置旗、put_threadsafe 有声拒
+  ——四个消费方零改动实证）+`session_mgr.alive_handles`；**wake** 泵中插入
+  （NEXT/mail 段中入队、自发抽签泵中不掷、别人的泵照旧避让）；**wake_sdk**
+  行为账镜像（NON_MEMORY_TOOLS 词表）。
+- **顺手修一个潜伏 NameError + 复盘（四步）**：`_game_story_start_sdk` 里
+  task 回显块引用已删除的 task 变量（任务转述删除 015f699 漏摘；未重启所以
+  还没炸，下次重启后首个 game_start 必炸）——整块摘除。
+  **根因四条同时成立**：①删功能只删了赋值处、没沿引用链清消费点；②这条
+  路由没有任何测试覆盖（要桩 forge/session_mgr/game_bridge，一直靠真机验）；
+  ③「生效等重启」部署——commit 后进程跑旧代码，坏改动与症状时间分离；
+  ④删除发生在深夜五连修批次里的顺手一刀（注意力在学舌主症状上）。
+  **归类**：运行时语言删东西的单位是**引用链**不是定义处；没有测试兜底时
+  「删完 grep 一遍名字」就是最低成本的编译器——否则坏代码带定时引信入库。
+  **规避规则**：删变量/参数/字段的最后一步永远是全仓 grep 引用清零；commit
+  时没被任何测试或真机执行过的路径要么补冒烟、要么在 PLAN 标「未执行过」
+  （「测试绿」≠「改动被跑过」）；批次修里顺手的删改单独 review 一遍 diff；
+  这类错误**静态可查**——已机械化成 tests/test_static_names.py（pyflakes
+  undefined-name 常驻扫描，pyflakes 已进 venv）。
+  **扫同类**：横扫 server/*.py+tools/*.py 全仓 pyflakes——undefined name
+  仅此一处（已修）；顺手清一个新代码的空 f-string，预存两处 unused
+  nonlocal/变量评估不动（防御性声明与老代码，不属此类）。竖翻 git log：
+  此根因**首犯**（6491099 WorldBase 漏 patch 是近亲不同类——改动没扫到
+  受影响面，但那是测试隔离缺口）；共同出生环境=大批次顺手改，规则三对着它。
+- 测试 **400 全绿**（+33：forge 图块/断言 5、账本 5、泵 loop+门 9、门面投影 1、
+  wake 泵中路由 2、其余为拆分细化）。
+- **边界与欠账（真机验收时核）**：①邮件等不进 stored 的工具在行为账没有线
+  （词表=NON_MEMORY_TOOLS，缺口真机看到再从执行层补）；②巩固机械前置仍软版
+  （同 PR10 取舍①，chat/game 同步收紧别单独发明）；③重铸后 ping=下一 tick
+  （接不上按死处理→镜像重开自愈，无独立 ping 轮）；④ToolSearch 开着时
+  game_* schema 也走延迟加载（与 Ombre 同待遇，真机看首调延迟）；⑤unified
+  下泵开着时 /code/send 有声拒（「直接在聊天框说」）——game 页终端输入框的
+  iOS 侧去留归 iOS 批次。
 
 ### S3 code 并入（PR14，最后）
 

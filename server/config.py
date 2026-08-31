@@ -97,8 +97,11 @@ BACKEND_URL = os.environ.get("CASSETTE_BACKEND_URL", "http://127.0.0.1:8000").rs
 # 开通步骤见 README 的 Game mode 一节。没开时 /game/* 一律 503，插件工具有声报错。
 GAME_MODE_ENABLED = os.environ.get("GAME_MODE_ENABLED", "0") == "1"
 
-# 剧情会话引擎（PLAN_sdk S1/PR7）：sdk=agent-sdk 常驻 loop（默认）；tmux=旧路回退。
-# 新路跑稳两周后 tmux 路和 game-story 插件的会话侧 MCP 一起退役。
+# 剧情会话引擎（PLAN_sdk S1/PR7 → S2/PR13）：
+#   sdk（默认）=agent-sdk 独立 loop；tmux=最老路回退；
+#   unified=game 并入聊天意识流（设计稿三：泵不是会话）——只对 sdk 聊天灰度
+#   角色生效，其余角色自动退 sdk 独立 loop。真机验收过再拨 unified 当默认。
+# 新路跑稳两周后旧路和 game-story 插件的会话侧 MCP 一起退役。
 STORY_ENGINE = (os.environ.get("STORY_ENGINE", "sdk").strip() or "sdk")
 
 # 聊天引擎（PLAN_sdk S2/PR10）：按角色灰度。

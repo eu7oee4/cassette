@@ -3,3 +3,4 @@ uvicorn
 python-dotenv
 mcp>=1,<2  # 插件的 MCP stdio 入口（fastmcp；2.0 改了 API 先不追）
 claude-agent-sdk==0.2.148  # PLAN_sdk 钉版本：升级前必跑 tools/forge_regress.py（forge 后门闸门）
+pyflakes  # tests/test_static_names.py：undefined-name 常驻扫描（08-30 task NameError 复盘）

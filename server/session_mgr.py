@@ -156,6 +156,14 @@ def get(char_id: str, scene: str) -> Optional[LoopHandle]:
     return h if (h and h.alive()) else None
 
 
+def alive_handles(scene: Optional[str] = None) -> list[LoopHandle]:
+    """活着的 handle 快照（可按场景滤）。给 code_bridge 门面扫「骑在 chat 上的
+    泵/上机状态」用（PR13）——仍不提供「当前」语义，怎么判归调用方按 meta 来。"""
+    with _reg_lock:
+        hs = [h for h in _registry.values() if h.alive()]
+    return [h for h in hs if scene is None or h.scene == scene]
+
+
 def group_alive(group: str) -> Optional[LoopHandle]:
     """独占组里现在谁活着（没有返回 None）。这是唯一的"横向"查询，且必须带组名
     ——不提供无参的「当前会话」。"""

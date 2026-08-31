@@ -98,14 +98,51 @@ def _write_session_state(d: dict) -> None:
     _write_atomic(SESSION_STATE_PATH, json.dumps(d, ensure_ascii=False, indent=2))
 
 
+class GamePumpView:
+    """「拿着游戏的聊天 session」在门面上的投影（PLAN_sdk PR13）。统一后
+    「会话活着」对泵永真——四个消费方（status/避让/cohabit/占用检查）拿到的
+    语义和独立 loop 一致；控制类操作走显式语义，**绝不 cancel 聊天 loop**。"""
+    scene = "game"
+    is_pump = True
+
+    def __init__(self, chat_handle, pump: dict):
+        self._h = chat_handle
+        self.char_id = chat_handle.char_id
+        self.started_at = float(pump.get("start_ts") or chat_handle.started_at)
+        self.meta = chat_handle.meta
+
+    @property
+    def reopening(self) -> bool:
+        return self._h.reopening
+
+    @property
+    def awaiting_user_since(self):
+        return self._h.awaiting_user_since
+
+    def put_threadsafe(self, msg) -> None:
+        raise RuntimeError("游戏在聊天里跑着——直接在聊天框说就行，不用走终端口")
+
+    def request_stop(self, reason: str = "manual") -> None:
+        # 置旗：泵在轮尾收口（关账→释放锁→清泵→补醒），聊天 session 什么都不动。
+        self._h.meta["end_requested"] = True
+
+
 def sdk_loop_handle():
-    """SDK 常驻 loop（PLAN_sdk S1）也算「电脑上的会话」。判据统一在本模块出口——
-    wake 避让 / cohabit 在场 / app 对齐 / codemode「会话占用中」全都只问 code_bridge，
-    在这儿接一次比在四个消费方各接一遍稳（漏一个就是 08-29 测试基线那类延迟炸弹）。
-    活着返回 handle，没有返回 None。"""
+    """SDK 常驻 loop / 骑在 chat 上的 game 泵（PR13）都算「电脑上的会话」。
+    判据统一在本模块出口——wake 避让 / cohabit 在场 / app 对齐 / codemode
+    「会话占用中」全都只问 code_bridge，在这儿接一次比在四个消费方各接一遍稳
+    （漏一个就是 08-29 测试基线那类延迟炸弹）。活着返回 handle（泵返回
+    GamePumpView 投影），没有返回 None。"""
     try:
         import session_mgr
-        return session_mgr.group_alive("computer")
+        h = session_mgr.group_alive("computer")
+        if h is not None:
+            return h
+        for ch in session_mgr.alive_handles("chat"):
+            pump = ch.meta.get("game_pump")
+            if pump:
+                return GamePumpView(ch, pump)
+        return None
     except Exception:
         return None
 

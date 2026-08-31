@@ -170,6 +170,18 @@ def finish_wake_turn(cid: str, trigger: str, force: bool, started_ts: int,
     # 的工具调用（时间+轮来源在条目上，工具+对象摘要在这），行为留痕不靠他自觉。
     acts = [{"tool": s.get("tool"), "ok": bool(s.get("ok", True)),
              "text": (s.get("text") or "")[:80]} for s in (stored or [])]
+    # PR13 归一：碰外部世界的行为同时落活动行为账（开局「行为清单」的机械来源）。
+    # 判线 §5.2：纯内部记忆操作（hold/feel 等 Ombre 侧）不留——人不记得自己回忆过
+    # 什么；现阶段外部行为的词表=NON_MEMORY_TOOLS（stored 里出现的外部动作类），
+    # 邮件等不进 stored 的工具等真机看到缺口再从执行层补线（记档设计稿三）。
+    try:
+        import activity_log
+        for a in acts:
+            if a.get("tool") in pipeline.NON_MEMORY_TOOLS:
+                activity_log.append_act(cid, "wake", a.get("tool") or "?",
+                                        a.get("text") or "", ok=a.get("ok", True))
+    except Exception as e:
+        logerr(f"行为账镜像失败: {e}")
     mem_stored = [s for s in (stored or [])
                   if s.get("tool") not in pipeline.NON_MEMORY_TOOLS]
     base: dict = {"ts": started_ts, "time": pipeline.now_str(), "source": "wake",

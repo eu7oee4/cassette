@@ -144,6 +144,75 @@ class ForgeTest(unittest.TestCase):
         probs = forge.ops_check(root=bad, check_tm=False)
         self.assertTrue(any("同步盘" in p for p in probs))
 
+    # ---------- PR13：图块正门 + 校验矩阵 ----------
+
+    IMG = {"media_type": "image/jpeg", "data": "aGVsbG8="}
+
+    def test_images_render_and_determinism(self):
+        """user 槽图块铸成 API 标准形状；图片字节参与 digest（换图=换 sid），
+        同入同出字节相同。"""
+        msgs = [
+            {"role": "user", "text": "看下画面", "ts": 1, "images": [self.IMG]},
+            {"role": "assistant", "text": "看到了", "ts": 2},
+        ]
+        sid1, p1 = self._render(msgs=msgs)
+        blocks = self._events(p1)[0]["message"]["content"]
+        self.assertEqual([b["type"] for b in blocks], ["text", "image"])
+        self.assertEqual(blocks[1]["source"],
+                         {"type": "base64", "media_type": "image/jpeg",
+                          "data": "aGVsbG8="})
+        with tempfile.TemporaryDirectory() as d2:
+            sid2, p2 = self._render(msgs=msgs, root=Path(d2))
+            self.assertEqual(sid1, sid2)
+            self.assertEqual(p1.read_bytes(), p2.read_bytes())
+        msgs2 = [dict(msgs[0], images=[{"media_type": "image/jpeg",
+                                        "data": "d29ybGQ="}]), msgs[1]]
+        sid3, _ = self._render(msgs=msgs2)
+        self.assertNotEqual(sid1, sid3)
+
+    def test_images_only_user_slot(self):
+        """图只许铸 user 槽（他产的是文字，图是他看到的——见闻侧）。"""
+        with self.assertRaises(ValueError):
+            self._render([{"role": "assistant", "text": "x", "ts": 1,
+                           "images": [self.IMG]}])
+
+    def test_images_survive_merge(self):
+        """连续 user 合并时图跟着并、顺序保留。"""
+        img2 = {"media_type": "image/png", "data": "eHl6"}
+        msgs = [
+            {"role": "user", "text": "一", "ts": 1, "images": [self.IMG]},
+            {"role": "user", "text": "二", "ts": 2, "images": [img2]},
+            {"role": "assistant", "text": "嗯", "ts": 3},
+        ]
+        _, path = self._render(msgs=msgs)
+        blocks = self._events(path)[0]["message"]["content"]
+        self.assertEqual([b["type"] for b in blocks], ["text", "image", "image"])
+        self.assertEqual(blocks[1]["source"]["media_type"], "image/jpeg")
+        self.assertEqual(blocks[2]["source"]["media_type"], "image/png")
+
+    def test_user_head_trim(self):
+        """校验矩阵：有 user 可去头就去掉打头的 assistant（首位 assistant 会让
+        CLI 顶垫合成 user 槽，缝隙学舌类）；全程没有 user 保持原样（顶垫认了）。"""
+        msgs = [{"role": "assistant", "text": "醒来说的", "ts": 1},
+                {"role": "user", "text": "在吗", "ts": 2},
+                {"role": "assistant", "text": "在", "ts": 3}]
+        _, path = self._render(msgs=msgs)
+        evs = self._events(path)
+        self.assertEqual([e["type"] for e in evs], ["user", "assistant"])
+        self.assertEqual(evs[0]["message"]["content"][0]["text"], "在吗")
+        _, path2 = self._render(msgs=[{"role": "assistant", "text": "独白", "ts": 1}])
+        self.assertEqual([e["type"] for e in self._events(path2)], ["assistant"])
+
+    def test_native_block_type_assertion(self):
+        """校验矩阵断言直测：thinking/tool 块出现即失败（永不铸）。"""
+        forge._assert_native_block_types(
+            {"message": {"content": [{"type": "text", "text": "x"},
+                                     {"type": "image", "source": {}}]}})
+        for bad in ("thinking", "tool_use", "tool_result"):
+            with self.assertRaises(AssertionError):
+                forge._assert_native_block_types(
+                    {"message": {"content": [{"type": bad}]}})
+
     def test_tail_window(self):
         msgs = []
         for i in range(10):

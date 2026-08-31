@@ -692,12 +692,19 @@ async def maybe_wake(char_id: Optional[str] = None) -> None:
             # 小屋开着时自主醒来归 cohabit 队列（照老口径整体让位，不双跑）。
             if world.house_active():
                 return
+            # PR13 泵中插入：占用是「骑在他自己聊天上的 game 泵」时不整体避让——
+            # NEXT 定时醒允许段中插入（同一队列串行，下个短轮到）；独立 loop/tmux
+            # code 照旧避让（往聊天塞醒来=对着不在电脑前的那个自己说话）。
             owner = code_session_owner()
-            if owner is not None and owner in ("", cid):
+            occupied = owner is not None and owner in ("", cid)
+            h = code_bridge.sdk_loop_handle() if occupied else None
+            pump_mid = (bool(getattr(h, "is_pump", False))
+                        and getattr(h, "char_id", "") == cid)
+            if occupied and not pump_mid:
                 if not _code_avoid.get(cid):
                     whose = "归属探不出来的" if owner == "" else "他自己的"
                     logerr(f"wake 避让（{cid}）：{whose} code/game 会话开着，"
-                           f"自发的醒来攒着（sdk 路；段中插入等 PR13）")
+                           f"自发的醒来攒着（sdk 路）")
                     _code_avoid[cid] = True
                 return
             _code_avoid[cid] = False
@@ -707,6 +714,8 @@ async def maybe_wake(char_id: Optional[str] = None) -> None:
             if next_wake is not None and now >= float(next_wake):
                 wake_sdk.enqueue_wake(cid, "scheduled")
                 return
+            if pump_mid:
+                return   # 自发抽签醒泵中不掷：他本来就醒着在玩；放下游戏后恢复
             # 随机醒的独立开关照认（判 is False，None 不算关）——关的只是自醒抽样，
             # scheduled/邮件不受影响。设置面 iOS 批次删掉后这行自然常真。
             if settings.get("random_wake") is False:

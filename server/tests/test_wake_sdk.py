@@ -325,6 +325,45 @@ class MaybeWakeRoutingTest(unittest.IsolatedAsyncioTestCase, WakeStateBase):
         self.assertEqual(self.enq, [])
         wake._code_avoid.pop(self.cid, None)
 
+    async def test_sdk_scheduled_fires_mid_pump(self):
+        """PR13 泵中插入：占用=骑在他自己聊天上的 game 泵 → NEXT 定时醒照入队
+        （队列串行，下个短轮到）；自发抽签醒仍不掷（他醒着在玩）。"""
+        import session_mgr as sm
+        wake.code_session_owner = lambda: self.cid
+        ch = sm.LoopHandle(char_id=self.cid, scene="chat")
+        ch.meta["game_pump"] = {"seg_id": "s", "start_ts": 1.0}
+        sm._registry[(self.cid, "chat")] = ch
+        try:
+            state_store.write_schedule({"next_wake_at": int(time.time()) - 5},
+                                       self.cid)
+            await wake.maybe_wake(self.cid)
+            self.assertEqual(self.enq, [(self.cid, "scheduled", False)])
+            # 没到点时：auto 不掷、也不入队
+            self.enq.clear()
+            state_store.write_schedule({}, self.cid)
+            await wake.maybe_wake(self.cid)
+            self.assertEqual(self.enq, [])
+            self.assertEqual(self.auto, [])
+        finally:
+            sm._registry.pop((self.cid, "chat"), None)
+            wake._code_avoid.pop(self.cid, None)
+
+    async def test_sdk_defers_when_other_chars_pump(self):
+        """占用是**别人**的泵/会话 → 照旧避让（别往不在场的人聊天里塞醒来）。"""
+        import session_mgr as sm
+        wake.code_session_owner = lambda: self.cid   # 探出归属=他（资源语义）
+        ch = sm.LoopHandle(char_id="cass", scene="chat")   # 但泵骑在别人 chat 上
+        ch.meta["game_pump"] = {"seg_id": "s", "start_ts": 1.0}
+        sm._registry[("cass", "chat")] = ch
+        try:
+            state_store.write_schedule({"next_wake_at": int(time.time()) - 5},
+                                       self.cid)
+            await wake.maybe_wake(self.cid)
+            self.assertEqual(self.enq, [])
+        finally:
+            sm._registry.pop(("cass", "chat"), None)
+            wake._code_avoid.pop(self.cid, None)
+
     async def test_sdk_ignores_chat_turn_active(self):
         """撞轮=队列天然串行：chat 轮进行中照样入队（老路才避让）。"""
         wake.chat_turn_begin(self.cid)

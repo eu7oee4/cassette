@@ -49,7 +49,20 @@ SCENE = "chat"
 LEDGER_DIR = state_store.STATE_DIR / "chat_sessions"
 # 浅层错位容忍：请求发出时上一轮回复还没落进 app 历史（连发竞态）/wake 气泡还没
 # 被 app 拉走——账尾多出的**纯 assistant** 条目不算脏。超过这个深度按脏处理。
+# 泵开着时容忍按「未拉走的 outbox 条数」上浮（PR13：点评连发快过 TA 拉取时不误脏）。
 STALE_TOLERANCE = 8
+
+# ---- game 泵（PLAN_sdk 设计稿三：game 不是轮来源，是他自己时间里的一件事）----
+# 泵状态 handle.meta["game_pump"]={seg_id,note,start_ts,deliver}；tick 轮
+# turn_kind="wake"（存在论归他自己的时间），注入「·」谁都没见过、不进账不进铸造。
+# 常量与 game_loop 同一套 env（回退路共用口径）。
+GAME_TICK_PAUSE = float(os.environ.get("GAME_TICK_PAUSE", "2") or "2")
+GAME_TICK_PROMPT = "·"
+GAME_REOPEN_SHOTS_N = int(os.environ.get("GAME_REOPEN_SHOTS", "70") or "70")
+GAME_REOPEN_COOLDOWN = 5 * 60
+GAME_K_SHOTS = int(os.environ.get("GAME_REFORGE_KEEP_SHOTS", "8") or "8")
+GAME_TOKENS_PER_SHOT = 560          # 480x853 官方 patch 公式（§0.1），只喂 ctx_est
+GAME_TURN_EVENT_TIMEOUT = 600       # 泵轮单事件间隔上限（watch 链最慢一步的量级）
 
 # ---- chat 重铸节奏（§4 chat 条，08-30 拍板）----
 # 时机轴只有一条：TA 静默 ≥1h 的轮间隙——对话进行中永不铸（缓存正值钱）；
@@ -62,6 +75,9 @@ CHAT_SOFT_TOKENS = int(os.environ.get("CHAT_SOFT_TOKENS", "100000"))
 CHAT_HARD_TOKENS = int(os.environ.get("CHAT_HARD_TOKENS", "150000"))
 IDLE_CHECK_SEC = 60           # 泵在轮间隙醒来看一眼的周期
 CONSOLIDATE_TIMEOUT = 300
+
+# 泵启动的踢脚哨兵：泵在轮间隙被打开时把 loop 从长等里叫醒（不是轮，直接跳过）
+_KICK = object()
 
 # SDK 聊天路的熄火开关（连败 3 次自动回 -p，见 app._engine_chunks）。放这儿不放
 # app.py：wake_sdk 分路也要认它——聊天路都熄了火，醒来还往 session 里塞就是往
@@ -92,10 +108,12 @@ def norm_history(messages: list[dict]) -> list[dict]:
     return out
 
 
-def divergence(ledger: list[dict], history: list[dict]) -> Optional[str]:
+def divergence(ledger: list[dict], history: list[dict],
+               stale_depth: Optional[int] = None) -> Optional[str]:
     """None=干净（纯追加）；"stale"=账尾多出纯 assistant（窗口没跟上，不脏）；
     "dirty"=编辑/删除/账亡，需要重铸。
     干净判据：history 恰好等于 ledger 的尾部切片（窗口滑动天然满足——账只会比窗长）。
+    stale_depth：容忍深度（默认 STALE_TOLERANCE；泵开着时按未拉走 outbox 条数上浮）。
     """
     led = [(e["r"], e["h"]) for e in ledger]
     hist = [(m["role"], _h(m["text"])) for m in history]
@@ -103,7 +121,8 @@ def divergence(ledger: list[dict], history: list[dict]) -> Optional[str]:
         return "dirty" if hist else None
     if not hist:
         return "dirty"   # 账里有货、窗口全空=app 清了历史，必须重铸
-    for drop in range(0, min(STALE_TOLERANCE, len(led)) + 1):
+    tol = STALE_TOLERANCE if stale_depth is None else stale_depth
+    for drop in range(0, min(tol, len(led)) + 1):
         end = len(led) - drop
         start = end - len(hist)
         if start < 0 or end <= 0:
@@ -163,14 +182,28 @@ def _wake_contract() -> str:
 
 
 def _wake_gate(handle: session_mgr.LoopHandle):
-    """PreToolUse 门：醒来轮的禁用面（§5.2 轮来源标签驱动）。
+    """PreToolUse 门：三种轮来源 × 泵状态 × 挂载的查表（PLAN_sdk 设计稿三）。
     走 hook 不走 can_use_tool——allowed_tools 的整工具条目会在回调之前自动放行
     （SDK 实证：_warn_if_can_use_tool_shadowed），hook 在权限判定之前跑，拦得住。
-    turn_kind 不是 wake（聊天轮/巩固轮）→ 全放行，行为与没挂 hook 一字不差。"""
+
+    - game_* 操作类：放行条件=**泵开着**（锁在手），三种轮一致；泵没开一律拒
+      ——任务引擎互斥由此顺带成立（拿不到锁就开不了泵）。
+    - 醒来禁用面照 PR12：turn_kind=wake 查 wake_tools（tick 轮同 kind 同查表，
+      泵开着时 game_* 由上一条放行=允许集 ∪ game_*）。
+    - 聊天轮/巩固轮 → 其余全放行，行为与没挂 hook 一字不差。"""
     async def gate(hook_input, tool_use_id, ctx) -> dict:
+        tool = (hook_input or {}).get("tool_name") or ""
+        if tool.startswith("mcp__game__"):
+            if handle.meta.get("game_pump"):
+                return {}
+            return {"hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "deny",
+                "permissionDecisionReason": (
+                    "游戏这会儿不在手边——想玩的话先用 game_start 把游戏拿过来。"),
+            }}
         if handle.meta.get("turn_kind") != "wake":
             return {}
-        tool = (hook_input or {}).get("tool_name") or ""
         if tool in (handle.meta.get("wake_tools") or set()):
             return {}
         return {"hookSpecificOutput": {
@@ -181,6 +214,52 @@ def _wake_gate(handle: session_mgr.LoopHandle):
                 "——想用的话留到聊天或上机的时候。"),
         }}
     return gate
+
+
+# 游戏节奏骨架（设计稿三：TICK_SYSTEM 的条件式变体，常驻聊天系统提示——没有
+# 进出场换 client，骨架只能一次性写死；措辞挂「游戏在手边时」条件，平时不沾）。
+# 机制事实在小抄里（game_notes_read），这里只写游戏无关的运行前提。
+GAME_RHYTHM_SYSTEM = """
+
+【游戏在手边时的节奏（game_start 之后才算拿到；平时这些工具不在手边）】
+拿着游戏的时候，你的时间按「短轮」走：每轮做一小步，说完就停——停不是结束，
+画面留在原地，轮会自己续上。你会收到一个「·」：那不是任何人说话，当作你自己
+回过神来、目光落回屏幕。{user}和世界的消息随时可能插进来代替「·」，插进来就先回应人。
+- 常态轮：**double tap 起手**（点位照小抄）→ 看返回截图：完整文字 → 直接点评这句，
+  收轮；画面在动/半截字 → game_watch 等到终态再点评，收轮。
+- 首轮、导航轮（菜单里找路、没有上一轮点评可依赖）：look 起手，看清再动。
+- watch 的终态只有两种：**完整文字** → 点评收轮；**章节目录** → 结算轮——先
+  game_chapter_write 把这一场写成章节志、game_progress_write 更新进度，再决定
+  读下一章还是 game_end 放下游戏。
+- look 到非预期画面（弹窗/异常/不认识的界面）：停手，看清楚再动，拿不准问{user}。
+- 每轮只做自己这一步，说完就停，别在一轮里连读半章——节奏是你的朋友。
+- 读得久了，更早的画面会在记忆里淡去——自然的事；文字和你说过的话一直都在。
+  值得留住的，用笔记本和 hold 留。
+"""
+
+
+def _game_capable(char_id: str) -> bool:
+    """这个角色的聊天 session 挂不挂游戏（schema 并集常驻，taste ④）：
+    STORY_ENGINE=unified 且 game 模式开着且游戏资源归他。挂载开关/泵状态只进门
+    （_wake_gate），不动 schema——中途拨开关不用换 client。"""
+    if config.STORY_ENGINE != "unified" or not config.GAME_MODE_ENABLED:
+        return False
+    try:
+        import plugins
+        return plugins.owner_of("tmux") == char_id
+    except Exception:
+        return False
+
+
+def _shot_sink(handle: session_mgr.LoopHandle):
+    """game 截图 → 事件账本（重铸「近 K 张图回填」的材料）。泵没开不落
+    （不该发生：泵没开 game_* 被门拒），失败不抛不影响轮。"""
+    def sink(jpg: bytes) -> None:
+        pump = handle.meta.get("game_pump") or {}
+        if pump.get("seg_id"):
+            import activity_log
+            activity_log.save_shot(pump["seg_id"], jpg)
+    return sink
 
 
 def build_options(char_id: str, catalog: Optional[list] = None,
@@ -228,6 +307,15 @@ def build_options(char_id: str, catalog: Optional[list] = None,
         import skills
         _merge_mcp_file(servers, str(skills.mcp_config(char_id)))
         tools += skills.SKILLS_MCP_TOOLS
+    if handle is not None and _game_capable(char_id):
+        # game 并入意识流（设计稿三）：进程内 game MCP 常驻 + 节奏骨架进系统提示。
+        # 工具能不能用由 _wake_gate 按泵状态判，schema 恒在（换 client 只在重铸）。
+        import game_loop
+        servers["game"] = game_loop.build_game_server(
+            handle, unified=True, shot_sink=_shot_sink(handle))
+        game_tools = [f"mcp__game__{t}" for t in game_loop.GAME_TOOL_NAMES]
+        tools += game_tools
+        system += GAME_RHYTHM_SYSTEM.replace("{user}", config.user_name())
 
     env = {}
     if tools and pipeline.tool_search_on("chat"):
@@ -327,7 +415,8 @@ async def _turn_events(client, handle: session_mgr.LoopHandle,
             yield _user_dict(msg)
         elif isinstance(msg, ResultMessage):
             _note_usage(handle.char_id, msg,
-                        handle.meta.get("turn_kind") or "chat")
+                        handle.meta.get("turn_kind") or "chat",
+                        bool(handle.meta.get("game_pump")))
             if msg.is_error:
                 flags["error_subtype"] = msg.subtype or "?"
             yield {"type": "result", "result": msg.result,
@@ -336,15 +425,22 @@ async def _turn_events(client, handle: session_mgr.LoopHandle,
             return
 
 
-def _note_usage(char_id: str, msg: ResultMessage, kind: str = "chat") -> None:
+def _usage_scene(kind: str, in_game: bool) -> str:
+    scene = SCENE if kind == "chat" else f"{SCENE}/{kind}"
+    return scene + "/game" if in_game else scene
+
+
+def _note_usage(char_id: str, msg: ResultMessage, kind: str = "chat",
+                in_game: bool = False) -> None:
     """usage 落账（PLAN_sdk §10 S2 设计稿二：手机端 usage 面板的数据源）。
     append-only jsonl 按天分文件；写失败只记日志，绝不影响聊天轮。
-    kind＝轮来源（chat/wake）：面板上「他自己醒来花的」和「陪 TA 聊花的」分得开。"""
+    kind＝轮来源（chat/wake）、in_game＝泵状态（设计稿三：kind 与记账解耦——
+    「他玩游戏花的」按泵标，面板上和陪聊/醒来分得开）。"""
     try:
         d = state_store.STATE_DIR / "usage"
         d.mkdir(exist_ok=True)
         rec = {"ts": int(time.time()), "char": char_id,
-               "scene": SCENE if kind == "chat" else f"{SCENE}/{kind}",
+               "scene": _usage_scene(kind, in_game),
                "subtype": msg.subtype, "usage": msg.usage or {}}
         day = time.strftime("%Y%m%d")
         with open(d / f"usage-{day}.jsonl", "a", encoding="utf-8") as f:
@@ -374,10 +470,12 @@ def _persist_ledger(char_id: str, sid: Optional[str], ledger: list[dict]) -> Non
 # ---------- 活动框（§4 规则二：回流点评带上「你当时在读剧情」的框架）----------
 
 def _frame_activities(history: list[dict], char_id: str) -> list[dict]:
-    """给权威窗口里落在活动区间内的消息连段加两行文档框（user 槽感知式，
-    世界事件走文档侧，红线合法）。**只改铸造输入，不改已铸账**——账永远对
-    权威原文，框行是渲染层的选择（§4：折叠/带不带是渲染规则，字面不动）。
-    确定性：框行内容只由区间数据派生，同输入同字节。"""
+    """活动段的渲染层处理（§4 折叠规则，PR13 补全）：**最近一场**加两行文档框、
+    点评原文逐条保留（那正是当下的对话）；**更早的场**整段折叠成一行框（含 TA
+    中途插话——§8.6 拍板整段折）。**只改铸造输入，不改已铸账**——账永远对
+    权威原文，折叠/带不带是渲染规则，字面不动（权威库/手机气泡永远全在）。
+    确定性：框行内容只由区间数据派生，同输入同字节。进行中的场没有区间行，
+    自然不折（「会话没收摊前的重铸不带框」，PR11 边界照旧）。"""
     if not history:
         return history
     import activity_log
@@ -391,9 +489,10 @@ def _frame_activities(history: list[dict], char_id: str) -> list[dict]:
 
     out: list[dict] = []
     i, n = 0, len(history)
-    for iv in intervals:
+    for k, iv in enumerate(intervals):
         s, e = int(iv["start"]), int(iv["end"])
         note = iv.get("note") or "游戏"
+        latest = (k == len(intervals) - 1)
         while i < n and int(history[i].get("ts") or 0) < s:
             out.append(history[i])
             i += 1
@@ -401,14 +500,30 @@ def _frame_activities(history: list[dict], char_id: str) -> list[dict]:
         while j < n and int(history[j].get("ts") or 0) <= e:
             j += 1
         if j > i:
-            out.append({"role": "user", "ts": s,
-                        "text": f"〔{_hm(s)} 你开了{note}会话，下面这些是你边读边说的〕"})
-            out.extend(history[i:j])
-            out.append({"role": "user", "ts": e,
-                        "text": f"〔{_hm(e)} 这一场到这儿收了摊〕"})
+            if latest:
+                out.append({"role": "user", "ts": s,
+                            "text": f"〔{_hm(s)} 你开了{note}会话，下面这些是你边读边说的〕"})
+                out.extend(history[i:j])
+                out.append({"role": "user", "ts": e,
+                            "text": f"〔{_hm(e)} 这一场到这儿收了摊〕"})
+            else:
+                out.append({"role": "user", "ts": s,
+                            "text": (f"〔{_hm(s)}–{_hm(e)} 你拿着{note}读了一场——"
+                                     "细节在记忆里淡下去了，这一场的脉络和感想"
+                                     "你当时写进了章节志〕")})
             i = j
     out.extend(history[i:])
     return out
+
+
+def _foldable_max_end(char_id: str, since_ts: int) -> int:
+    """窗口相关区间里「非最近一场」的最大结束时刻——压力轴「有可折活动段」的
+    判据素材（和 _frame_activities 的折叠范围同一口径）。"""
+    import activity_log
+    ivs = activity_log.read_intervals(char_id, since_ts=since_ts)
+    if len(ivs) < 2:
+        return 0
+    return max(int(iv.get("end", 0)) for iv in ivs[:-1])
 
 
 # ---------- 见闻（记忆 vs 见闻轴的见闻侧，§5.2）----------
@@ -442,6 +557,68 @@ def _seen_block(char_id: str, since_ts: int) -> tuple[Optional[str], int]:
     return head + "\n" + body, cursor
 
 
+def _acts_block(char_id: str) -> Optional[str]:
+    """开局包的「行为清单」半边（§5.4①，PR10 欠账④补上）：近几天碰过外部世界
+    的行为从行为账**机械读**——「发了信然后说没发过」这类失约只有机械推送能防，
+    不走检索排序（pull 救不了「不知道自己该记得」）。"""
+    import activity_log
+    import pipeline
+    acts = [a for a in activity_log.recent_acts(
+                char_id, since_ts=int(time.time()) - 3 * 86400, limit=10)
+            if a.get("ok", True)]
+    if not acts:
+        return None
+    body = "\n".join(f"[{pipeline.fmt_ts(a['ts'])}] {a.get('text') or a.get('tool')}"
+                     for a in acts)
+    return "【最近几天你亲手做过的事——记录，不是印象】\n" + body
+
+
+def _stale_depth(handle: session_mgr.LoopHandle) -> Optional[int]:
+    """泵开着时的容忍深度：按该角色未拉走的 outbox 条数上浮（+2 兜在飞的），
+    替代拍数字——点评连发快过 TA 拉取时不误脏。泵没开走默认。"""
+    if not handle.meta.get("game_pump"):
+        return None
+    try:
+        n = sum(1 for it in state_store.read_outbox()
+                if it.get("char_id") == handle.char_id and not it.get("delivered"))
+    except Exception:
+        return None
+    return max(STALE_TOLERANCE, n + 2)
+
+
+def _fold_pending(handle: session_mgr.LoopHandle) -> bool:
+    """压力轴「有可折活动段」（§4）：窗里还有上次渲染之后新出现的可折段。"""
+    led = handle.meta.get("ledger") or []
+    first_ts = next((int(e.get("ts") or 0) for e in led if e.get("ts")), 0)
+    if not first_ts:
+        return False
+    return (_foldable_max_end(handle.char_id, first_ts - 60)
+            > int(handle.meta.get("folded_upto", 0) or 0))
+
+
+def _game_shot_tail(seg_id: str) -> Optional[list[dict]]:
+    """近 K 张图回填（§4；图块腿 2026-08-30 真机验通）：从事件账本引用读字节，
+    铸 user 槽 image 块（感知框行包着，见闻侧红线合规）。这是铸造输入的渲染
+    尾巴（render_tail 语义）——不进账。"""
+    import base64
+    from pathlib import Path
+    import activity_log
+    refs = activity_log.recent_shot_refs(seg_id, GAME_K_SHOTS)
+    images = []
+    for r in refs:
+        try:
+            images.append({"media_type": "image/jpeg",
+                           "data": base64.b64encode(Path(r).read_bytes()).decode()})
+        except Exception:
+            continue
+    if not images:
+        return None
+    return [{"role": "user", "ts": int(time.time()),
+             "text": ("〔眼前的画面——最近这几帧还清楚，更早的在记忆里淡下去了；"
+                      "文字和你说过的话都在，接着读就好〕"),
+             "images": images}]
+
+
 # ---------- 泵 ----------
 
 async def _safe_disconnect(client) -> None:
@@ -469,14 +646,18 @@ async def run(handle: session_mgr.LoopHandle, *,
     ledger: list[dict] = []
     handle.meta["ledger"] = ledger    # 测试/观测窗口
 
-    async def _open_session(history: list[dict], catalog):
+    async def _open_session(history: list[dict], catalog, render_tail=None):
+        """render_tail（PR13）：只进铸造输入、不进账的渲染尾巴（近 K 张图回填）。
+        账永远对权威原文；ctx_est 按**折叠后**的铸造输入计（§4 窗口预算口径）。"""
         nonlocal client, sid, ledger
         await _safe_disconnect(client)
         client = None
         options = opts_factory(handle.char_id, catalog)
-        if history:
-            sid = forge.render(_frame_activities(history, handle.char_id),
-                               cwd=str(options.cwd),
+        rendered = _frame_activities(history, handle.char_id) if history else []
+        if render_tail and rendered:
+            rendered = rendered + list(render_tail)
+        if rendered:
+            sid = forge.render(rendered, cwd=str(options.cwd),
                                model=config.MODEL)
             options = copy.copy(options)
             options.resume = sid
@@ -487,9 +668,14 @@ async def run(handle: session_mgr.LoopHandle, *,
         ledger = [{"r": m["role"], "h": _h(m["text"]), "ts": m.get("ts")}
                   for m in history]
         handle.meta["ledger"] = ledger
-        handle.meta["ctx_est"] = sum(estimate_tokens(m["text"]) for m in history)
+        n_imgs = sum(len(m.get("images") or []) for m in rendered)
+        handle.meta["ctx_est"] = (sum(estimate_tokens(m["text"]) for m in rendered)
+                                  + n_imgs * GAME_TOKENS_PER_SHOT)
+        first_ts = next((int(m.get("ts") or 0) for m in history), 0)
+        handle.meta["folded_upto"] = (_foldable_max_end(handle.char_id, first_ts - 60)
+                                      if first_ts else 0)
         handle.meta["seen_cursor"] = 0        # 开局重发新鲜见闻快照
-        handle.meta["needs_opening"] = True   # 下一轮带开局引子（breath）
+        handle.meta["needs_opening"] = True   # 下一轮带开局引子（breath+行为清单）
         handle.last_reopen = time.time()
         client = c
 
@@ -521,19 +707,224 @@ async def run(handle: session_mgr.LoopHandle, *,
         finally:
             handle.reopening = False
 
-    try:
+    # ---------- game 泵（PLAN_sdk 设计稿三；机器口径对齐 game_loop，回退路共用）----------
+
+    def _pump_deliver_and_log(text: str, stop: bool) -> None:
+        """泵轮正文投递+入账：scrub（缝隙学舌刷子）→ deliver（app 闭包：fence→
+        outbox+窗口，回传真正落进历史的正文）→ 账追加 assistant + 事件账 comment。
+        账记的是投递出去的那份（发送前比对要逐字对上 app 历史）。"""
+        import game_loop
+        pump = handle.meta.get("game_pump") or {}
+        text = game_loop.scrub_seam(text)
+        if not text:
+            return   # 刷干净后空了=整段都是缝隙学舌，谁也不该看见
+        body = None
+        try:
+            deliver = pump.get("deliver")
+            body = deliver(text, stop) if deliver else None
+        except Exception as e:
+            print(f"[chat_loop] game 投递失败: {e}", file=sys.stderr)
+        body = body or text
+        ledger.append({"r": "assistant", "h": _h(body), "ts": int(time.time())})
+        _persist_ledger(handle.char_id, sid, ledger)
+        if pump.get("seg_id"):
+            import activity_log
+            activity_log.append_event(pump["seg_id"], "comment", text=body)
+        handle.meta["ctx_est"] = (int(handle.meta.get("ctx_est", 0))
+                                  + estimate_tokens(body))
+
+    async def _pump_drain() -> bool:
+        """吃完一个泵轮（口径同 game_loop._drain_turn：分段投递、错误结果留痕
+        不算死）。False=超时/流断——调用方按 chat_loop 保守纪律关 session。"""
+        pending: Optional[str] = None
+        agen = client.receive_messages().__aiter__()
         while True:
             try:
-                turn: Turn = await asyncio.wait_for(handle.queue.get(),
-                                                    timeout=IDLE_CHECK_SEC)
+                msg = await asyncio.wait_for(agen.__anext__(),
+                                             timeout=GAME_TURN_EVENT_TIMEOUT)
             except asyncio.TimeoutError:
-                # 轮间隙看一眼：静默 ≥1h × 窗口超软阈 → 巩固+重铸（§4 chat 节奏；
-                # 铸完 ctx_est 回到纯对话体量，自然不会连环触发）
+                print("[chat_loop] 泵轮事件超时（session 按死处理）", file=sys.stderr)
+                return False
+            except StopAsyncIteration:
+                print("[chat_loop] 泵轮消息流断了（session 按死处理）", file=sys.stderr)
+                return False
+            if isinstance(msg, AssistantMessage):
+                handle.touch()
+                for block in msg.content:
+                    if isinstance(block, TextBlock) and block.text.strip():
+                        if pending is not None:
+                            _pump_deliver_and_log(pending, False)
+                        pending = block.text.strip()
+                    elif isinstance(block, ToolUseBlock):
+                        if pending is not None:
+                            _pump_deliver_and_log(pending, False)
+                        pending = None
+            elif isinstance(msg, ResultMessage):
+                if pending is not None:
+                    _pump_deliver_and_log(pending, True)
+                _note_usage(handle.char_id, msg, "wake", True)
+                if getattr(msg, "is_error", False):
+                    print(f"[chat_loop] 泵轮收在错误上：subtype="
+                          f"{getattr(msg, 'subtype', '?')}（继续，没算死）",
+                          file=sys.stderr)
+                return True
+
+    async def _pump_close(why: str) -> None:
+        """放下游戏（关泵排序，设计稿三⑤）：关账 → 释放锁 → 清泵 → 冲补醒。
+        聊天 session 什么都不动。没泵=no-op（finally 兜底调也安全）。"""
+        pump = handle.meta.get("game_pump")
+        handle.meta.pop("end_requested", None)
+        if not pump:
+            return
+        try:
+            import activity_log
+            activity_log.close_segment(pump["seg_id"], note=pump.get("note", ""))
+        except Exception as e:
+            print(f"[chat_loop] 关账失败: {e}", file=sys.stderr)
+        try:
+            import game_bridge
+            game_bridge.release_lock("story")
+        except Exception as e:
+            print(f"[chat_loop] 释放模拟器锁失败: {e}", file=sys.stderr)
+        handle.meta.pop("game_pump", None)
+        print(f"[chat_loop] 放下游戏（char={handle.char_id}，{why}）", file=sys.stderr)
+        try:
+            import cohabit_queue
+            cohabit_queue.code_session_closed()
+        except Exception as e:
+            print(f"[chat_loop] 冲补醒失败: {e}", file=sys.stderr)
+        if why.startswith("engine-error"):
+            try:
+                from notify import bark_push
+                bark_push("游戏那边引擎连着挂，替他把游戏放下了"
+                          "（画面原地不动，可以重新 game_start）")
+            except Exception:
+                pass
+
+    async def _pump_tick() -> None:
+        """队列空到点补的一口「·」。tick 不是第四种轮：turn_kind=wake（他自己的
+        时间），注入谁都没见过、不进账不进铸造材料。session 死了先从镜像重起
+        （引擎打嗝 → 下一 tick 接着读）；连挂三轮=引擎有病，放下游戏。"""
+        nonlocal client, ledger
+        pump = handle.meta.get("game_pump")
+        if pump is None:
+            return
+        if client is None:
+            hist = norm_history(state_store.read_recent_window(handle.char_id))
+            cat = (handle.meta.get("catalog")
+                   or state_store.read_sticker_catalog())
+            try:
+                await _open_session(hist, cat)
+            except Exception as e:
+                print(f"[chat_loop] 泵重起 session 失败: {e}", file=sys.stderr)
+                await _pump_close(f"engine-error: 泵重起失败 {e}")
+                return
+        handle.meta["turn_kind"] = "wake"
+        import pipeline
+        handle.meta["wake_tools"] = set(
+            pipeline.mounted_tool_names("wake", handle.char_id))
+        s0 = int(handle.meta.get("shots", 0))
+        ok = False
+        try:
+            await client.query(GAME_TICK_PROMPT)
+            ok = await _pump_drain()
+        except asyncio.CancelledError:
+            raise                       # 取消来源纪律：外层统一判（08-30 复盘）
+        except Exception as e:
+            print(f"[chat_loop] 泵轮异常（按死处理）: {e}", file=sys.stderr)
+        finally:
+            handle.meta.pop("turn_kind", None)
+            d = int(handle.meta.get("shots", 0)) - s0
+            if d > 0:
+                handle.meta["ctx_est"] = (int(handle.meta.get("ctx_est", 0))
+                                          + d * GAME_TOKENS_PER_SHOT)
+        if ok:
+            pump["strikes"] = 0
+        else:
+            await _safe_disconnect(client)
+            client = None
+            ledger = []
+            handle.meta["ledger"] = ledger
+            pump["strikes"] = int(pump.get("strikes", 0)) + 1
+            if pump["strikes"] >= 3:
+                await _pump_close("engine-error: 泵轮连挂三次")
+
+    async def _game_reforge() -> None:
+        """N 张段内重铸（§4 节奏；唯一保留的边界）：巩固轮（感知白描，无感）→
+        从镜像重铸 + 近 K 张图回填 → resume。铸完还是 chat options（无 flavor）。
+        ping＝下一 tick（FIRST_REQUEST_OK：接不上 → _pump_tick 按死处理自愈）。"""
+        nonlocal client, ledger
+        import game_loop
+        pump = handle.meta.get("game_pump")
+        if not pump or client is None:
+            return
+        shots = int(handle.meta.get("shots", 0))
+        handle.reopening = True
+        handle.meta["turn_kind"] = "wake"
+        import pipeline
+        handle.meta["wake_tools"] = set(
+            pipeline.mounted_tool_names("wake", handle.char_id))
+        try:
+            await client.query(game_loop.REOPEN_NOTE_PROMPT)
+            if not await _pump_drain():
+                raise RuntimeError("巩固轮没收尾")
+            history = norm_history(state_store.read_recent_window(handle.char_id))
+            if not history:
+                print("[chat_loop] 镜像空白，game 重铸放弃", file=sys.stderr)
+                return
+            tail = _game_shot_tail(pump["seg_id"])
+            cat = (handle.meta.get("catalog")
+                   or state_store.read_sticker_catalog())
+            try:
+                await _open_session(history, cat, render_tail=tail)
+            except Exception as e:
+                print(f"[chat_loop] game 重铸首试失败，重试一次: {e}", file=sys.stderr)
+                await _open_session(history, cat, render_tail=tail)
+            handle.meta["shots"] = 0
+            print(f"[chat_loop] game 段内重铸完成（char={handle.char_id}，"
+                  f"{shots} 张边界）", file=sys.stderr)
+        finally:
+            handle.meta.pop("turn_kind", None)
+            handle.reopening = False
+
+    try:
+        while True:
+            # ---- 泵边界（轮与轮之间）：放下游戏 / N 张段内重铸 ----
+            if handle.meta.get("game_pump"):
+                if handle.meta.get("end_requested"):
+                    await _pump_close("game_end")
+                elif (client is not None
+                      and int(handle.meta.get("shots", 0)) >= GAME_REOPEN_SHOTS_N
+                      and time.time() - handle.last_reopen > GAME_REOPEN_COOLDOWN):
+                    try:
+                        await _game_reforge()
+                    except Exception as e:
+                        print(f"[chat_loop] game 重铸失败，session 关掉惰性重起: {e}",
+                              file=sys.stderr)
+                        await _safe_disconnect(client)
+                        client = None
+                        ledger = []
+                        handle.meta["ledger"] = ledger
+                        handle.meta["shots"] = 0   # 镜像重开无图，别下轮又撞边界
+            pump_on = bool(handle.meta.get("game_pump"))
+            try:
+                turn: Turn = await asyncio.wait_for(
+                    handle.queue.get(),
+                    timeout=GAME_TICK_PAUSE if pump_on else IDLE_CHECK_SEC)
+                if turn is _KICK:
+                    continue   # 泵刚开的踢脚：回到 loop 顶重读泵状态
+            except asyncio.TimeoutError:
+                if pump_on:
+                    await _pump_tick()   # 队列空一拍 → 目光落回屏幕
+                    continue
+                # 轮间隙看一眼：静默 ≥1h ×（窗口超软阈 ∨ 有可折活动段）→ 巩固+重铸
+                # （§4 chat 节奏；铸完 ctx_est 回到纯对话体量，自然不会连环触发）
                 if (client is not None
                         and time.time() - handle.last_activity >= CHAT_REFORGE_IDLE_SEC
-                        and int(handle.meta.get("ctx_est", 0)) > CHAT_SOFT_TOKENS):
+                        and (int(handle.meta.get("ctx_est", 0)) > CHAT_SOFT_TOKENS
+                             or _fold_pending(handle))):
                     try:
-                        await _consolidate_and_reforge("静默间隙+软阈",
+                        await _consolidate_and_reforge("静默间隙+压力",
                                                        handle.meta.get("catalog"))
                     except Exception as e:
                         print(f"[chat_loop] 轮间隙重铸失败，session 关掉惰性重起: {e}",
@@ -564,7 +955,9 @@ async def run(handle: session_mgr.LoopHandle, *,
                     handle.meta["wake_tools"] = set(
                         pipeline.mounted_tool_names("wake", handle.char_id))
                 else:
-                    verdict = divergence(ledger, turn.history) if client else "dirty"
+                    verdict = (divergence(ledger, turn.history,
+                                          stale_depth=_stale_depth(handle))
+                               if client else "dirty")
                     if verdict == "dirty":
                         if client:
                             print(f"[chat_loop] 判脏（char={handle.char_id}），重铸",
@@ -577,8 +970,12 @@ async def run(handle: session_mgr.LoopHandle, *,
                     turn.injection = turn.injection_factory()
                 # ---- 注入这一轮（开局引子 + 见闻增量 + 包装文本；都不进账）----
                 parts: list[str] = []
-                if handle.meta.pop("needs_opening", False) and _ombre_on(handle.char_id):
-                    parts.append(OPENING_NUDGE)
+                if handle.meta.pop("needs_opening", False):
+                    if _ombre_on(handle.char_id):
+                        parts.append(OPENING_NUDGE)
+                    ab = _acts_block(handle.char_id)   # 行为清单：机械注入不走检索
+                    if ab:
+                        parts.append(ab)
                 seen, cur = _seen_block(handle.char_id,
                                         int(handle.meta.get("seen_cursor", 0)))
                 if seen:
@@ -640,7 +1037,9 @@ async def run(handle: session_mgr.LoopHandle, *,
                                               + estimate_tokens(injection)
                                               + estimate_tokens(captured["reply"]))
                     ok = True
-                if ok and int(handle.meta.get("ctx_est", 0)) > CHAT_HARD_TOKENS:
+                if (ok and not handle.meta.get("game_pump")
+                        and int(handle.meta.get("ctx_est", 0)) > CHAT_HARD_TOKENS):
+                    # （泵开着时不走 chat 硬阈——段内重铸只认 N 张，设计稿三）
                     # 硬阈强铸：马拉松对话没等到静默间隙——就在这个轮尾铸，
                     # 绝不留给 harness auto-compact（§4：那是摘要压缩，信感复发）
                     try:
@@ -696,10 +1095,41 @@ async def run(handle: session_mgr.LoopHandle, *,
         why = handle.stop_reason or "unknown-exit"
         print(f"[chat_loop] loop 退出：char={handle.char_id} reason={why}",
               file=sys.stderr)
+        try:
+            await _pump_close(f"loop-exit: {why}")   # 拿着游戏时 loop 死了：锁/账别悬着
+        except Exception as e:
+            print(f"[chat_loop] 退出时放下游戏失败: {e}", file=sys.stderr)
         await _safe_disconnect(client)
 
 
 # ---------- 路由入口 ----------
+
+def start_game_pump(char_id: str, *, note: str,
+                    deliver: Callable[[str, bool], Optional[str]]) -> dict:
+    """拿到游戏（PLAN_sdk 设计稿三）：game_start=拿锁+开段账+置泵，没有重铸、
+    没有换 client、没有开场注入。模拟器锁由路由先拿（拿不到原话在轮内返回）；
+    这里只开段账+置泵。泵从下个轮尾开始供弹（他当前这轮说完，2 秒后目光落回
+    屏幕）。deliver＝app 的投递闭包（fence→outbox+窗口，回传落进历史的正文）。
+    线程安全：meta 写入只在轮间被泵读取。"""
+    handle = session_mgr.get(char_id, SCENE)
+    if handle is None:
+        return {"ok": False, "error":
+                "这个角色的常驻聊天没在跑（sdk 灰度没到位？），游戏递不过去"}
+    if handle.meta.get("game_pump"):
+        return {"ok": False, "error": "游戏已经在手边了"}
+    import activity_log
+    seg = activity_log.open_segment(char_id, "game")
+    handle.meta["shots"] = 0
+    handle.meta.pop("end_requested", None)
+    handle.meta["game_pump"] = {"seg_id": seg, "note": note,
+                                "start_ts": time.time(), "deliver": deliver,
+                                "strikes": 0}
+    try:
+        handle.put_threadsafe(_KICK)   # 泵在轮间隙拿到时别等满空转周期才开弹
+    except Exception:
+        pass                           # 踢不动就等下个自然边界，不算错
+    return {"ok": True, "seg_id": seg}
+
 
 def _ensure_loop(char_id: str) -> session_mgr.LoopHandle:
     h = session_mgr.get(char_id, SCENE)

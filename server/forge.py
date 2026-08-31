@@ -115,13 +115,17 @@ def render(messages: list[dict], *, cwd, session_id: Optional[str] = None,
            projects_root: Optional[Path] = None) -> str:
     """把权威消息列表铸成 transcript，返回 session_id（resume 用它接上）。
 
-    messages：[{"role": "user"|"assistant", "text": str, "ts": 秒级时间戳}]，
+    messages：[{"role": "user"|"assistant", "text": str, "ts": 秒级时间戳,
+    "images": [{"media_type": str, "data": b64 str}, ...]（可选，只许 user 槽）}]，
     顺序即历史。ts 允许缺省（沿用上一条的），但第一条必须有——时间是权威源里的
-    事实，不在这里发明。写盘原子（临时文件 + rename），文件 600 / 目录 700。
+    事实，不在这里发明。images（PR13 图块腿 2026-08-30 真机验通：CLI/agent-sdk
+    两条路 resume 都真到模型眼前）：字节参与 session digest（确定性），数据由
+    调用方从账本引用读出——render 仍是纯函数，不读盘。
+    写盘原子（临时文件 + rename），文件 600 / 目录 700。
     """
     if not messages:
         raise ValueError("空消息列表没有可铸的历史")
-    norm: list[tuple[str, str, float]] = []
+    norm: list[tuple[str, str, float, tuple]] = []
     ts: Optional[float] = None
     for i, m in enumerate(messages):
         role, text = m.get("role"), m.get("text")
@@ -133,7 +137,16 @@ def render(messages: list[dict], *, cwd, session_id: Optional[str] = None,
         ts = m.get("ts", ts)
         if ts is None:
             raise ValueError("第一条消息必须带 ts（时间是权威源的事实，不在这里发明）")
-        norm.append((role, text, float(ts)))
+        images = []
+        for j, img in enumerate(m.get("images") or []):
+            if role != "user":
+                raise ValueError(f"第 {i} 条：image 块只许铸 user 槽（他产的是文字，"
+                                 "图是他看到的——见闻侧，PLAN_sdk §4）")
+            mt, data = img.get("media_type"), img.get("data")
+            if not mt or not isinstance(data, str) or not data.strip():
+                raise ValueError(f"第 {i} 条第 {j} 张图缺 media_type/data")
+            images.append((str(mt), data))
+        norm.append((role, text, float(ts), tuple(images)))
 
     # 连续同角色合并成一轮（08-30 game 实锤的污染根修）：铸出来的历史必须长得像
     # 引擎自己会写的历史——严格 user/assistant 交替。游戏点评那种一口气几十条
@@ -141,31 +154,48 @@ def render(messages: list[dict], *, cwd, session_id: Optional[str] = None,
     # token 余量标记+截断提示），模型看满屏这种缝就学舌，把「user·system<total_
     # tokens>…」缀在自己每段话结尾，投递→再铸→自我放大。合并=逐字拼接（\n\n），
     # 字面不动，红线合规（口径同 sse 把一轮多段拼成 full_reply）。
-    merged: list[tuple[str, str, float]] = []
-    for role, text, t in norm:
+    merged: list[tuple[str, str, float, tuple]] = []
+    for role, text, t, imgs in norm:
         if merged and merged[-1][0] == role:
-            prev_role, prev_text, prev_t = merged[-1]
-            merged[-1] = (prev_role, prev_text + "\n\n" + text, prev_t)
+            prev_role, prev_text, prev_t, prev_imgs = merged[-1]
+            merged[-1] = (prev_role, prev_text + "\n\n" + text, prev_t,
+                          prev_imgs + imgs)
         else:
-            merged.append((role, text, t))
+            merged.append((role, text, t, imgs))
     norm = merged
+
+    # 校验矩阵（PLAN_sdk 设计稿三 / §2.4 Forge Reload 入账，出现即失败）：
+    # 首事件尽量 user——铸出的历史必须长得像引擎自己会写的（首位 assistant 时
+    # CLI 会在顶上垫合成 user 槽，同「缝隙学舌」一类）。有 user 可去头就去
+    # （渲染规则只决定「带不带」，字面不动）；全程没有 user（罕见：纯醒来独白
+    # 窗口）保持原样，顶垫一枚认了，scrub_seam 在投递侧兜学舌。
+    if any(r == "user" for r, _, _, _ in norm):
+        while norm and norm[0][0] != "user":
+            norm.pop(0)
 
     if session_id is None:
         digest = hashlib.sha256(
-            json.dumps([slug(cwd)] + [[r, t, s] for r, t, s in norm],
+            json.dumps([slug(cwd)] + [[r, t, s,
+                                       [hashlib.sha256(d.encode()).hexdigest()
+                                        for _, d in imgs]]
+                                      for r, t, s, imgs in norm],
                        ensure_ascii=False).encode()).hexdigest()
         session_id = _det_uuid("session", digest)
 
     lines = []
     parent: Optional[str] = None
-    for i, (role, text, t) in enumerate(norm):
+    for i, (role, text, t, imgs) in enumerate(norm):
         uid = _det_uuid(session_id, "evt", i)
         if role == "user":
+            content = [{"type": "text", "text": text}]
+            content += [{"type": "image",
+                         "source": {"type": "base64", "media_type": mt, "data": d}}
+                        for mt, d in imgs]
             ev = {
                 "parentUuid": parent, "isSidechain": False,
                 "promptId": _det_uuid(session_id, "prompt", i),
                 "type": "user",
-                "message": {"role": "user", "content": [{"type": "text", "text": text}]},
+                "message": {"role": "user", "content": content},
                 "uuid": uid, "timestamp": _iso(t),
                 "permissionMode": "default", "promptSource": "sdk",
                 "userType": "external", "entrypoint": "sdk-cli",
@@ -194,6 +224,7 @@ def render(messages: list[dict], *, cwd, session_id: Optional[str] = None,
                 "version": TRANSCRIPT_VERSION, "gitBranch": git_branch,
             }
         parent = uid
+        _assert_native_block_types(ev)
         lines.append(json.dumps(ev, ensure_ascii=False, separators=(",", ":")))
 
     pdir = project_dir(cwd, projects_root)
@@ -205,6 +236,19 @@ def render(messages: list[dict], *, cwd, session_id: Optional[str] = None,
     os.chmod(tmp, 0o600)
     os.replace(tmp, path)   # 覆盖写：权威盖掉磁盘上的一切（§2.5 自愈语义）
     return session_id
+
+
+def _assert_native_block_types(ev: dict) -> None:
+    """校验矩阵（PLAN_sdk 设计稿三，出现即失败）：content 只许 text/image——
+    **永不铸 thinking**（signed thinking 伪造不了=首次请求 400，§2.4 Forge
+    Reload 入账）、**不铸 tool_use/tool_result**（孤儿 tool 块同 400；Tool
+    Primer 是真机撞见工具变形时的后手，不是现在的路）。这条断言防的是未来
+    有人改 render 忘了这页历史。"""
+    for b in ev["message"]["content"]:
+        t = b.get("type")
+        if t not in ("text", "image"):
+            raise AssertionError(
+                f"forge 铸出了禁块类型 {t!r}——校验矩阵：只许 text/image")
 
 
 # ---------- 运维自检（PLAN_sdk S0/PR3：§2.5 三条纪律的机器化） ----------

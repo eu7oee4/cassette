@@ -179,6 +179,29 @@ def _forge_ops_probe() -> None:
         logerr(f"forge 运维自检跑不动: {e}")
 
 
+def _activity_sweep() -> None:
+    """PR13 启动清扫：上次退得不干净的活动段（重启时正拿着游戏）→ 补收区间账+
+    释放模拟器锁+冲补醒；泵不自动复活（进度在笔记本，重新 game_start 接上）。
+    然后清事件账 30 天保留窗（区间账/章节志永存不归这儿）。"""
+    import activity_log
+    try:
+        opens = activity_log.open_segments()
+        for seg_id, m in opens.items():
+            logerr(f"启动清扫：补收活动段 {seg_id}")
+            activity_log.close_segment(
+                seg_id, note="《如鸢》剧情" if m.get("scene") == "game"
+                else m.get("scene", ""))
+            if m.get("scene") == "game":
+                game_bridge.release_lock("story")
+        if opens:
+            cohabit_queue.code_session_closed()
+        n = activity_log.cleanup()
+        if n:
+            logerr(f"活动账本清理：{n} 场超保留窗")
+    except Exception as e:
+        logerr(f"活动账本启动清扫失败: {e}")
+
+
 @asynccontextmanager
 async def _lifespan(_app: FastAPI):
     """启动 wake 调度器（on_event 已被 FastAPI 弃用，用 lifespan）。"""
@@ -204,6 +227,7 @@ async def _lifespan(_app: FastAPI):
                      name="browser-keeper-watchdog").start()
     threading.Thread(target=_mail_watcher, daemon=True, name="mail-watcher").start()
     threading.Thread(target=_forge_ops_probe, daemon=True, name="forge-ops-probe").start()
+    threading.Thread(target=_activity_sweep, daemon=True, name="activity-sweep").start()
     yield
     for t in tasks:
         t.cancel()
@@ -1542,6 +1566,10 @@ def code_stop(x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
     _require_code()
     h = code_bridge.sdk_loop_handle()
     if h is not None:
+        if getattr(h, "is_pump", False):
+            # PR13 泵：置旗轮尾收口（关账→释放锁→清泵→补醒），聊天 loop 不动
+            h.request_stop("manual")
+            return {"ok": True, "pump": True}
         # SDK loop：cancel 之后锁/补醒由 _game_loop_closed 兜（任何退出路径共用）
         session_mgr.stop(h.char_id, h.scene, "manual")
         return {"ok": True}
@@ -2228,9 +2256,16 @@ def game_story_start(inp: GameStoryStartIn,
     tmux=旧路回退。app 侧 game-story 三件套两条路通用，一行不改。"""
     verify_auth(x_auth)
     _require_game()
-    if config.STORY_ENGINE != "tmux":
-        return _game_story_start_sdk(inp)
-    return _game_story_start_tmux(inp)
+    if config.STORY_ENGINE == "tmux":
+        return _game_story_start_tmux(inp)
+    if config.STORY_ENGINE == "unified":
+        # PR13：game 并入意识流。只对 sdk 聊天灰度且没熄火的角色成立；
+        # 其余自动退独立 loop（回退姿态，打日志）。
+        cid = plugins.owner_of("tmux")
+        if config.chat_engine(cid) == "sdk" and cid not in chat_loop.SDK_CHAT_OFF:
+            return _game_story_start_unified(cid)
+        logerr(f"unified 灰度不覆盖 {cid}（chat_engine != sdk 或已熄火），退独立 loop")
+    return _game_story_start_sdk(inp)
 
 
 def _game_story_start_tmux(inp: GameStoryStartIn):
@@ -2302,17 +2337,19 @@ def _deliver_game_segment(cid: str):
     cid 钉在闭包里不现读全局（串台六条）。
     轮尾不推 Bark（taste 轮）：game_tick 下轮尾每分钟都在发生，挂 stop 推送=每分钟
     一条骚扰；「他停着等你」的产品点已随 tick 拍板退役，TA 从气泡里看得到他在说。"""
-    def deliver(text: str, stop: bool) -> None:
+    def deliver(text: str, stop: bool):
         try:
             body = _fence_code_if_needed((text or "").strip())
             if not body:
-                return
+                return None
             state_store.outbox_append({"id": uuid.uuid4().hex[:12], "ts": int(time.time()),
                                        "text": body, "sticker_ids": [], "delivered": False,
                                        "char_id": cid, "origin": "game"})
             _code_window_append("assistant", body, char_id=cid)
+            return body   # PR13 泵路要拿真正落进历史的正文入账（发送前比对逐字对上）
         except Exception as e:
             logerr(f"game loop 回传失败: {e}")
+            return None
     return deliver
 
 
@@ -2329,6 +2366,26 @@ def _game_loop_closed(handle) -> None:
         logerr(f"game loop 收摊补醒失败: {e}")
     if (handle.stop_reason or "").startswith("engine-error"):
         bark_push("游戏会话引擎挂了，已收摊（游戏画面原地不动，可以重新 game_start）")
+
+
+def _game_story_start_unified(cid: str):
+    """PR13 泵路径：game_start=拿锁+开段账+置泵——没有新会话、没有重铸、没有
+    开场注入（他正在对话里，「游戏到手边」就是工具能用了这件事本身）。
+    翻笔记本的提示走工具返回值（in-band，自然的形状）。"""
+    if code_bridge.session_alive():
+        return {"ok": False, "error": "已经有一个会话开着（code 或游戏），先收摊再拿"}
+    holder = game_bridge.acquire_lock("story")
+    if holder:
+        return {"ok": False, "error": "任务引擎正在用模拟器跑日常，等它跑完再玩（task_status 可看进度）"}
+    r = chat_loop.start_game_pump(cid, note="《如鸢》剧情",
+                                  deliver=_deliver_game_segment(cid))
+    if not r.get("ok"):
+        game_bridge.release_lock("story")
+        return r
+    game_loop.ensure_default_tips()   # 小抄空白才播种（出厂机制事实，机主可改）
+    logerr(f"拿到游戏(unified)：char={cid} seg={r.get('seg_id')}")
+    return {"ok": True, "session": "unified",
+            "hint": "游戏在手边了。先 game_notes_read 翻翻剧情本看看上次到哪了。"}
 
 
 def _game_story_start_sdk(inp: GameStoryStartIn):
@@ -2391,16 +2448,9 @@ def _game_story_start_sdk(inp: GameStoryStartIn):
     if isinstance(r, dict):
         game_bridge.release_lock("story")
         return r
-    logerr(f"切游戏剧情会话(SDK)：{task[:80] if task else '(自己安排)'}")
-    if task:
-        echo = f"〔去玩游戏了，说好的是〕\n\n{task}"
-        try:
-            state_store.outbox_append({"id": uuid.uuid4().hex[:12], "ts": int(time.time()),
-                                       "text": echo, "sticker_ids": [], "delivered": False,
-                                       "char_id": cid, "origin": "game"})
-            _code_window_append("assistant", echo, char_id=cid)
-        except Exception as e:
-            logerr(f"game task 回显失败: {e}")
+    # task 转述已整个删除（08-30 首晚五连修）：这里原有的回显块引用了未定义的
+    # task 变量——潜伏 NameError（未重启没炸过），PR13 施工时顺手摘除。
+    logerr("切游戏剧情会话(SDK)")
     return {"ok": True, "session": "sdk", "cwd": code_bridge.GAME_CWD}
 
 
