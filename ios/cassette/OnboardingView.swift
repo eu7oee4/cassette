@@ -5,6 +5,9 @@ import PhotosUI
 struct OnboardingView: View {
     @ObservedObject var store: ProactiveSettingsStore
     @ObservedObject var profile: ProfileStore
+    /// 这次引导在给**谁**起名选头像。首启时就是默认角色，但还是显式传——
+    /// setAvatar 过一次 loadTransferable 才落地，落地时再问「现在是谁」正是那个坑。
+    let charID: String
     let onDone: () -> Void
 
     @State private var agentDraft = ""
@@ -60,7 +63,7 @@ struct OnboardingView: View {
         PhotosPicker(selection: selection, matching: .images) {
             VStack(spacing: 8) {
                 Group {
-                    if let img = profile.avatar(for: sender) {
+                    if let img = profile.avatar(for: sender, char: charID) {
                         Image(uiImage: img).resizable().scaledToFill()
                     } else {
                         Color(.systemGray5)
@@ -83,10 +86,11 @@ struct OnboardingView: View {
 
     private func loadAvatar(_ item: PhotosPickerItem?, for sender: MessageSender) {
         guard let item else { return }
+        let char = charID          // 发起那一刻钉死，别等 await 落地再问「现在是谁」
         Task {
             if let data = try? await item.loadTransferable(type: Data.self),
                let img = UIImage(data: data) {
-                profile.setAvatar(sender, image: img)
+                profile.setAvatar(sender, image: img, char: char)
             }
         }
     }

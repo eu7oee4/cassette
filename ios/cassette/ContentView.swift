@@ -324,6 +324,7 @@ struct ContentView: View {
 
     private var chatBody: some View {
         ChatView(messages: chatStore.messages,
+                 charID: currentCharID,                  // 头像认这个，不认 ProfileStore 里的缓存
                  isWaiting: isWaiting || rescueActive,   // 后台生成期间点点不灭，补投到达才熄
                  onEdit: startEdit,
                  onDelete: { msg in deleteCandidates = [msg] },
@@ -460,7 +461,8 @@ struct ContentView: View {
                 get: { !hasOnboarded },
                 set: { if !$0 { hasOnboarded = true } }
             )) {
-                OnboardingView(store: proactiveStore, profile: profileStore) { hasOnboarded = true }
+                OnboardingView(store: proactiveStore, profile: profileStore,
+                               charID: currentCharID) { hasOnboarded = true }
             }
             // 点头像的选项弹层：改昵称 / 换头像。
             .confirmationDialog("", isPresented: Binding(
@@ -589,7 +591,9 @@ struct ContentView: View {
         chatStore.switchConversation(id)
         currentCharID = id
         applyDraft(draftStore.load(id))                     // 换上这一位自己的草稿
-        profileStore.switchCharacter(id)
+        // 头像不在这儿刷：它现在跟着 charID 一路传到 AvatarView，没有需要通知的缓存了。
+        // 老版本在这行调 profileStore.switchCharacter(id)，而它蹲在上面那道 guard 后面
+        // ——guard 一提前 return，别人都换了人、头像还停在上一位身上（08-30 实锤）。
         sessionId = nil
         Task { await proactiveStore.reloadForCurrentCharacter() }
         // 会话入口/归属说明是按角色变的，切完顺手对齐一次（路由本身不等它——

@@ -3,6 +3,9 @@ import SwiftUI
 /// 聊天消息列表：可滚动，我方靠右、对方靠左，带头像和时间戳。
 struct ChatView: View {
     let messages: [ChatMessage]
+    /// 这些气泡属于**哪个角色**的会话。头像靠它取（ProfileStore 里没有「当前是谁」，
+    /// 见那边的注释）——身份跟着数据一起传下来，不去问一个可变的全局。
+    let charID: String
     var isWaiting: Bool = false   // 等待对方回复中：底部显示"正在输入"
 
     var onEdit: (ChatMessage) -> Void = { _ in }   // 时间戳旁小按钮：进编辑弹窗
@@ -37,7 +40,7 @@ struct ChatView: View {
                 // 它在列表最底端，滚动/离底期间跟着 isWaiting 插进拔出＝滚动中动布局，
                 // 正是 contentSize 污染的老病根（流式 text_break 会反复翻 isWaiting）。
                 if shownIsWaiting {
-                    TypingIndicatorRow()
+                    TypingIndicatorRow(charID: charID)
                         .flippedUpsideDown()
                         .transition(.opacity)
                 }
@@ -58,6 +61,7 @@ struct ChatView: View {
                                     .onLongPressGesture { onDelete(message) }
                             } else {
                                 MessageRow(message: message,
+                                           charID: charID,
                                            contentWidth: geo.size.width - 24,
                                            onEdit: onEdit,
                                            onDelete: onDelete,
@@ -68,6 +72,7 @@ struct ChatView: View {
                             }
                         case .imageStack(let group):
                             ImageStackRow(messages: group,
+                                          charID: charID,
                                           onTapStack: onTapImageStack,
                                           onTapAvatar: { onTapAvatar(group[0].sender) })
                                 .contentShape(Rectangle())
@@ -448,9 +453,10 @@ struct StreamingPulseDot: View {
 
 /// "对方正在输入"指示：左侧对方头像 + 一个装着跳动圆点的气泡。
 private struct TypingIndicatorRow: View {
+    let charID: String
     var body: some View {
         HStack(alignment: .top, spacing: 8) {
-            AvatarView(sender: .other)
+            AvatarView(sender: .other, charID: charID)
             TypingDots()
                 .padding(.horizontal, 16)
                 .padding(.vertical, 14)
@@ -543,6 +549,7 @@ private struct BrowseNoteRow: View {
 /// 单行消息：根据发送方决定左右布局与头像位置。
 private struct MessageRow: View {
     let message: ChatMessage
+    let charID: String                  // 头像认这个，不认「当前是谁」
     var contentWidth: CGFloat = 320
     var onEdit: (ChatMessage) -> Void = { _ in }
     var onDelete: (ChatMessage) -> Void = { _ in }
@@ -565,7 +572,7 @@ private struct MessageRow: View {
     var body: some View {
         HStack(alignment: .top, spacing: 8) {
             if !isMe {
-                Button { onTapAvatar(.other) } label: { AvatarView(sender: .other) }
+                Button { onTapAvatar(.other) } label: { AvatarView(sender: .other, charID: charID) }
                     .buttonStyle(.plain)
             }
             VStack(alignment: isMe ? .trailing : .leading, spacing: 5) {
@@ -576,7 +583,7 @@ private struct MessageRow: View {
             }
             .frame(maxWidth: .infinity, alignment: isMe ? .trailing : .leading)
             if isMe {
-                Button { onTapAvatar(.me) } label: { AvatarView(sender: .me) }
+                Button { onTapAvatar(.me) } label: { AvatarView(sender: .me, charID: charID) }
                     .buttonStyle(.plain)
             }
         }
@@ -771,6 +778,7 @@ struct StickerImage: View {
 /// 连发多图的行：头像 + 堆叠照片卡 + 时间戳（取最后一张的时间）。
 private struct ImageStackRow: View {
     let messages: [ChatMessage]                       // ≥2，同 sender 的连续图片
+    let charID: String                                // 头像认这个，不认「当前是谁」
     var onTapStack: ([URL], Int) -> Void = { _, _ in }
     var onTapAvatar: () -> Void = { }
 
@@ -785,7 +793,7 @@ private struct ImageStackRow: View {
     var body: some View {
         HStack(alignment: .top, spacing: 8) {
             if !isMe {
-                Button { onTapAvatar() } label: { AvatarView(sender: .other) }
+                Button { onTapAvatar() } label: { AvatarView(sender: .other, charID: charID) }
                     .buttonStyle(.plain)
             }
             VStack(alignment: isMe ? .trailing : .leading, spacing: 5) {
@@ -797,7 +805,7 @@ private struct ImageStackRow: View {
             }
             .frame(maxWidth: .infinity, alignment: isMe ? .trailing : .leading)
             if isMe {
-                Button { onTapAvatar() } label: { AvatarView(sender: .me) }
+                Button { onTapAvatar() } label: { AvatarView(sender: .me, charID: charID) }
                     .buttonStyle(.plain)
             }
         }
@@ -911,11 +919,14 @@ struct PhotoStackCard: View {
 struct AvatarView: View {
     @EnvironmentObject private var profile: ProfileStore
     let sender: MessageSender
+    /// 对方是**谁**（sender == .me 时用不上）。必传：缺身份要在编译期暴露，
+    /// 别给它编一个默认值，静默兜底会把「缺身份」变成「错身份」。
+    let charID: String
     var size: CGFloat = 34
 
     var body: some View {
         Group {
-            if let img = profile.avatar(for: sender) {
+            if let img = profile.avatar(for: sender, char: charID) {
                 Image(uiImage: img)
                     .resizable()
                     .scaledToFill()
