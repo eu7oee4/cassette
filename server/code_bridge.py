@@ -120,7 +120,9 @@ class GamePumpView:
         return self._h.awaiting_user_since
 
     def put_threadsafe(self, msg) -> None:
-        raise RuntimeError("游戏在聊天里跑着——直接在聊天框说就行，不用走终端口")
+        # 泵的注入要带账原文，走 chat_loop.inject_pump_user（/code/send 已分支）；
+        # 这里只兜未知调用方——有声拒，别静默丢 TA 的话。
+        raise RuntimeError("泵会话的注入走 inject_pump_user（要带账原文），不走这口")
 
     def request_stop(self, reason: str = "manual") -> None:
         # 置旗：泵在轮尾收口（关账→释放锁→清泵→补醒），聊天 session 什么都不动。

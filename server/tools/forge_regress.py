@@ -118,6 +118,8 @@ def leg_images(args, results: dict) -> None:
     else:
         shutil.rmtree(workdir, ignore_errors=True)
         shutil.rmtree(path.parent, ignore_errors=True)
+        time.sleep(1.5)   # CLI 收尾异步补写目录，停一拍再扫尾（见 main 同款注释）
+        shutil.rmtree(path.parent, ignore_errors=True)
 
 
 def main() -> int:
@@ -185,7 +187,11 @@ def main() -> int:
     if args.keep:
         print(f"--keep：留下 {workdir} 和 {path.parent}")
     else:
+        # CLI 进程收尾会在 rmtree 之后异步补写 project 目录（08-31 实锤：留下的
+        # 目录权限松，把 forge.ops_check 探红）——停一拍再扫一遍尾。
         shutil.rmtree(workdir, ignore_errors=True)
+        shutil.rmtree(path.parent, ignore_errors=True)
+        time.sleep(1.5)
         shutil.rmtree(path.parent, ignore_errors=True)
 
     ok = all(results.values())

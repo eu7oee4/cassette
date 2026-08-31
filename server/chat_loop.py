@@ -79,6 +79,17 @@ CONSOLIDATE_TIMEOUT = 300
 # 泵启动的踢脚哨兵：泵在轮间隙被打开时把 loop 从长等里叫醒（不是轮，直接跳过）
 _KICK = object()
 
+
+@dataclass
+class PumpNote:
+    """泵开着时从 /code/send 进来的 TA 消息（08-31 真机实锤：app 在游戏态把
+    **聊天框**的消息也走终端口，不只是终端页——iOS 改路由前这是插话的唯一
+    通道，必须接住不能拒）。语义同独立 loop 的队列注入：轮尾吃掉、回复走
+    outbox。text=注入正文（带时间头）；ledger_text=app 自己历史里存的原文
+    （发送前比对要逐字对上，注入包装不进账）。"""
+    text: str
+    ledger_text: str = ""
+
 # SDK 聊天路的熄火开关（连败 3 次自动回 -p，见 app._engine_chunks）。放这儿不放
 # app.py：wake_sdk 分路也要认它——聊天路都熄了火，醒来还往 session 里塞就是往
 # 一个起不来的引擎里灌（计数器 _SDK_CHAT_FAILS 仍归 app，它只在请求路上加减）。
@@ -801,10 +812,11 @@ async def run(handle: session_mgr.LoopHandle, *,
             except Exception:
                 pass
 
-    async def _pump_tick() -> None:
-        """队列空到点补的一口「·」。tick 不是第四种轮：turn_kind=wake（他自己的
-        时间），注入谁都没见过、不进账不进铸造材料。session 死了先从镜像重起
-        （引擎打嗝 → 下一 tick 接着读）；连挂三轮=引擎有病，放下游戏。"""
+    async def _pump_round(prompt: str, kind: str,
+                          ledger_user: str = "") -> None:
+        """泵的一个轮：tick（kind=wake，注入「·」不入账）或 TA 经终端口的插话
+        （kind=chat，ledger_user=app 历史里存的原文先入账）。session 死了先从
+        镜像重起（引擎打嗝 → 下一轮接着读）；连挂三轮=引擎有病，放下游戏。"""
         nonlocal client, ledger
         pump = handle.meta.get("game_pump")
         if pump is None:
@@ -819,14 +831,20 @@ async def run(handle: session_mgr.LoopHandle, *,
                 print(f"[chat_loop] 泵重起 session 失败: {e}", file=sys.stderr)
                 await _pump_close(f"engine-error: 泵重起失败 {e}")
                 return
-        handle.meta["turn_kind"] = "wake"
+        handle.meta["turn_kind"] = kind
         import pipeline
         handle.meta["wake_tools"] = set(
             pipeline.mounted_tool_names("wake", handle.char_id))
+        if ledger_user.strip():
+            # TA 的话在 app 历史里已经有了（app 发送时本地追加）——账跟上，
+            # 发送前比对才对得上；注入包装（时间头/附件注记）不进账。
+            ledger.append({"r": "user", "h": _h(ledger_user),
+                           "ts": int(time.time())})
+            _persist_ledger(handle.char_id, sid, ledger)
         s0 = int(handle.meta.get("shots", 0))
         ok = False
         try:
-            await client.query(GAME_TICK_PROMPT)
+            await client.query(prompt)
             ok = await _pump_drain()
         except asyncio.CancelledError:
             raise                       # 取消来源纪律：外层统一判（08-30 复盘）
@@ -848,6 +866,11 @@ async def run(handle: session_mgr.LoopHandle, *,
             pump["strikes"] = int(pump.get("strikes", 0)) + 1
             if pump["strikes"] >= 3:
                 await _pump_close("engine-error: 泵轮连挂三次")
+
+    async def _pump_tick() -> None:
+        """队列空到点补的一口「·」——不是第四种轮：turn_kind=wake（他自己的
+        时间），注入谁都没见过、不进账不进铸造材料。"""
+        await _pump_round(GAME_TICK_PROMPT, "wake")
 
     async def _game_reforge() -> None:
         """N 张段内重铸（§4 节奏；唯一保留的边界）：巩固轮（感知白描，无感）→
@@ -913,6 +936,23 @@ async def run(handle: session_mgr.LoopHandle, *,
                     timeout=GAME_TICK_PAUSE if pump_on else IDLE_CHECK_SEC)
                 if turn is _KICK:
                     continue   # 泵刚开的踢脚：回到 loop 顶重读泵状态
+                if isinstance(turn, PumpNote):
+                    handle.touch()
+                    if handle.meta.get("game_pump"):
+                        await _pump_round(turn.text, "chat",
+                                          ledger_user=turn.ledger_text)
+                    else:
+                        # 收摊竞态：注入排进来时泵已停。回复无处投（deliver 闭包
+                        # 随泵走了），有声弃+Bark 比静默丢强。
+                        print("[chat_loop] PumpNote 到达时泵已停，弃投",
+                              file=sys.stderr)
+                        try:
+                            from notify import bark_push
+                            bark_push("刚那条消息赶上他放下游戏的空当，没送进去"
+                                      "——聊天框再发一次就好")
+                        except Exception:
+                            pass
+                    continue
             except asyncio.TimeoutError:
                 if pump_on:
                     await _pump_tick()   # 队列空一拍 → 目光落回屏幕
@@ -1129,6 +1169,16 @@ def start_game_pump(char_id: str, *, note: str,
     except Exception:
         pass                           # 踢不动就等下个自然边界，不算错
     return {"ok": True, "seg_id": seg}
+
+
+def inject_pump_user(char_id: str, text: str, ledger_text: str = "") -> None:
+    """泵开着时接住 /code/send 来的 TA 消息（08-31 实锤：app 游戏态把聊天框
+    消息也走终端口，iOS 改路由前这是插话唯一通道）。轮尾吃掉、回复走 outbox；
+    ledger_text=app 历史里的原文，逐字入账。失败抛出让路由有声报。"""
+    handle = session_mgr.get(char_id, SCENE)
+    if handle is None or not handle.meta.get("game_pump"):
+        raise RuntimeError("游戏不在手边（泵没开）——这条走聊天正路就行")
+    handle.put_threadsafe(PumpNote(text=text, ledger_text=ledger_text))
 
 
 def _ensure_loop(char_id: str) -> session_mgr.LoopHandle:

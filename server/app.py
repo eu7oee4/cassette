@@ -1547,7 +1547,12 @@ def code_send(inp: CodeSendIn, char: Optional[str] = None,
     msg = f"〔现在是 {pipeline.now_str()}〕\n{msg}"
     if sdk_handle is not None:
         try:
-            sdk_handle.put_threadsafe(msg)    # SDK loop：进队列，loop 里 query() 注入
+            if getattr(sdk_handle, "is_pump", False):
+                # PR13 泵：app 游戏态把聊天框消息也走这口（08-31 实锤）——
+                # 包成 PumpNote 轮尾吃掉，账里逐字记 app 历史里的原文。
+                chat_loop.inject_pump_user(sdk_handle.char_id, msg, inp.text or "")
+            else:
+                sdk_handle.put_threadsafe(msg)    # SDK loop：进队列，loop 里 query() 注入
             r = {"ok": True}
         except Exception as e:
             raise HTTPException(status_code=409, detail=f"没发进会话：{e}")

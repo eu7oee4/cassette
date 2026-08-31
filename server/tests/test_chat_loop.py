@@ -701,6 +701,52 @@ class GamePumpLoopTest(ChatLoopTest):
         import os
         os.unlink(ref)
 
+    async def test_pump_note_injection(self):
+        """08-31 实锤修：app 游戏态聊天框走 /code/send → PumpNote 轮尾吃掉、
+        回复走 outbox、账里逐字记 app 原文（注入包装不进账）。"""
+        self.assertTrue(await self._wait(
+            lambda: self.clients and "·" in self.clients[-1].queries))
+        c = self.clients[-1]
+        chat_loop.inject_pump_user("cass", "〔现在是 11:34〕\n别用五角星",
+                                   "别用五角星")
+        c.feed(self._Asst(content=[self._Text(text="好，改。")], model="t"),
+               _result("x"))   # 在飞 tick 或 note 轮谁先到都由这发收掉
+        c.feed(self._Asst(content=[self._Text(text="收到！")], model="t"),
+               _result("x"))
+        self.assertTrue(await self._wait(
+            lambda: any(isinstance(q, str) and "别用五角星" in q
+                        for q in c.queries)))
+        self.assertTrue(await self._wait(lambda: len(self.delivered) >= 1))
+        led = self.handle.meta["ledger"]
+        self.assertTrue(await self._wait(
+            lambda: any(e["r"] == "user"
+                        and e["h"] == chat_loop._h("别用五角星")
+                        for e in self.handle.meta["ledger"])))
+        # 注入包装（时间头）没进账
+        self.assertFalse(any(e["h"] == chat_loop._h("〔现在是 11:34〕\n别用五角星")
+                             for e in led))
+        self.assertTrue(self.handle.meta.get("game_pump"))
+
+    async def test_pump_note_after_close_is_dropped_loudly(self):
+        import notify
+        barks: list[str] = []
+        _orig = notify.bark_push
+        notify.bark_push = lambda *a, **kw: barks.append(a[0] if a else "") or True
+        try:
+            self.assertTrue(await self._wait(
+                lambda: self.clients and "·" in self.clients[-1].queries))
+            self.handle.meta["end_requested"] = True
+            self.clients[-1].feed(_result("x"))
+            self.assertTrue(await self._wait(
+                lambda: self.handle.meta.get("game_pump") is None))
+            self.handle.queue.put_nowait(
+                chat_loop.PumpNote(text="迟到的话", ledger_text="迟到的话"))
+            self.assertTrue(await self._wait(lambda: barks))
+            self.assertNotIn(chat_loop._h("迟到的话"),
+                             [e["h"] for e in self.handle.meta["ledger"]])
+        finally:
+            notify.bark_push = _orig
+
     async def test_pump_survives_queued_chat_turn(self):
         """泵开着时 TA 插话：队列优先（tick 收完立刻轮到人）、照走 SSE、泵不受影响。"""
         self.assertTrue(await self._wait(
