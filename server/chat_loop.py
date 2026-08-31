@@ -202,8 +202,23 @@ def _wake_gate(handle: session_mgr.LoopHandle):
     - 醒来禁用面照 PR12：turn_kind=wake 查 wake_tools（tick 轮同 kind 同查表，
       泵开着时 game_* 由上一条放行=允许集 ∪ game_*）。
     - 聊天轮/巩固轮 → 其余全放行，行为与没挂 hook 一字不差。"""
+    import pipeline
+
     async def gate(hook_input, tool_use_id, ctx) -> dict:
         tool = (hook_input or {}).get("tool_name") or ""
+        if tool in pipeline.READONLY_BUILTINS:
+            # 只读常驻（PR14-b）：任何轮来源都能看一眼（§2 核实纪律），
+            # 但过路径闸（限根目录+黑名单，§5.3 安全面）——先于醒来禁用面，
+            # 只读工具不在 wake 挂载表里，不挡在这儿 wake 轮就全拒了。
+            why = pipeline.readonly_path_guard(
+                (hook_input or {}).get("tool_input") or {}, handle.char_id)
+            if why is None:
+                return {}
+            return {"hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "deny",
+                "permissionDecisionReason": why,
+            }}
         if tool.startswith("mcp__game__"):
             if handle.meta.get("game_pump"):
                 return {}
@@ -327,6 +342,17 @@ def build_options(char_id: str, catalog: Optional[list] = None,
         game_tools = [f"mcp__game__{t}" for t in game_loop.GAME_TOOL_NAMES]
         tools += game_tools
         system += GAME_RHYTHM_SYSTEM.replace("{user}", config.user_name())
+
+    if config.READONLY_TOOLS_ENABLED and handle is not None:
+        # 只读常驻（PR14-b，§5.3）：Read/Grep/Glob 挂所有轮次——他任何一轮都能
+        # 去看一眼文件、核一句话（结论过桥时来源也过得去）。安全面在 PreToolUse
+        # 路径闸（限根目录+黑名单），所以 handle=None（没门）就不挂。写类工具
+        # 不在这儿：那要等带外批准门（PR14-c）。
+        tools += sorted(pipeline.READONLY_BUILTINS)
+        system += ("\n\n【你手边常驻一套只读的文件工具（Read/Grep/Glob），看得到 "
+                   f"cassette 仓（{pipeline.CODE_ROOT}）的代码和资料——想核实什么"
+                   "随手翻，别背结论。凭据（.env）和别的角色的 state 房间不在"
+                   "范围里。改文件的家伙什这会儿不在手边。】")
 
     env = {}
     if tools and pipeline.tool_search_on("chat"):

@@ -104,6 +104,11 @@ GAME_MODE_ENABLED = os.environ.get("GAME_MODE_ENABLED", "0") == "1"
 # 新路跑稳两周后旧路和 game-story 插件的会话侧 MCP 一起退役。
 STORY_ENGINE = (os.environ.get("STORY_ENGINE", "sdk").strip() or "sdk")
 
+# 只读工具常驻（PLAN_sdk §5.3 PR14-b）：Read/Grep/Glob 挂进 sdk 聊天 session 的
+# 所有轮次（§2 核实纪律：结论过桥的时候来源也过得去）。默认关——schema token
+# 成本必须真机实测（PLAN_cache：上下文最大稀释源是工具 schema）再拨闸。
+READONLY_TOOLS_ENABLED = os.environ.get("READONLY_TOOLS", "0") == "1"
+
 # 聊天引擎（PLAN_sdk S2/PR10）：按角色灰度。
 #   "p"（默认）=一次性 claude -p（今天的生产）；"sdk"=全角色走常驻 session；
 #   "sdk:<id1>,<id2>"=只这些角色走 sdk，其余 p——先切提信感的那个角色，

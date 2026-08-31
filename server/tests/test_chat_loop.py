@@ -813,6 +813,54 @@ class TraceVocabTest(unittest.TestCase):
             self.assertFalse(pipeline.external_tool(n), n)
 
 
+class ReadonlyGuardTest(unittest.TestCase):
+    """PR14-b：只读常驻的路径闸（限根目录+黑名单，§5.3 安全面）。"""
+
+    def test_paths(self):
+        import pipeline
+        import state_store
+        g = pipeline.readonly_path_guard
+        root = pipeline.CODE_ROOT
+        # 放行：仓内文件 / 没点名路径（Grep 全局搜落恒空 cwd）/ 自己的房间
+        self.assertIsNone(g({"file_path": str(root / "server" / "pipeline.py")},
+                            "cass"))
+        self.assertIsNone(g({}, "cass"))
+        self.assertIsNone(g(None, "cass"))
+        mine = state_store.CHAR_STATE_ROOT / "cass" / "wake_log.jsonl"
+        self.assertIsNone(g({"file_path": str(mine)}, "cass"))
+        # 拒：根目录外 / .env* / 私人仓 / 别的角色的房间
+        self.assertIsNotNone(g({"file_path": "/etc/passwd"}, "cass"))
+        self.assertIsNotNone(g({"file_path": str(root / ".env")}, "cass"))
+        self.assertIsNotNone(g({"file_path": str(root / "server" / ".env.local")},
+                               "cass"))
+        self.assertIsNotNone(g({"path": "/Users/nemu/mianmian-app/x.py"}, "cass"))
+        other = state_store.CHAR_STATE_ROOT / "default" / "wake_log.jsonl"
+        self.assertIsNotNone(g({"file_path": str(other)}, "cass"))
+        # 相对路径必须解析后再查：「../」一步就从恒空 cwd 爬进 state/characters
+        self.assertIsNotNone(
+            g({"file_path": "../characters/default/char.json"}, "cass"))
+
+
+class ReadonlyGateTest(unittest.IsolatedAsyncioTestCase):
+    """PR14-b：门里只读工具先于醒来禁用面（任何轮来源都能看，但过路径闸）。"""
+
+    async def test_readonly_bypasses_wake_denylist_but_not_guard(self):
+        import pipeline
+        handle = sm.LoopHandle(char_id="cass", scene="chat")
+        handle.meta["turn_kind"] = "wake"
+        handle.meta["wake_tools"] = set()          # 醒来挂载表里没有它们
+        gate = chat_loop._wake_gate(handle)
+        ok = await gate({"tool_name": "Read",
+                         "tool_input": {"file_path":
+                                        str(pipeline.CODE_ROOT / "README.md")}},
+                        "t1", None)
+        self.assertEqual(ok, {})
+        bad = await gate({"tool_name": "Read",
+                          "tool_input": {"file_path": "/etc/passwd"}}, "t2", None)
+        self.assertEqual(
+            bad["hookSpecificOutput"]["permissionDecision"], "deny")
+
+
 class _AlTmpBase(unittest.TestCase):
     """activity_log 全目录打到临时地（S3 留痕用例：事件账/行为账都要落）。"""
 

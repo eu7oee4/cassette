@@ -1087,6 +1087,46 @@ def external_tool(name: str) -> bool:
 # （四类表第三类）、写类逐条留原文（第一类））。
 READONLY_BUILTINS = {"Read", "Grep", "Glob"}
 
+# 只读常驻的安全面（§5.3 机主 08-31 拍板：限根目录+黑名单，不做全盘放行）。
+# 「只读 ≠ 无害」：聊天上下文里的注入面（邮件/论坛/网页）可以指使他去读任意
+# 文件再说进气泡——外泄路径是气泡本身，带外门拦不住，只能限读面。
+# 黑名单：.env/凭据、别的角色的 state/characters/（串台面新一维）、私有仓
+# mianmian-app。缺口真机撞见再从执行层补，别在这儿穷举。
+CODE_ROOT = Path(__file__).resolve().parent.parent   # cassette 仓根
+
+_GUARD_PATH_KEYS = ("file_path", "path", "notebook_path")
+
+
+def readonly_path_guard(tool_input: Optional[dict],
+                        char_id: Optional[str]) -> Optional[str]:
+    """只读工具的路径闸：None=放行；str=拒绝原话（PreToolUse 门直接用）。
+    相对路径按恒空 cwd（neutral_cwd）解析再查——「../」从空目录一步就能爬进
+    state/，不解析就查等于没查。没点名路径（Grep 全局搜）＝落在空 cwd，无害。"""
+    raws = [v for k in _GUARD_PATH_KEYS
+            if isinstance(v := (tool_input or {}).get(k), str) and v.strip()]
+    for raw in raws:
+        p = Path(raw.strip())
+        if not p.is_absolute():
+            p = Path(neutral_cwd()) / p
+        try:
+            rp = p.resolve()
+        except Exception:
+            return "这条路径看不懂——换条正经路径"
+        if not rp.is_relative_to(CODE_ROOT):
+            return (f"你手边只看得到 cassette 仓（{CODE_ROOT}），"
+                    "这条路在范围外")
+        if any(seg.startswith(".env") for seg in rp.parts):
+            return "凭据类的文件（.env 之类）不在你可看的范围里"
+        if "mianmian-app" in rp.parts:
+            return "mianmian-app 是私人仓，不在你可看的范围里"
+        croot = state_store.CHAR_STATE_ROOT.resolve()
+        if rp.is_relative_to(croot):
+            rel = rp.relative_to(croot)
+            if rel.parts and rel.parts[0] != (char_id or ""):
+                return ("那是别的角色的房间（state/characters/），"
+                        "各自的时间线各自看")
+    return None
+
 
 # ---------- 工具「调用结果」定案 ----------
 # 只解析 tool_use（输入）的老口径抓的是**调用意图**：失败的调用照样被记成「📥 记住了一件事」，
