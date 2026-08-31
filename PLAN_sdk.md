@@ -1484,6 +1484,30 @@ PR8 发送前比对免费吃掉（PR11 实证）。**
   （变气泡：污染对话权威，且铸不回去——没有合法 role 放它，**不做**）。
   定案＝前两个一起做，同一份事件流两个消费者；第三个别碰。
 
+**施工记录（2026-08-31 深夜，PR14 a–d 落码未上电，435 测试全绿）**：
+- **a 留痕补线**（cb5ebb3）：`external_stored`/`external_tool` 判线另立（内部
+  白名单取补集，新插件外部动作自动算外部）；`_ToolTrace` 执行层配对落账
+  （泵流+轮流两口都接了，tool_use 配 tool_result 才算一条）；`_fold_trace_lines`
+  折叠框附「亲手做过的——记录不是印象」（写类逐条/读类聚合/账过 30 天窗回光框）；
+  `interval_seg_id` 让区间行确定性找回事件账。
+- **b 只读常驻**（c00d9e2）：`READONLY_TOOLS=1` 拨闸**默认关**；
+  `readonly_path_guard` 限仓根+黑名单（.env* / mianmian-app / 别角色
+  state/characters；相对路径按恒空 cwd 解析后再查——「../」一步就能爬进 state）；
+  门序=只读闸先于醒来禁用面（不然 wake 轮全拒）。
+- **c 带外门**（bf248c7）：`code_permits` 状态机——一场一批、申请超时**惰性**
+  自动拒（无定时器重启不漏）、至多一张待批单（Bark 刷不了屏）；Bash 整个算
+  写类（命令级读写细分=走不稳的路）；门拒的同时替他递申请；
+  `/code/permit`（GET）+ `/code/permit/decide`（POST）。
+- **d 并入本体**（本 commit）：批准即开 code 段账、收摊（revoke / loop 退出 /
+  `/code/permit/revoke`）即关账落区间行；computer 互斥=写门先查 tmux 归属
+  （不归他连申请都不递）；addendum 文档侧按需注入（一场一注，段 id 变了才再注）；
+  capsule=「◆ 结论 ← 出处」执行层从气泡捕获进事件账、折叠框排最前
+  （checked_at/指针由账本机械补）；`WRITE_TOOLS=1` 第二段拨闸**默认关**。
+- **未上电面（真机三条）**：① `READONLY_TOOLS` 拨闸后实测 schema token
+  （下面风险清单那条，实测完才许拨 ②）；② `WRITE_TOOLS` 拨闸+完整走一场
+  申请→Bark→批→干活→capsule→收摊；③ iOS 权限卡/弹窗 UI（现在只有
+  Bark+endpoint 可用，§5.5 终端页退役同批做）。
+
 风险清单（贯穿）：agent-sdk 版本 skew（全仓单点，PR1 回归测试是闸门）；未文档化
 transcript 格式（同上，同族工具是煤矿金丝雀）；串台六条+新增场景维（PR4 一处
 执行）；**只读常驻的 schema token 成本必须实测**（§5.3 残余代价，缓解=写类走

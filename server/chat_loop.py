@@ -223,6 +223,19 @@ def _wake_gate(handle: session_mgr.LoopHandle):
             # 从 TA 手上来（app 弹窗/权限卡），邮件/网页里的注入文本够不到。
             # 批了也照过路径闸：写更不能出仓/碰黑名单（Bash 没路径参数，闸对它
             # 放空——granted 即 TA 拍板过的信任面，命令级细分真机见刚需再补）。
+            # computer 互斥（PR14-d，与 game 泵拿模拟器锁同构）：电脑这样独占
+            # 资源归 tmux 归属角色，别人连申请都不递（递了 TA 批了也是串台面）。
+            import plugins
+            try:
+                owner = plugins.owner_of("tmux")
+            except Exception:
+                owner = handle.char_id
+            if owner != handle.char_id:
+                import characters
+                return _deny(f"电脑现在归「{characters.display_name(owner)}」——"
+                             "这台机器一次只归一个人用，想上机得先让"
+                             f"{config.user_name()}在插件商店把「电脑上的会话」"
+                             "转过来。")
             import code_permits
             if code_permits.active(handle.char_id):
                 why = pipeline.readonly_path_guard(tool_input, handle.char_id)
@@ -348,16 +361,27 @@ def build_options(char_id: str, catalog: Optional[list] = None,
         tools += game_tools
         system += GAME_RHYTHM_SYSTEM.replace("{user}", config.user_name())
 
-    if config.READONLY_TOOLS_ENABLED and handle is not None:
-        # 只读常驻（PR14-b，§5.3）：Read/Grep/Glob 挂所有轮次——他任何一轮都能
-        # 去看一眼文件、核一句话（结论过桥时来源也过得去）。安全面在 PreToolUse
-        # 路径闸（限根目录+黑名单），所以 handle=None（没门）就不挂。写类工具
-        # 不在这儿：那要等带外批准门（PR14-c）。
-        tools += sorted(pipeline.READONLY_BUILTINS)
-        system += ("\n\n【你手边常驻一套只读的文件工具（Read/Grep/Glob），看得到 "
-                   f"cassette 仓（{pipeline.CODE_ROOT}）的代码和资料——想核实什么"
-                   "随手翻，别背结论。凭据（.env）和别的角色的 state 房间不在"
-                   "范围里。改文件的家伙什这会儿不在手边。】")
+    if handle is not None and (config.READONLY_TOOLS_ENABLED
+                               or config.WRITE_TOOLS_ENABLED):
+        # 文件工具挂载（PR14-b/d，§5.3）：只读常驻所有轮次（核一句话时来源也
+        # 过得去）；写类 schema 同样常驻（挂载=session 级），放不放行在轮级
+        # 带外门（code_permits）。安全面都在 PreToolUse 闸里，handle=None
+        # （没门）就一概不挂。两个闸分开拨：schema token 成本逐段实测。
+        segs: list[str] = []
+        if config.READONLY_TOOLS_ENABLED:
+            tools += sorted(pipeline.READONLY_BUILTINS)
+            segs.append("你手边常驻一套只读的文件工具（Read/Grep/Glob），看得到 "
+                        f"cassette 仓（{pipeline.CODE_ROOT}）的代码和资料——想核实"
+                        "什么随手翻，别背结论。凭据（.env）和别的角色的 state "
+                        "房间不在范围里。")
+        if config.WRITE_TOOLS_ENABLED:
+            tools += sorted(pipeline.WRITE_BUILTINS)
+            segs.append(f"改东西的家伙什（Edit/Write/Bash）也在，但动手前要"
+                        f"{config.user_name()}批一份写权限——没批就用会被门拦下、"
+                        "同时替你把申请递过去；批下来一场有效，收摊即失效。")
+        else:
+            segs.append("改文件的家伙什这会儿不在手边。")
+        system += "\n\n【" + "".join(segs) + "】"
 
     env = {}
     if tools and pipeline.tool_search_on("chat"):
@@ -428,6 +452,30 @@ def _user_dict(msg: UserMessage) -> dict:
     return {"type": "user", "message": {"content": blocks}}
 
 
+def _code_seg(char_id: str) -> Optional[str]:
+    """开着的 code 场（写批准在身上时 code_permits 带的段账地址；没批=None）。"""
+    try:
+        import code_permits
+        return code_permits.active_seg(char_id)
+    except Exception:
+        return None
+
+
+def _capture_capsules(char_id: str, text: str) -> None:
+    """收场白 capsule（§5.3 第二类留痕：结论带指针）。code 场开着时，他气泡里
+    「◆ 结论 ← 出处」打头的行落进段事件账——气泡会随折叠整段消失，账本才是
+    它过桥的家。checked_at=事件 ts（机械补），proof_pointer=他写的出处。"""
+    seg = _code_seg(char_id)
+    if not seg or "◆" not in (text or ""):
+        return
+    import activity_log
+    for line in text.splitlines():
+        line = line.strip()
+        if line.startswith("◆"):
+            activity_log.append_event(seg, "capsule",
+                                      text=line.lstrip("◆").strip())
+
+
 # ---------- 执行层 tool 落账（S3 补线②：§5.3 四类表一、三类的确定性载体） ----------
 
 def _tool_summary(name: str, inp: dict) -> str:
@@ -462,7 +510,8 @@ class _ToolTrace:
 
     def result(self, block_id: str, is_error) -> None:
         name, summary = self.pend.pop(block_id, (None, ""))
-        seg = (self.handle.meta.get("game_pump") or {}).get("seg_id")
+        seg = ((self.handle.meta.get("game_pump") or {}).get("seg_id")
+               or _code_seg(self.handle.char_id))
         if not seg or not name:
             return
         import activity_log
@@ -574,9 +623,10 @@ def _fold_trace_lines(iv: dict) -> str:
     import activity_log
     seg = activity_log.interval_seg_id(
         iv.get("char") or "", iv.get("scene") or "", int(iv.get("start") or 0))
-    evs = [e for e in activity_log.read_events(seg)
-           if e.get("kind") == "tool" and e.get("ext")]
-    if not evs:
+    all_evs = activity_log.read_events(seg)
+    caps = [e for e in all_evs if e.get("kind") == "capsule"]
+    evs = [e for e in all_evs if e.get("kind") == "tool" and e.get("ext")]
+    if not evs and not caps:
         return ""
 
     def _hm(ts) -> str:
@@ -588,6 +638,11 @@ def _fold_trace_lines(iv: dict) -> str:
     acts = [e for e in evs if not e.get("ro")]
     reads = [e for e in evs if e.get("ro")]
     lines: list[str] = []
+    # capsule 先行（§5.3 第二类：结论带指针，他自己写的收场白）——帽 20 防边界
+    for e in caps[:20]:
+        t = (e.get("text") or "").strip()
+        if t:
+            lines.append(f"◆ {t}")
     for e in acts[:12]:
         t = (e.get("text") or "").strip().replace("\n", " ")[:80]
         fail = "" if e.get("ok", True) else "（没成）"
@@ -630,7 +685,8 @@ def _frame_activities(history: list[dict], char_id: str) -> list[dict]:
     i, n = 0, len(history)
     for k, iv in enumerate(intervals):
         s, e = int(iv["start"]), int(iv["end"])
-        note = iv.get("note") or "游戏"
+        is_code = iv.get("scene") == "code"
+        note = iv.get("note") or ("写代码" if is_code else "游戏")
         latest = (k == len(intervals) - 1)
         while i < n and int(history[i].get("ts") or 0) < s:
             out.append(history[i])
@@ -640,15 +696,19 @@ def _frame_activities(history: list[dict], char_id: str) -> list[dict]:
             j += 1
         if j > i:
             if latest:
-                out.append({"role": "user", "ts": s,
-                            "text": f"〔{_hm(s)} 你开了{note}会话，下面这些是你边读边说的〕"})
+                opened = (f"〔{_hm(s)} 你拿到写权限上了机，下面这些是你边干活边说的〕"
+                          if is_code else
+                          f"〔{_hm(s)} 你开了{note}会话，下面这些是你边读边说的〕")
+                out.append({"role": "user", "ts": s, "text": opened})
                 out.extend(history[i:j])
                 out.append({"role": "user", "ts": e,
                             "text": f"〔{_hm(e)} 这一场到这儿收了摊〕"})
             else:
-                body = (f"〔{_hm(s)}–{_hm(e)} 你拿着{note}读了一场——"
-                        "细节在记忆里淡下去了，这一场的脉络和感想"
-                        "你当时写进了章节志〕")
+                body = ((f"〔{_hm(s)}–{_hm(e)} 你上机干了一场活——过程细节在"
+                         "记忆里淡下去了〕") if is_code else
+                        (f"〔{_hm(s)}–{_hm(e)} 你拿着{note}读了一场——"
+                         "细节在记忆里淡下去了，这一场的脉络和感想"
+                         "你当时写进了章节志〕"))
                 trace = _fold_trace_lines(iv)
                 if trace:
                     body += ("\n〔这一场你亲手做过的——记录，不是印象：\n"
@@ -714,6 +774,25 @@ def _acts_block(char_id: str) -> Optional[str]:
     body = "\n".join(f"[{pipeline.fmt_ts(a['ts'])}] {a.get('text') or a.get('tool')}"
                      for a in acts)
     return "【最近几天你亲手做过的事——记录，不是印象】\n" + body
+
+
+def _code_addendum_block() -> str:
+    """写批准下来那一轮注入的干活纪律（§5.3：文档侧按需注入，不换 client——
+    旧版靠起点重铸挂 addendum 的唯一职责由这行字接管）。正文=主仓
+    code_addendum.md（与老 code 模式同一份），尾巴接 capsule 收场约定
+    （§5.3 第二类留痕：他自己写，但格式强制带指针）。"""
+    body = ""
+    try:
+        body = config.code_addendum_path().read_text("utf-8").strip()
+    except Exception:
+        pass
+    cap = ("【写权限批下来了，改东西的家伙什现在能用了。收尾的时候，把这场活的"
+           "结论逐条写成「◆ 结论 ← 出处（文件:行）」的样子说出来——◆ 打头、"
+           "一行一条、出处指到能复核的地方。这几行会替这一场留档，别的过程细节"
+           "以后想不起来是正常的。】")
+    if body:
+        return "【接下来这段是你上机干活的纪律】\n" + body + "\n\n" + cap
+    return cap
 
 
 def _stale_depth(handle: session_mgr.LoopHandle) -> Optional[int]:
@@ -1159,6 +1238,13 @@ async def run(handle: session_mgr.LoopHandle, *,
                 if seen:
                     parts.append(seen)
                     handle.meta["seen_cursor"] = cur
+                # code addendum 按需注入（PR14-d）：批准落地后的第一个轮带干活
+                # 纪律，一场注一次（段 id 变了才再注）。文档块不进账，重铸时
+                # 自然脱落——场都收了，纪律没必要跟着历史走。
+                cseg = _code_seg(handle.char_id)
+                if cseg and handle.meta.get("code_addendum_seg") != cseg:
+                    parts.append(_code_addendum_block())
+                    handle.meta["code_addendum_seg"] = cseg
                 injection = ("\n\n".join(parts + [turn.injection])
                              if parts else turn.injection)
                 content: list[dict] = [{"type": "text", "text": injection}]
@@ -1200,6 +1286,7 @@ async def run(handle: session_mgr.LoopHandle, *,
                             ledger.append({"r": "assistant", "h": _h(delivered),
                                            "ts": int(time.time())})
                             _persist_ledger(handle.char_id, sid, ledger)
+                            _capture_capsules(handle.char_id, delivered)
                         handle.meta["ctx_est"] = (int(handle.meta.get("ctx_est", 0))
                                                   + estimate_tokens(injection)
                                                   + estimate_tokens(
@@ -1211,6 +1298,7 @@ async def run(handle: session_mgr.LoopHandle, *,
                     ledger.append({"r": "assistant", "h": _h(captured["reply"]),
                                    "ts": int(time.time())})
                     _persist_ledger(handle.char_id, sid, ledger)
+                    _capture_capsules(handle.char_id, captured["reply"])
                     handle.meta["ctx_est"] = (int(handle.meta.get("ctx_est", 0))
                                               + estimate_tokens(injection)
                                               + estimate_tokens(captured["reply"]))

@@ -19,9 +19,20 @@ import state_store
 
 class PermitBase(unittest.TestCase):
     def setUp(self):
+        import activity_log
+        self.al = activity_log
         self.tmp = Path(tempfile.mkdtemp(prefix="permit_test_"))
         self._root_orig = state_store.CHAR_STATE_ROOT
         state_store.CHAR_STATE_ROOT = self.tmp / "chars"
+        # 批准会开段账（PR14-d）——账本目录也打到临时地，不碰生产
+        self._al_orig = (activity_log.PATH, activity_log.ACT_DIR,
+                         activity_log.SEG_DIR, activity_log.SHOT_DIR,
+                         activity_log.OPEN_PATH)
+        activity_log.PATH = self.tmp / "activity_log.jsonl"
+        activity_log.ACT_DIR = self.tmp / "activity"
+        activity_log.SEG_DIR = activity_log.ACT_DIR / "segments"
+        activity_log.SHOT_DIR = activity_log.ACT_DIR / "shots"
+        activity_log.OPEN_PATH = activity_log.ACT_DIR / "open_segments.json"
         self.barks: list[str] = []
         self._bark_orig = notify.bark_push
         notify.bark_push = lambda text, title=None: self.barks.append(text) or True
@@ -29,7 +40,14 @@ class PermitBase(unittest.TestCase):
     def tearDown(self):
         notify.bark_push = self._bark_orig
         state_store.CHAR_STATE_ROOT = self._root_orig
+        (self.al.PATH, self.al.ACT_DIR, self.al.SEG_DIR, self.al.SHOT_DIR,
+         self.al.OPEN_PATH) = self._al_orig
         shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _grant(self, cid="cass", reason="x") -> str:
+        r = cp.request(cid, reason)
+        cp.decide(cid, r["id"], True)
+        return r["id"]
 
 
 class PermitFlowTest(PermitBase):
@@ -87,13 +105,59 @@ class PermitFlowTest(PermitBase):
         self.assertTrue(cp.active("cass"))
 
 
-class WriteGateTest(PermitBase, unittest.IsolatedAsyncioTestCase):
-    """门集成（chat_loop._wake_gate）：写类查带外记录；批了也过路径闸。"""
+class SegmentLifecycleTest(PermitBase):
+    """PR14-d：场的边界跟着批准走——批准开段账、收摊关段账落区间行。"""
 
-    def _gate(self):
+    def test_grant_opens_and_revoke_closes_segment(self):
+        self._grant("cass")
+        seg = cp.active_seg("cass")
+        self.assertIsNotNone(seg)
+        self.assertIn(seg, self.al.open_segments())
+        cp.revoke("cass", "test")
+        self.assertIsNone(cp.active_seg("cass"))
+        self.assertEqual(self.al.open_segments(), {})
+        ivs = self.al.read_intervals("cass", scene="code")
+        self.assertEqual(len(ivs), 1)
+        self.assertEqual(ivs[0]["note"], "写代码")
+
+    def test_capsule_capture_needs_open_seg(self):
+        import chat_loop
+        chat_loop._capture_capsules("cass", "◆ 工具不过桥 ← forge.py:241")
+        self.assertEqual(self.al.read_intervals("cass"), [])   # 没批=不落
+        self._grant("cass")
+        seg = cp.active_seg("cass")
+        chat_loop._capture_capsules(
+            "cass", "干完了。\n◆ 工具不过桥 ← forge.py:241\n◆ 判脏=发送前比对 ← chat_loop.py:122\n完事。")
+        evs = self.al.read_events(seg)
+        self.assertEqual([e["kind"] for e in evs], ["capsule", "capsule"])
+        self.assertEqual(evs[0]["text"], "工具不过桥 ← forge.py:241")
+
+    def test_addendum_block_carries_capsule_contract(self):
+        import chat_loop
+        blk = chat_loop._code_addendum_block()
+        self.assertIn("◆", blk)
+        self.assertIn("写权限批下来了", blk)
+
+
+class WriteGateTest(PermitBase, unittest.IsolatedAsyncioTestCase):
+    """门集成（chat_loop._wake_gate）：写类查带外记录；批了也过路径闸；
+    电脑归属互斥（PR14-d）。"""
+
+    def setUp(self):
+        super().setUp()
+        import plugins
+        self._owner_orig = plugins.owner_of
+        plugins.owner_of = lambda res: "cass"     # 电脑归 cass（测试不读生产插件态）
+
+    def tearDown(self):
+        import plugins
+        plugins.owner_of = self._owner_orig
+        super().tearDown()
+
+    def _gate(self, cid="cass"):
         import chat_loop
         import session_mgr as sm
-        handle = sm.LoopHandle(char_id="cass", scene="chat")
+        handle = sm.LoopHandle(char_id=cid, scene="chat")
         return chat_loop._wake_gate(handle)
 
     async def test_write_denied_without_permit_and_requests(self):
@@ -124,6 +188,16 @@ class WriteGateTest(PermitBase, unittest.IsolatedAsyncioTestCase):
         sh = await gate({"tool_name": "Bash",
                          "tool_input": {"command": "git status"}}, "t", None)
         self.assertEqual(sh, {})
+
+    async def test_non_owner_denied_without_request(self):
+        """computer 互斥：电脑不归他 → 拒且不递申请（递了批了也是串台面）。"""
+        gate = self._gate("default")
+        out = await gate({"tool_name": "Edit",
+                          "tool_input": {"file_path": "/tmp/x.py"}}, "t", None)
+        self.assertEqual(out["hookSpecificOutput"]["permissionDecision"], "deny")
+        self.assertIn("归", out["hookSpecificOutput"]["permissionDecisionReason"])
+        self.assertIsNone(cp.status("default")["pending"])
+        self.assertEqual(self.barks, [])
 
 
 if __name__ == "__main__":

@@ -1488,6 +1488,18 @@ def code_permit_decide(inp: PermitDecideIn, char: Optional[str] = None,
     return r
 
 
+@app.post("/code/permit/revoke")
+def code_permit_revoke(char: Optional[str] = None,
+                       x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
+    """TA 收摊（PR14-d）：撤写批准+关这一场的段账（一场一批、收摊即失效）。
+    幂等——没批准也回 ok，app 的收摊按钮不用先问状态。"""
+    verify_auth(x_auth)
+    import code_permits
+    cid = _resolve_char(char)
+    code_permits.revoke(cid, "app-revoke")
+    return {"ok": True}
+
+
 @app.post("/code/start")
 def code_start(inp: CodeStartIn, char: Optional[str] = None,
                x_auth: Optional[str] = Header(default=None, alias="X-Auth")):

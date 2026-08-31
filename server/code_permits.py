@@ -70,6 +70,12 @@ def active(char_id: str) -> bool:
     return status(char_id)["granted"] is not None
 
 
+def active_seg(char_id: str) -> Optional[str]:
+    """开着的 code 场的段账地址（没批/没开成账=None）。执行层落账和
+    addendum 注入都拿它当「这一场」的身份。"""
+    return (status(char_id)["granted"] or {}).get("seg_id")
+
+
 def request(char_id: str, reason: str = "") -> dict:
     """递一张写权限申请（门在写类工具被拒时替他递）。幂等：已批 → granted；
     已有待批单 → 原样返回不重推 Bark（renewed=False）。"""
@@ -108,21 +114,36 @@ def decide(char_id: str, req_id: str, allow: bool) -> dict:
                     "error": "没有这张待批单（可能已超时自动拒了，让他再申请一次）"}
         d["pending"] = None
         if allow:
-            d["granted"] = {**p, "granted_ts": int(time.time())}
+            rec = {**p, "granted_ts": int(time.time())}
+            try:
+                # 批准即开一场 code 段账（PR14-d：场的边界跟着批准走——一场一批）。
+                # 账开不了不挡批准：少留痕不挡干活。
+                import activity_log
+                rec["seg_id"] = activity_log.open_segment(char_id, "code")
+            except Exception:
+                pass
+            d["granted"] = rec
         _save(char_id, d)
         return {"ok": True, "state": "granted" if allow else "denied"}
 
 
 def revoke(char_id: str, why: str = "") -> None:
-    """收摊即失效（一场一批）：granted/pending 一起清。幂等，失败不抛。"""
+    """收摊即失效（一场一批）：granted/pending 一起清，段账关口。幂等，失败不抛。"""
     try:
         with _LOCK:
             d = _load(char_id)
             if not d.get("granted") and not d.get("pending"):
                 return
+            seg = (d.get("granted") or {}).get("seg_id")
             d["granted"] = None
             d["pending"] = None
             _save(char_id, d)
+        if seg:
+            try:
+                import activity_log
+                activity_log.close_segment(seg, note="写代码")
+            except Exception:
+                pass
         import sys
         print(f"[code_permits] 写批准收摊失效（char={char_id}，{why}）",
               file=sys.stderr)

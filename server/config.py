@@ -109,6 +109,12 @@ STORY_ENGINE = (os.environ.get("STORY_ENGINE", "sdk").strip() or "sdk")
 # 成本必须真机实测（PLAN_cache：上下文最大稀释源是工具 schema）再拨闸。
 READONLY_TOOLS_ENABLED = os.environ.get("READONLY_TOOLS", "0") == "1"
 
+# 写类工具挂载闸（PLAN_sdk S3 PR14-d）：Edit/Write/NotebookEdit/Bash 的 schema
+# 常驻进 sdk 聊天 session。挂载=session 级、放行=轮级带外门（code_permits），
+# 两件事拆开是 08-31 改判的核心。默认关，两段拨闸：先 READONLY_TOOLS 实测
+# schema token，稳了再拨这个。
+WRITE_TOOLS_ENABLED = os.environ.get("WRITE_TOOLS", "0") == "1"
+
 # 聊天引擎（PLAN_sdk S2/PR10）：按角色灰度。
 #   "p"（默认）=一次性 claude -p（今天的生产）；"sdk"=全角色走常驻 session；
 #   "sdk:<id1>,<id2>"=只这些角色走 sdk，其余 p——先切提信感的那个角色，
