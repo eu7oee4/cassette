@@ -169,6 +169,8 @@ class ChatLoopTest(unittest.IsolatedAsyncioTestCase):
         # （tests-reading-prod-state 雷）
         chat_loop._seen_block = lambda cid, since: (None, since)
         chat_loop._ombre_on = lambda cid: False
+        self._acts_orig = chat_loop._acts_block
+        chat_loop._acts_block = lambda cid: None
         self._cseg_orig = chat_loop._code_seg
         chat_loop._code_seg = lambda cid: None
         self._frame_orig = chat_loop._frame_activities
@@ -196,6 +198,7 @@ class ChatLoopTest(unittest.IsolatedAsyncioTestCase):
         chat_loop.CHAT_HARD_TOKENS = self._hard_orig
         chat_loop._frame_activities = self._frame_orig
         chat_loop._code_seg = self._cseg_orig
+        chat_loop._acts_block = self._acts_orig
         if not self.task.done():
             self.handle.stop_reason = "test-teardown"
             self.task.cancel()
@@ -803,16 +806,18 @@ class CodeAddendumInjectTest(ChatLoopTest):
     async def test_injected_once_per_seg(self):
         chat_loop._code_seg = lambda cid: "cass-code-9"
         hist = [_m("user", "早")]
-        t1 = self._turn(hist, "上机吧")
+        t1 = self._turn(hist, "动手吧")
         await self._play(t1, *_text_events("好"), _result("好"))
         sent1 = self.clients[-1].queries[0][0]["message"]["content"][0]["text"]
-        self.assertIn("写权限批下来了", sent1)
-        hist2 = [_m("user", "早"), _m("user", "上机吧", 2000),
+        self.assertIn("写权限批给你了", sent1)
+        self.assertNotIn("上机", sent1)                 # 措辞纪律：能力不是场所
+        self.assertNotIn("切过来", sent1)               # 老路场文本不许混进统一路
+        hist2 = [_m("user", "早"), _m("user", "动手吧", 2000),
                  _m("assistant", "好", 2001)]
         t2 = self._turn(hist2, "继续")
         await self._play(t2, *_text_events("嗯"), _result("嗯"))
         sent2 = self.clients[-1].queries[-1][0]["message"]["content"][0]["text"]
-        self.assertNotIn("写权限批下来了", sent2)
+        self.assertNotIn("写权限批给你了", sent2)
 
 
 class TraceVocabTest(unittest.TestCase):
@@ -1125,8 +1130,10 @@ class FoldTraceTest(_AlTmpBase):
                              ok=True, ext=True, ro=False, turn="chat")
         out = chat_loop._frame_activities(self.HIST, "cass")
         folded = out[1]["text"]
-        self.assertIn("上机干了一场活", folded)
+        self.assertIn("拿着写权限动手干了些活", folded)
         self.assertNotIn("章节志", folded)              # game 的话术不串场
+        self.assertNotIn("上机", folded)                # 措辞纪律：能力不是场所
+        self.assertNotIn("会话", folded)
         self.assertIn("◆ 工具不过桥 ← forge.py:241", folded)
         self.assertIn("Edit：server/x.py", folded)
         idx_cap = folded.index("◆ 工具不过桥")

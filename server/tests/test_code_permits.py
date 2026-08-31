@@ -136,7 +136,8 @@ class SegmentLifecycleTest(PermitBase):
         import chat_loop
         blk = chat_loop._code_addendum_block()
         self.assertIn("◆", blk)
-        self.assertIn("写权限批下来了", blk)
+        self.assertIn("写权限批给你了", blk)
+        self.assertNotIn("上机", blk)                   # 措辞纪律：能力不是场所
 
 
 class WriteGateTest(PermitBase, unittest.IsolatedAsyncioTestCase):

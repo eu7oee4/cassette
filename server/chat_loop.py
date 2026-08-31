@@ -237,7 +237,7 @@ def _wake_gate(handle: session_mgr.LoopHandle):
             if owner != handle.char_id:
                 import characters
                 return _deny(f"电脑现在归「{characters.display_name(owner)}」——"
-                             "这台机器一次只归一个人用，想上机得先让"
+                             "这台机器一次只归一个人用，想动手得先让"
                              f"{config.user_name()}在插件商店把「电脑上的会话」"
                              "转过来。")
             import code_permits
@@ -380,11 +380,12 @@ def build_options(char_id: str, catalog: Optional[list] = None,
                         "房间不在范围里。")
         if config.WRITE_TOOLS_ENABLED:
             tools += sorted(pipeline.WRITE_BUILTINS)
-            segs.append(f"改东西的家伙什（Edit/Write/Bash）也在，但动手前要"
+            segs.append(f"改东西的工具（Edit/Write/Bash）也在，但动手前要"
                         f"{config.user_name()}批一份写权限——没批就用会被门拦下、"
-                        "同时替你把申请递过去；批下来一场有效，收摊即失效。")
+                        "同时替你把申请递过去；批下来的权限干完这阵活就会收回，"
+                        "下次动手再申请就好。")
         else:
-            segs.append("改文件的家伙什这会儿不在手边。")
+            segs.append("改文件的工具这会儿不在手边。")
         system += "\n\n【" + "".join(segs) + "】"
 
     env = {}
@@ -743,22 +744,25 @@ def _frame_activities(history: list[dict], char_id: str) -> list[dict]:
             j += 1
         if j > i:
             if latest:
-                opened = (f"〔{_hm(s)} 你拿到写权限上了机，下面这些是你边干活边说的〕"
+                # 措辞纪律（game 开场无感化立的，code 同理）：工具给他的是能力，
+                # 不是场所——code 这边不说「上机/会话/收摊」，只说权限的来去。
+                opened = (f"〔{_hm(s)} 写权限批下来了，下面这些是你边干活边说的〕"
                           if is_code else
                           f"〔{_hm(s)} 你开了{note}会话，下面这些是你边读边说的〕")
+                closed = (f"〔{_hm(e)} 写权限到这儿交还了〕" if is_code else
+                          f"〔{_hm(e)} 这一场到这儿收了摊〕")
                 out.append({"role": "user", "ts": s, "text": opened})
                 out.extend(history[i:j])
-                out.append({"role": "user", "ts": e,
-                            "text": f"〔{_hm(e)} 这一场到这儿收了摊〕"})
+                out.append({"role": "user", "ts": e, "text": closed})
             else:
-                body = ((f"〔{_hm(s)}–{_hm(e)} 你上机干了一场活——过程细节在"
-                         "记忆里淡下去了〕") if is_code else
+                body = ((f"〔{_hm(s)}–{_hm(e)} 那阵子你拿着写权限动手干了些活"
+                         "——过程细节在记忆里淡下去了〕") if is_code else
                         (f"〔{_hm(s)}–{_hm(e)} 你拿着{note}读了一场——"
                          "细节在记忆里淡下去了，这一场的脉络和感想"
                          "你当时写进了章节志〕"))
                 trace = _fold_trace_lines(iv)
                 if trace:
-                    body += ("\n〔这一场你亲手做过的——记录，不是印象：\n"
+                    body += ("\n〔这段时间你亲手做过的——记录，不是印象：\n"
                              + trace + "〕")
                 out.append({"role": "user", "ts": s, "text": body})
             i = j
@@ -825,20 +829,25 @@ def _acts_block(char_id: str) -> Optional[str]:
 
 def _code_addendum_block() -> str:
     """写批准下来那一轮注入的干活纪律（§5.3：文档侧按需注入，不换 client——
-    旧版靠起点重铸挂 addendum 的唯一职责由这行字接管）。正文=主仓
-    code_addendum.md（与老 code 模式同一份），尾巴接 capsule 收场约定
-    （§5.3 第二类留痕：他自己写，但格式强制带指针）。"""
+    旧版靠起点重铸挂 addendum 的唯一职责由这行字接管）。正文=code_addendum_chat.md
+    （**不复用老路的 code_addendum.md**：那篇通篇是「这个会话/切过来的编码会话」
+    的场文本，注进统一路等于把切场感造回来——这儿不是场，只是工具批下来了；
+    机主没写这份文件就只注 capsule 约定）。尾巴=capsule 收场约定（§5.3 第二类
+    留痕：他自己写，但格式强制带指针）。"""
     body = ""
     try:
-        body = config.code_addendum_path().read_text("utf-8").strip()
+        p = config.BASE_DIR / os.environ.get("CODE_ADDENDUM_CHAT_FILE",
+                                             "code_addendum_chat.md")
+        if p.exists():
+            body = p.read_text("utf-8").strip()
     except Exception:
         pass
-    cap = ("【写权限批下来了，改东西的家伙什现在能用了。收尾的时候，把这场活的"
-           "结论逐条写成「◆ 结论 ← 出处（文件:行）」的样子说出来——◆ 打头、"
-           "一行一条、出处指到能复核的地方。这几行会替这一场留档，别的过程细节"
-           "以后想不起来是正常的。】")
+    cap = (f"【{config.user_name()}把写权限批给你了，改东西的工具现在能用了。"
+           "干完一件事收尾的时候，把结论逐条写成「◆ 结论 ← 出处（文件:行）」的"
+           "样子说出来——◆ 打头、一行一条、出处指到能复核的地方。这些结论会"
+           "留在记录里，过程细节以后想不起来是正常的。】")
     if body:
-        return "【接下来这段是你上机干活的纪律】\n" + body + "\n\n" + cap
+        return "【动手改东西时的纪律】\n" + body + "\n\n" + cap
     return cap
 
 
