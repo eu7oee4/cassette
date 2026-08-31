@@ -169,8 +169,6 @@ class ChatLoopTest(unittest.IsolatedAsyncioTestCase):
         # （tests-reading-prod-state 雷）
         chat_loop._seen_block = lambda cid, since: (None, since)
         chat_loop._ombre_on = lambda cid: False
-        self._acts_orig = chat_loop._acts_block
-        chat_loop._acts_block = lambda cid: None
         self._cseg_orig = chat_loop._code_seg
         chat_loop._code_seg = lambda cid: None
         self._frame_orig = chat_loop._frame_activities
@@ -198,7 +196,6 @@ class ChatLoopTest(unittest.IsolatedAsyncioTestCase):
         chat_loop.CHAT_HARD_TOKENS = self._hard_orig
         chat_loop._frame_activities = self._frame_orig
         chat_loop._code_seg = self._cseg_orig
-        chat_loop._acts_block = self._acts_orig
         if not self.task.done():
             self.handle.stop_reason = "test-teardown"
             self.task.cancel()

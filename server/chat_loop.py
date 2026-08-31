@@ -811,20 +811,10 @@ def _seen_block(char_id: str, since_ts: int) -> tuple[Optional[str], int]:
     return head + "\n" + body, cursor
 
 
-def _acts_block(char_id: str) -> Optional[str]:
-    """开局包的「行为清单」半边（§5.4①，PR10 欠账④补上）：近几天碰过外部世界
-    的行为从行为账**机械读**——「发了信然后说没发过」这类失约只有机械推送能防，
-    不走检索排序（pull 救不了「不知道自己该记得」）。"""
-    import activity_log
-    import pipeline
-    acts = [a for a in activity_log.recent_acts(
-                char_id, since_ts=int(time.time()) - 3 * 86400, limit=10)
-            if a.get("ok", True)]
-    if not acts:
-        return None
-    body = "\n".join(f"[{pipeline.fmt_ts(a['ts'])}] {a.get('text') or a.get('tool')}"
-                     for a in acts)
-    return "【最近几天你亲手做过的事——记录，不是印象】\n" + body
+# 行为清单的渲染（_acts_block）09-01 随注入一起删了——留着一个没人调的渲染器，
+# 下一个人会以为它还是活的口径又接回去（同 external_stored 那次的教训）。
+# 账本身还在（activity/acts-<char>.jsonl，执行层写、activity_log.recent_acts 读），
+# 事后查证和出口判脏都吃它；真要再推给他看，先过上面注入处那条纪律。
 
 
 def _code_addendum_block() -> str:
@@ -1280,13 +1270,23 @@ async def run(handle: session_mgr.LoopHandle, *,
                 if turn.injection_factory is not None:
                     turn.injection = turn.injection_factory()
                 # ---- 注入这一轮（开局引子 + 见闻增量 + 包装文本；都不进账）----
+                # ⚠️ 纪律（09-01 机主拍板）：**别往这儿加新的「二手档案」块。**
+                # 每加一块用「关于他的记录」口吻写的材料（行为清单、状态摘要、
+                # 统计），都是在把本该属于他自己经历的东西，改写成别人递给他的
+                # 卷宗——聊天记忆的信感口径（assistant 轮=记忆、注入文本=档案，
+                # PLAN_sdk）会顺着这条线被一点点吃掉。加这种块＝改产品口径，
+                # 要机主拍板，不是实现细节；实踩就是下面那条行为清单。
+                # 不在此列：包装文本（时间/间隔/叮嘱）和见闻增量——那些是**知觉
+                # 材料**（此刻几点、这期间世界发生了什么），不是关于他的档案。
                 parts: list[str] = []
                 if handle.meta.pop("needs_opening", False):
                     if _ombre_on(handle.char_id):
                         parts.append(OPENING_NUDGE)
-                    ab = _acts_block(handle.char_id)   # 行为清单：机械注入不走检索
-                    if ab:
-                        parts.append(ab)
+                    # 行为清单（§5.4① 开局包第二份材料）09-01 撤掉：账照落（执行
+                    # 层 _ToolTrace），只是不再推给他看。三条理由——08-31 事故
+                    # 实证「痕迹原样在上下文里也不防编造」（她抄着真回执编了假
+                    # 投递）；账的第一客户是门（出口判脏）不是他；「记录，不是
+                    # 印象」那个开头把它钉死在档案一侧，与信感口径顶着。
                 seen, cur = _seen_block(handle.char_id,
                                         int(handle.meta.get("seen_cursor", 0)))
                 if seen:
