@@ -70,6 +70,10 @@ GAME_TURN_EVENT_TIMEOUT = 600       # 泵轮单事件间隔上限（watch 链最
 # 压力轴现在只有「窗口超软阈」一条可用（脏走发送前比对；可折活动段等 PR13）。
 # 硬阈=马拉松对话没间隙也得铸（下个轮尾强铸）——聊天正文**绝不退** harness
 # auto-compact（摘要压缩=信感复发）。门槛三值施工中调（plan 原话）。
+# ⚠️ 08-31：两个阈值现在量的是**真实上下文**（_ctx_from_usage，含系统提示 +
+# 工具 schema + 工具入参返回 + thinking）。此前量的是只数对话文本的估算值，
+# 实测偏小 4.4 倍——这两个数字是在那把偏小的尺子上定的，换尺之后触发频率会
+# 真的上来（那晚 21:24 的 100,139 就已经过软阈了）。真机跑一段再调。
 CHAT_REFORGE_IDLE_SEC = int(os.environ.get("CHAT_REFORGE_IDLE_SEC", "3600"))
 CHAT_SOFT_TOKENS = int(os.environ.get("CHAT_SOFT_TOKENS", "100000"))
 CHAT_HARD_TOKENS = int(os.environ.get("CHAT_HARD_TOKENS", "150000"))
@@ -478,9 +482,16 @@ def _capture_capsules(char_id: str, text: str) -> None:
 
 # ---------- 执行层 tool 落账（S3 补线②：§5.3 四类表一、三类的确定性载体） ----------
 
+# MCP 工具的对象字段（不列工具表：新插件的动作自动认得出）。顺序=从「人一眼
+# 认得出是哪件事」到「至少是个地址」——信认 subject、网页认 title、浏览器认 url。
+_OBJ_KEYS = ("subject", "title", "url", "to", "query", "pattern",
+             "path", "page_id", "uid", "id", "text", "content")
+
+
 def _tool_summary(name: str, inp: dict) -> str:
-    """事件账里的对象摘要：常用工具取关键字段（读取侧聚合要认它），其余压成
-    一行 json。截断交给 append_event（EVENT_TEXT_CAP，第一类「原文级」的量纲）。"""
+    """事件账/行为账里的对象摘要：常用工具取关键字段（读取侧聚合要认它，行为
+    清单要让人一眼认出是哪封信），其余压成一行 json。截断交给写入侧
+    （append_event 的 EVENT_TEXT_CAP＝第一类「原文级」的量纲、append_act 200）。"""
     try:
         if name in ("Read", "Edit", "Write", "NotebookEdit"):
             return str(inp.get("file_path") or inp.get("notebook_path") or "")
@@ -489,17 +500,27 @@ def _tool_summary(name: str, inp: dict) -> str:
             return f"{pat}（{path}）" if path else pat
         if name == "Bash":
             return str(inp.get("command") or "")
+        for k in _OBJ_KEYS:
+            v = inp.get(k)
+            if isinstance(v, str) and v.strip():
+                return v.strip()
         return json.dumps(inp, ensure_ascii=False)
     except Exception:
         return ""
 
 
 class _ToolTrace:
-    """一轮消息流里 tool_use 配上 tool_result → 落一条事件到开着的活动段
-    （时间+轮来源+工具+对象摘要+成败）。确定性落账，不靠他自觉——重铸后
-    transcript 里的工具块物理无法复原（forge 断言拒 tool 块），这本账是干活
-    留痕唯一的家。没开段=不落（账要有地址；轮死在半路配不上对的也不落，
-    账丢一条不影响轮）。每轮一个实例，不跨轮攒状态。"""
+    """一轮消息流里 tool_use 配上 tool_result → 落两本账（时间+轮来源+工具+
+    对象摘要+成败）。确定性落账，不靠他自觉——重铸后 transcript 里的工具块
+    物理无法复原（forge 断言拒 tool 块），这两本账是干活留痕唯一的家。
+    轮死在半路、配不上对的不落（账丢一条不影响轮）。每轮一个实例，不跨轮攒状态。
+
+    - **事件账**（折叠段）：要有地址，没开段就不落——段只在 game/code 场开。
+    - **行为账**（按角色一本）：每轮都落，判线 pipeline.acts_worthy。
+      08-31 事故修：聊天轮从来不开段，而「说寄了信、其实一次工具都没调」那类
+      失约恰恰全发生在聊天轮（那天 21:24/21:26 连编两轮）。原来行为账唯一的
+      写入点在 wake_sdk 的 stored 镜像里，聊天轮零落账＝空白不构成反证，他
+      下一轮会把假信当既成事实往下算。搬到执行层之后，两种轮一个口径。"""
 
     def __init__(self, handle: session_mgr.LoopHandle):
         self.handle = handle
@@ -510,17 +531,22 @@ class _ToolTrace:
 
     def result(self, block_id: str, is_error) -> None:
         name, summary = self.pend.pop(block_id, (None, ""))
-        seg = ((self.handle.meta.get("game_pump") or {}).get("seg_id")
-               or _code_seg(self.handle.char_id))
-        if not seg or not name:
+        if not name:
             return
         import activity_log
         import pipeline
-        activity_log.append_event(
-            seg, "tool", name=name, text=summary, ok=not bool(is_error),
-            ext=pipeline.external_tool(name),
-            ro=name in pipeline.READONLY_BUILTINS,
-            turn=self.handle.meta.get("turn_kind") or "chat")
+        ok = not bool(is_error)
+        turn = self.handle.meta.get("turn_kind") or "chat"
+        seg = ((self.handle.meta.get("game_pump") or {}).get("seg_id")
+               or _code_seg(self.handle.char_id))
+        if seg:
+            activity_log.append_event(
+                seg, "tool", name=name, text=summary, ok=ok,
+                ext=pipeline.external_tool(name),
+                ro=name in pipeline.READONLY_BUILTINS, turn=turn)
+        if pipeline.acts_worthy(name):
+            activity_log.append_act(self.handle.char_id, turn, name, summary,
+                                    ok=ok)
 
 
 async def _turn_events(client, handle: session_mgr.LoopHandle,
@@ -548,6 +574,8 @@ async def _turn_events(client, handle: session_mgr.LoopHandle,
             yield {"type": "stream_event", "event": msg.event}
         elif isinstance(msg, AssistantMessage):
             handle.touch()
+            if getattr(msg, "usage", None):
+                handle.meta["ctx_est"] = _ctx_from_usage(msg.usage)
             for b in msg.content:
                 if isinstance(b, ToolUseBlock):
                     trace.use(b.id, b.name, b.input)
@@ -567,6 +595,25 @@ async def _turn_events(client, handle: session_mgr.LoopHandle,
                    "is_error": msg.is_error, "subtype": msg.subtype,
                    "api_error_status": msg.api_error_status}
             return
+
+
+def _ctx_from_usage(usage) -> int:
+    """一次请求的真实上下文占用＝这条 prompt 的全部 input（命中缓存的 + 新写
+    缓存的 + 没走缓存的）＋ 它产出的 output（下一条 prompt 里就有它）。
+
+    ⚠️ 只许读 **AssistantMessage.usage（逐请求）**——`ResultMessage.usage` 是
+    整轮求和，多请求的轮里 cache_read 会被加好几遍（08-31 实测：一个 5 请求
+    的轮报 cr=472,009，当时真实上下文才 97,002）。
+
+    为什么不再用 estimate_tokens 累加对话文本（08-31 事故复盘）：旧口径只数
+    「铸进去的历史 + 每轮注入 + 每轮回复」，**系统提示、工具 schema（约 3 万）、
+    工具的入参和返回、thinking 一概不数**。实测那晚 21:24 那轮，旧口径 22,891、
+    真实 100,139——差 4.4 倍，于是软阈 100k / 硬阈 150k 事实上永远够不着，
+    「聊天正文绝不退 harness auto-compact」那条防线是虚的。"""
+    u = usage or {}
+    return sum(int(u.get(k) or 0) for k in
+               ("input_tokens", "cache_creation_input_tokens",
+                "cache_read_input_tokens", "output_tokens"))
 
 
 def _usage_scene(kind: str, in_game: bool) -> str:
@@ -870,7 +917,7 @@ async def run(handle: session_mgr.LoopHandle, *,
 
     async def _open_session(history: list[dict], catalog, render_tail=None):
         """render_tail（PR13）：只进铸造输入、不进账的渲染尾巴（近 K 张图回填）。
-        账永远对权威原文；ctx_est 按**折叠后**的铸造输入计（§4 窗口预算口径）。"""
+        账永远对权威原文；ctx_est 这里只落一个占位，真值走 usage（见下）。"""
         nonlocal client, sid, ledger
         await _safe_disconnect(client)
         client = None
@@ -890,6 +937,8 @@ async def run(handle: session_mgr.LoopHandle, *,
         ledger = [{"r": m["role"], "h": _h(m["text"]), "ts": m.get("ts")}
                   for m in history]
         handle.meta["ledger"] = ledger
+        # 铸完到第一条回复之间的占位（够不着任何阈值，方向也安全：刚铸完本就
+        # 不该再铸）。真值由第一条 AssistantMessage.usage 覆盖，见 _ctx_from_usage。
         n_imgs = sum(len(m.get("images") or []) for m in rendered)
         handle.meta["ctx_est"] = (sum(estimate_tokens(m["text"]) for m in rendered)
                                   + n_imgs * GAME_TOKENS_PER_SHOT)
@@ -952,8 +1001,6 @@ async def run(handle: session_mgr.LoopHandle, *,
         if pump.get("seg_id"):
             import activity_log
             activity_log.append_event(pump["seg_id"], "comment", text=body)
-        handle.meta["ctx_est"] = (int(handle.meta.get("ctx_est", 0))
-                                  + estimate_tokens(body))
 
     async def _pump_drain() -> bool:
         """吃完一个泵轮（口径同 game_loop._drain_turn：分段投递、错误结果留痕
@@ -973,6 +1020,8 @@ async def run(handle: session_mgr.LoopHandle, *,
                 return False
             if isinstance(msg, AssistantMessage):
                 handle.touch()
+                if getattr(msg, "usage", None):
+                    handle.meta["ctx_est"] = _ctx_from_usage(msg.usage)
                 for block in msg.content:
                     if isinstance(block, TextBlock) and block.text.strip():
                         if pending is not None:
@@ -1069,10 +1118,6 @@ async def run(handle: session_mgr.LoopHandle, *,
             print(f"[chat_loop] 泵轮异常（按死处理）: {e}", file=sys.stderr)
         finally:
             handle.meta.pop("turn_kind", None)
-            d = int(handle.meta.get("shots", 0)) - s0
-            if d > 0:
-                handle.meta["ctx_est"] = (int(handle.meta.get("ctx_est", 0))
-                                          + d * GAME_TOKENS_PER_SHOT)
         if ok:
             pump["strikes"] = 0
         else:
@@ -1287,10 +1332,6 @@ async def run(handle: session_mgr.LoopHandle, *,
                                            "ts": int(time.time())})
                             _persist_ledger(handle.char_id, sid, ledger)
                             _capture_capsules(handle.char_id, delivered)
-                        handle.meta["ctx_est"] = (int(handle.meta.get("ctx_est", 0))
-                                                  + estimate_tokens(injection)
-                                                  + estimate_tokens(
-                                                      captured.get("raw") or ""))
                         ok = True
                 elif captured.get("reply"):
                     ledger.append({"r": "user", "h": _h(turn.new_msg["text"]),
@@ -1299,9 +1340,6 @@ async def run(handle: session_mgr.LoopHandle, *,
                                    "ts": int(time.time())})
                     _persist_ledger(handle.char_id, sid, ledger)
                     _capture_capsules(handle.char_id, captured["reply"])
-                    handle.meta["ctx_est"] = (int(handle.meta.get("ctx_est", 0))
-                                              + estimate_tokens(injection)
-                                              + estimate_tokens(captured["reply"]))
                     ok = True
                 if (ok and not handle.meta.get("game_pump")
                         and int(handle.meta.get("ctx_est", 0)) > CHAT_HARD_TOKENS):

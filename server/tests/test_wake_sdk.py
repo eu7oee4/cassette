@@ -194,9 +194,10 @@ class FinishWakeTurnTest(WakeStateBase):
         log = self.wake_log()[-1]
         self.assertEqual(log["acts"][0]["tool"], "mail_read")
 
-    def test_acts_mirror_vocabulary(self):
-        """S3 补线①：行为账判线=碰没碰外部世界（external_stored）——发信要留痕、
-        hold 不留。借 NON_MEMORY_TOOLS 那版后果是反的（发过信不留痕）。"""
+    def test_no_acts_mirror_from_stored(self):
+        """08-31：行为账只有执行层一个写入点。醒来轮也走常驻聊天 session，
+        这儿再镜像一遍就是记两遍；而且 stored 是「他说他做了什么」，拿自述
+        当留痕判据正是事故里靠不住的那一边。"""
         import activity_log
         orig = activity_log.ACT_DIR
         activity_log.ACT_DIR = self.tmp / "activity"
@@ -205,8 +206,9 @@ class FinishWakeTurnTest(WakeStateBase):
                       {"tool": "hold", "ok": True, "text": "一条记忆"}]
             wake_sdk.finish_wake_turn(self.cid, "auto", False, 5000,
                                       "〔回了封信〕", stored)
-            acts = activity_log.recent_acts(self.cid)
-            self.assertEqual([a["tool"] for a in acts], ["mail"])
+            self.assertEqual(activity_log.recent_acts(self.cid), [])
+            # 心流日志那本（自述）照旧留着
+            self.assertEqual(self.wake_log()[-1]["acts"][0]["tool"], "mail")
         finally:
             activity_log.ACT_DIR = orig
 

@@ -170,19 +170,13 @@ def finish_wake_turn(cid: str, trigger: str, force: bool, started_ts: int,
     # 的工具调用（时间+轮来源在条目上，工具+对象摘要在这），行为留痕不靠他自觉。
     acts = [{"tool": s.get("tool"), "ok": bool(s.get("ok", True)),
              "text": (s.get("text") or "")[:80]} for s in (stored or [])]
-    # PR13 归一：碰外部世界的行为同时落活动行为账（开局「行为清单」的机械来源）。
-    # 判线 §5.2：对外部对象的读写都留；纯内部记忆操作（hold/feel 等 Ombre 侧）不留
-    # ——人不记得自己回忆过什么。词表=pipeline.external_stored（S3 补线①：显式
-    # 判线，别再借 NON_MEMORY_TOOLS——那管的是灰字过滤，后果曾是反的：开过网页
-    # 留痕、发过信不留痕）。mail_read 等不进 stored 的读操作，真机见缺口再从执行层补。
-    try:
-        import activity_log
-        for a in acts:
-            if pipeline.external_stored(a.get("tool")):
-                activity_log.append_act(cid, "wake", a.get("tool") or "?",
-                                        a.get("text") or "", ok=a.get("ok", True))
-    except Exception as e:
-        logerr(f"行为账镜像失败: {e}")
+    # 行为账的镜像原来在这儿（PR13，stored 标签级 external_stored 判线）——08-31
+    # 撤掉，改由执行层（chat_loop._ToolTrace）统一落，判线换成工具名级
+    # pipeline.acts_worthy。撤的两个理由：
+    # ① 记两遍：醒来轮现在也走常驻聊天 session，同一次调用两条路都会落账。
+    # ② 覆盖是反的：stored 是从回复文本的标记解析出来的「他说他做了什么」，
+    #    正是事故里靠不住的那一边；mail_read 这类不进 stored 的调用一直是漏的。
+    # wake_log 的 acts 字段（心流日志那本）保持原样，它记的是这一轮的自述。
     mem_stored = [s for s in (stored or [])
                   if s.get("tool") not in pipeline.NON_MEMORY_TOOLS]
     base: dict = {"ts": started_ts, "time": pipeline.now_str(), "source": "wake",

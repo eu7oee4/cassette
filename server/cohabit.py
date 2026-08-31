@@ -184,7 +184,7 @@ def cohabit_prompt(cid: str, reasons: list[dict], settings: dict) -> str:
 
     return pipeline.SplitPrompt(stable, f"""【这是一次你自己的醒来，不是{u}发来的消息】
 现在是 {pipeline.now_str()}。
-{pipeline.pronoun_hint()}
+{pipeline.pronoun_hint(second_person=False)}
 {_WORLDVIEW}
 
 {_where_block(cid, ev_limit=0)}

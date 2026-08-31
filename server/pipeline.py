@@ -279,9 +279,25 @@ def split_next_raw(raw: str) -> tuple[str, str]:
     return parts[0].strip(), (parts[1].strip()[:NEXT_TODO_MAX] if len(parts) > 1 else "")
 
 
-def pronoun_hint() -> str:
-    """人称代词提示（聊天/醒来共用注入）：不给的话模型会自己猜用户性别，猜错很伤。"""
-    return f"【提到{config.user_name()}时，人称代词一律用「{config.user_pronoun()}」——写记忆、内心独白也一样。】"
+def pronoun_hint(second_person: bool = True) -> str:
+    """人称提示（聊天/醒来/-p 共用注入）。两个轴，别混：
+
+    - **代词性别**（她/他/TA）：不给的话模型会自己猜用户性别，猜错很伤。
+    - **人称视角**（second_person，08-31 加）：说出去的话一律第二人称。判据跟
+      醒来契约的〔〕边界是同一条——〔〕外＝送到 TA 眼前的话，〔〕内＝只留档的
+      独白。实踩：08-31 事故那轮开口就是「**她**点头了，我发。」——在对着 TA
+      说话的轮里滑进了旁白口吻，而旁白里「我发」是句舞台指示、不是承诺，紧接着
+      就编了一次没发生的投递。
+
+    second_person=False 给同居世界（cohabit）：那条路上他可能在跟别人说话、或者
+    在描述屋里的事，第三人称说 TA 是对的（机主 08-31 拍板：那条不管）。"""
+    u, p = config.user_name(), config.user_pronoun()
+    head = f"【提到{u}时，人称代词一律用「{p}」——写记忆、内心独白也一样。"
+    if not second_person:
+        return head + "】"
+    return (head + f"\n但**说给{u}听的每一句，都用「你」**：会送到{u}眼前的字就是"
+            f"当面说的话，里面出现「{p}」，等于当着{u}的面把{u}说成第三个人。\n"
+            "第三人称只属于两个地方——**存进记忆的**，和**〔〕包起来的心里话**。】")
 
 
 def _chat_next_hint() -> str:
@@ -1066,7 +1082,12 @@ INTERNAL_STORED = {"hold", "feel", "grow", "trace", "i"}
 
 
 def external_stored(tag: Optional[str]) -> bool:
-    """stored 标签级判线：这条产物是不是「碰了外部世界」的动作（行为账镜像用）。"""
+    """stored 标签级判线：这条产物是不是「碰了外部世界」的动作。
+
+    ⚠️ 08-31 起没有生产调用点：行为账搬到执行层之后判线换成了工具名级的
+    acts_worthy（stored 是从回复文本解析的「他说他做了什么」，用它当留痕判据
+    等于让自述给自己作证）。留着只为 stored 标签表本身还有别处读；**别再拿它
+    当行为/经历留痕的判线**。"""
     return bool(tag) and tag not in INTERNAL_STORED
 
 
@@ -1091,6 +1112,15 @@ READONLY_BUILTINS = {"Read", "Grep", "Glob"}
 # ——命令级读写分类是走不稳的路（真机撞见「只读 Bash」的刚需再从执行层补），
 # 看东西有 Read/Grep/Glob。
 WRITE_BUILTINS = {"Edit", "Write", "NotebookEdit", "Bash"}
+
+
+def acts_worthy(name: str) -> bool:
+    """行为账判线（执行层落账用，08-31 事故修）：碰了外部世界、且不是本地文件
+    工具。本地读写归折叠段的事件账（那儿有 ro 读写分界、有 capsule 收场白），
+    行为清单是开局机械推送的 limit=10 短表——被「翻了 30 个文件」刷掉就废了。"""
+    return (external_tool(name)
+            and name not in READONLY_BUILTINS and name not in WRITE_BUILTINS)
+
 
 # 只读常驻的安全面（§5.3 机主 08-31 拍板：限根目录+黑名单，不做全盘放行）。
 # 「只读 ≠ 无害」：聊天上下文里的注入面（邮件/论坛/网页）可以指使他去读任意

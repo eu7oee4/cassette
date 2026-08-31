@@ -947,6 +947,121 @@ class ToolTraceTest(_AlTmpBase):
         tr = chat_loop._ToolTrace(handle)
         tr.result("never-seen", False)
         self.assertEqual(self.al.read_events("cass-game-1000"), [])
+        self.assertEqual(self.al.recent_acts("cass"), [])
+
+
+class PronounHintTest(unittest.TestCase):
+    """人称提示两个轴：代词性别常在；第二人称视角聊天/醒来要、同居世界不要。"""
+
+    def test_second_person_on_by_default(self):
+        import pipeline
+        h = pipeline.pronoun_hint()
+        self.assertIn("人称代词一律用", h)
+        self.assertIn("都用「你」", h)
+        self.assertIn("〔〕包起来的心里话", h)
+
+    def test_cohabit_keeps_pronoun_only(self):
+        import pipeline
+        h = pipeline.pronoun_hint(second_person=False)
+        self.assertIn("人称代词一律用", h)
+        self.assertNotIn("都用「你」", h)
+        self.assertTrue(h.endswith("】"))
+
+    def test_cohabit_path_opts_out(self):
+        import inspect
+        import cohabit
+        self.assertIn("pronoun_hint(second_person=False)",
+                      inspect.getsource(cohabit))
+
+
+class CtxFromUsageTest(unittest.IsolatedAsyncioTestCase):
+    """08-31：窗口压力量真实上下文，不再拿 estimate_tokens 数对话文本
+    （旧口径漏系统提示/工具 schema/工具入参返回/thinking，实测偏小 4.4 倍）。"""
+
+    def test_sums_the_whole_prompt_plus_output(self):
+        # 事故那轮的真实 usage（21:24:42）
+        self.assertEqual(chat_loop._ctx_from_usage(
+            {"input_tokens": 2, "cache_creation_input_tokens": 2506,
+             "cache_read_input_tokens": 97633, "output_tokens": 877}), 101018)
+
+    def test_missing_fields_and_none(self):
+        self.assertEqual(chat_loop._ctx_from_usage(None), 0)
+        self.assertEqual(chat_loop._ctx_from_usage({"output_tokens": 5}), 5)
+
+    async def test_tracks_last_request_not_the_sum(self):
+        """多请求的轮：取最后一条 AssistantMessage（＝当前 prompt 的真身），
+        绝不累加——ResultMessage.usage 是整轮求和，加起来会虚高好几倍。"""
+        from claude_agent_sdk.types import AssistantMessage
+        handle = sm.LoopHandle(char_id="cass", scene="chat")
+        client = FakeClient(options=None)
+        client.feed(
+            AssistantMessage(content=[], model="m",
+                             usage={"cache_read_input_tokens": 90000,
+                                    "cache_creation_input_tokens": 800,
+                                    "output_tokens": 60}),
+            AssistantMessage(content=[], model="m",
+                             usage={"cache_read_input_tokens": 90860,
+                                    "cache_creation_input_tokens": 1500,
+                                    "output_tokens": 200}),
+            _result("好了"))
+        async for _ in chat_loop._turn_events(client, handle, {}):
+            pass
+        self.assertEqual(handle.meta["ctx_est"], 92560)   # 末条，不是 183,420
+
+
+class ActsFromExecutionTest(_AlTmpBase):
+    """08-31 事故修：行为账从执行层落，不再从 stored 镜像。事故=聊天轮连着
+    两轮说「信发出去了」「记忆存了」，实际一次工具都没调；而聊天轮不开段、
+    行为账当时唯一的写入点在醒来轮，空白不构成反证。"""
+
+    def _trace(self, kind="chat"):
+        handle = sm.LoopHandle(char_id="cass", scene="chat")
+        handle.meta["turn_kind"] = kind
+        return chat_loop._ToolTrace(handle)
+
+    def test_chat_turn_lands_without_segment(self):
+        """聊天轮没有开着的段——事件账落不下，行为账照落。"""
+        tr = self._trace()
+        tr.use("t1", "mcp__beacon__write_letter",
+               {"to": "24c8ed", "subject": "那段距离", "body": "长正文" * 50})
+        tr.result("t1", False)
+        acts = self.al.recent_acts("cass")
+        self.assertEqual([a["tool"] for a in acts], ["mcp__beacon__write_letter"])
+        self.assertEqual(acts[0]["text"], "那段距离")   # subject 优先于 body
+        self.assertEqual(acts[0]["scene"], "chat")
+        self.assertTrue(acts[0]["ok"])
+
+    def test_failed_call_recorded_not_ok(self):
+        tr = self._trace()
+        tr.use("t1", "mcp__browser__browser_navigate", {"url": "https://x.dev"})
+        tr.result("t1", True)
+        act = self.al.recent_acts("cass")[0]
+        self.assertEqual(act["text"], "https://x.dev")
+        self.assertFalse(act["ok"])
+
+    def test_internal_and_file_tools_stay_out(self):
+        """判线 acts_worthy：Ombre/游戏点按=内部；本地文件工具归段账——
+        清单是 limit=10 的短表，被翻文件刷掉就废了。"""
+        tr = self._trace()
+        for i, (name, inp) in enumerate([
+                ("mcp__ombre-brain__hold", {"title": "一条记忆"}),
+                ("mcp__game__game_tap", {"x": 1}),
+                ("mcp__skills__skill_read", {"name": "jobhunt"}),
+                ("Read", {"file_path": "server/app.py"}),
+                ("Bash", {"command": "pytest"})]):
+            tr.use(f"t{i}", name, inp)
+            tr.result(f"t{i}", False)
+        self.assertEqual(self.al.recent_acts("cass"), [])
+
+    def test_wake_turn_same_ledger(self):
+        """两种轮一个口径（醒来轮也走常驻 session，不再靠 wake_sdk 镜像）。"""
+        tr = self._trace(kind="wake")
+        tr.use("t1", "mcp__mail__mail_read", {"uid": "1786430786"})
+        tr.result("t1", False)
+        act = self.al.recent_acts("cass")[0]
+        self.assertEqual(act["scene"], "wake")
+        self.assertEqual(act["text"], "1786430786")
+
 
 
 class FoldTraceTest(_AlTmpBase):
