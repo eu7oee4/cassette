@@ -770,16 +770,6 @@ def _frame_activities(history: list[dict], char_id: str) -> list[dict]:
     return out
 
 
-def _foldable_max_end(char_id: str, since_ts: int) -> int:
-    """窗口相关区间里「非最近一场」的最大结束时刻——压力轴「有可折活动段」的
-    判据素材（和 _frame_activities 的折叠范围同一口径）。"""
-    import activity_log
-    ivs = activity_log.read_intervals(char_id, since_ts=since_ts)
-    if len(ivs) < 2:
-        return 0
-    return max(int(iv.get("end", 0)) for iv in ivs[:-1])
-
-
 # ---------- 见闻（记忆 vs 见闻轴的见闻侧，§5.2）----------
 
 def _ombre_on(char_id: str) -> bool:
@@ -854,14 +844,10 @@ def _stale_depth(handle: session_mgr.LoopHandle) -> Optional[int]:
     return max(STALE_TOLERANCE, n + 2)
 
 
-def _fold_pending(handle: session_mgr.LoopHandle) -> bool:
-    """压力轴「有可折活动段」（§4）：窗里还有上次渲染之后新出现的可折段。"""
-    led = handle.meta.get("ledger") or []
-    first_ts = next((int(e.get("ts") or 0) for e in led if e.get("ts")), 0)
-    if not first_ts:
-        return False
-    return (_foldable_max_end(handle.char_id, first_ts - 60)
-            > int(handle.meta.get("folded_upto", 0) or 0))
+# 压力轴「有可折活动段」（_fold_pending/_foldable_max_end/folded_upto）09-01 删了
+# ——PLAN_sdk §4 08-31 就定了删，代码欠到今天。它只是「省 token」的代理指标，
+# 而 token 软硬阈直接管这件事；留着只会让重铸早来一点，不产生新能力。
+# 少一条判据 = 少一处能写错的地方。
 
 
 def _game_shot_tail(seg_id: str) -> Optional[list[dict]]:
@@ -941,11 +927,8 @@ async def run(handle: session_mgr.LoopHandle, *,
         n_imgs = sum(len(m.get("images") or []) for m in rendered)
         handle.meta["ctx_est"] = (sum(estimate_tokens(m["text"]) for m in rendered)
                                   + n_imgs * GAME_TOKENS_PER_SHOT)
-        first_ts = next((int(m.get("ts") or 0) for m in history), 0)
-        handle.meta["folded_upto"] = (_foldable_max_end(handle.char_id, first_ts - 60)
-                                      if first_ts else 0)
         handle.meta["seen_cursor"] = 0        # 开局重发新鲜见闻快照
-        handle.meta["needs_opening"] = True   # 下一轮带开局引子（breath+行为清单）
+        handle.meta["needs_opening"] = True   # 下一轮带开局引子（breath）
         handle.last_reopen = time.time()
         client = c
 
@@ -1218,12 +1201,12 @@ async def run(handle: session_mgr.LoopHandle, *,
                 if pump_on:
                     await _pump_tick()   # 队列空一拍 → 目光落回屏幕
                     continue
-                # 轮间隙看一眼：静默 ≥1h ×（窗口超软阈 ∨ 有可折活动段）→ 巩固+重铸
-                # （§4 chat 节奏；铸完 ctx_est 回到纯对话体量，自然不会连环触发）
+                # 轮间隙看一眼：静默 ≥1h × 窗口超软阈 → 巩固+重铸（§4 chat 节奏；
+                # 铸完 ctx_est 回到纯对话体量，自然不会连环触发）。09-01 去掉了
+                # 「∨ 有可折活动段」那一支，见上面 _fold_pending 那条注释。
                 if (client is not None
                         and time.time() - handle.last_activity >= CHAT_REFORGE_IDLE_SEC
-                        and (int(handle.meta.get("ctx_est", 0)) > CHAT_SOFT_TOKENS
-                             or _fold_pending(handle))):
+                        and int(handle.meta.get("ctx_est", 0)) > CHAT_SOFT_TOKENS):
                     try:
                         await _consolidate_and_reforge("静默间隙+压力",
                                                        handle.meta.get("catalog"))

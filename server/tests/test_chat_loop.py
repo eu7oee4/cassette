@@ -477,12 +477,7 @@ class ActivityFrameTest(unittest.TestCase):
         self.assertEqual(out, chat_loop._frame_activities(hist, "cass"))  # 确定性
         self.assertEqual(len(hist), 5)                     # 输入不被改写
 
-    def test_foldable_max_end(self):
-        self.assertEqual(chat_loop._foldable_max_end("cass", 0), 0)
-        self.al.append_interval("cass", "game", 1500, 1800)
-        self.assertEqual(chat_loop._foldable_max_end("cass", 0), 0)   # 只有最近一场
-        self.al.append_interval("cass", "game", 3000, 3500)
-        self.assertEqual(chat_loop._foldable_max_end("cass", 0), 1800)
+    # test_foldable_max_end 09-01 随「有可折活动段」那条压力判据一起删。
 
 
 class GamePumpGateTest(unittest.IsolatedAsyncioTestCase):

@@ -1349,12 +1349,19 @@ PR8 发送前比对免费吃掉（PR11 实证）。**
   截 ~2k）、`close_segment(seg,note)`（写现有区间行，chat 框零改动）。保留
   30 天清（口径同 uploads），章节志永存；缺原文的老段渲染器无条件走折叠
   （§4）。目录进 ops_check（600/700+备份纪律，§2.5 扩面）。wake 的 acts
-  （PR12 wake_log 扩展字段）改为同时落账本；**开局包「行为清单」半边接通**
-  （PR10 欠账④）：开局注入从账本机械读近期世界效应事件，不走检索。
+  （PR12 wake_log 扩展字段）改为同时落账本；~~**开局包「行为清单」半边接通**
+  （PR10 欠账④）：开局注入从账本机械读近期世界效应事件，不走检索。~~
+  **09-01 撤回**（同上一条的形状：口径已改、施工记录没跟着划）：注入撤掉、
+  `_acts_block` 渲染器删，账照落照读——理由三条见 §5.4① 那段。
 - **折叠接通（chat 压力轴补全）**：铸造输入变换（不动账、不动权威）——已结束
   且非最近一场的区间，区间内消息连段替换成两行框+该场章节志标题/摘要；
-  ctx_est 按折叠后计。压力轴「有可折活动段」触发接通（meta.folded_upto_ts
-  游标判「窗里还有没折的旧段」）。
+  ctx_est 按折叠后计。~~压力轴「有可折活动段」触发接通（meta.folded_upto_ts
+  游标判「窗里还有没折的旧段」）。~~
+  **09-01 已删（代码一并清）**：08-31 §4 拍板删这条判据（只是省 token 的代理
+  指标，token 阈值直接管），但这条 PR13 施工记录没跟着划，代码里
+  `_fold_pending`/`_foldable_max_end`/`folded_upto` 就一直立着没人敢动
+  ——**「文档说删了、施工记录说接通了」两句并排立着，代码欠账就是这么欠出来的。**
+  静默重铸条件现在只剩「静默 ≥1h && ctx_est > 软阈」。
 - **校验矩阵（forge 硬化，⑥）**：render 前断言——首事件 user；合并后严格
   交替、无空文本；**永不铸 thinking（出现即失败）**；tool_use/tool_result
   现阶段禁止出现（我们不铸 tool 对；Tool Primer 记为真机撞见工具变形时的
@@ -1414,8 +1421,9 @@ PR8 发送前比对免费吃掉（PR11 实证）。**
   `_wake_gate` 泛化门（game_* 只认泵状态，三种轮一致）、N 张段内重铸
   （`_game_reforge`：巩固→镜像+`_game_shot_tail` K 图回填→resume，失败重试
   一次再败关 session 惰性重起）、折叠接通（`_frame_activities` 旧段一行框、
-  最近一场保原文；`_fold_pending` 进压力轴）、开局行为清单（`_acts_block`
-  机械注入）、stale 容忍=未拉走 outbox 条数上浮（`_stale_depth`）、usage
+  最近一场保原文；~~`_fold_pending` 进压力轴~~ **09-01 删**）、
+  ~~开局行为清单（`_acts_block` 机械注入）~~ **09-01 撤**、
+  stale 容忍=未拉走 outbox 条数上浮（`_stale_depth`）、usage
   scene 泵标（`_usage_scene`）、loop 退出 finally 兜底放下游戏；**game_loop**
   `build_game_server(unified=, shot_sink=)`（game_end 换「放下游戏」措辞、
   截图落账本）；**app** unified 分派（sdk 灰度且没熄火才走泵，否则退独立
