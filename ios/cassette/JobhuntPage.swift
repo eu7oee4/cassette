@@ -163,7 +163,7 @@ struct JobhuntPage: View {
                 if let score = jd.score {
                     Text(String(format: "%.0f", score))
                         .font(.subheadline.monospacedDigit().bold())
-                        .foregroundStyle(score >= 70 ? Color.theme : .secondary)
+                        .foregroundStyle(score >= 70 ? Color.userAccent : .secondary)
                 }
             }
             if let head = jd.text_head, !head.isEmpty {
@@ -178,7 +178,7 @@ struct JobhuntPage: View {
                 // 回信角标：这条对应的投递有 HR 回音
                 if apps.contains(where: { $0.jd_id == jd.id && ($0.has_reply ?? false) }) {
                     Label("有回信", systemImage: "arrowshape.turn.up.left.fill")
-                        .foregroundStyle(Color.theme)
+                        .foregroundStyle(Color.userAccent)
                 }
             }
             .font(.caption)
@@ -268,7 +268,7 @@ struct JobhuntJdDetail: View {
                                     if busy { ProgressView() }
                                     else {
                                         Text(jd.status == "archived" ? "恢复（重新考虑这个岗）" : "标「不投」")
-                                            .foregroundStyle(jd.status == "archived" ? Color.theme : .red)
+                                            .foregroundStyle(jd.status == "archived" ? Color.userAccent : .red)
                                     }
                                     Spacer()
                                 }
@@ -313,7 +313,7 @@ struct JobhuntJdDetail: View {
             if app.has_reply ?? false {
                 VStack(alignment: .leading, spacing: 2) {
                     Label("HR 回信 \(app.reply_at ?? "")", systemImage: "arrowshape.turn.up.left.fill")
-                        .font(.caption.bold()).foregroundStyle(Color.theme)
+                        .font(.caption.bold()).foregroundStyle(Color.userAccent)
                     if let snip = app.reply_snippet, !snip.isEmpty {
                         Text(snip).font(.caption).foregroundStyle(.secondary).lineLimit(3)
                     }

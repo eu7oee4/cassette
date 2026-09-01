@@ -6,6 +6,9 @@ import Highlightr
 /// 存储层始终保留原文，只在这里渲染。
 struct MarkdownMessageView: View {
     let text: String
+    /// 染色底（机主气泡/染色卡）上传反色字进来；nil＝灰底/白卡，走系统默认。
+    /// 染色底上链接也用这个色（玫瑰底上玫瑰链接会隐形），靠下划线区分。
+    var textColor: Color? = nil
 
     var body: some View {
         Markdown(Self.cjkEmphasisFixed(text))
@@ -38,24 +41,28 @@ struct MarkdownMessageView: View {
     }
 
     private var theme: MarkdownUI.Theme {
-        MarkdownUI.Theme()
+        let base = textColor ?? Color.primary
+        return MarkdownUI.Theme()
             .text {
-                ForegroundColor(.primary)
+                ForegroundColor(base)
             }
             .link {
-                ForegroundColor(.accentColor)
+                // 链接色 = 机主人物色（§3.1/§1.4）；随 app tint（accentColor）走。
+                ForegroundColor(textColor ?? .accentColor)
                 UnderlineStyle(.single)
             }
             .emphasis {
                 // *斜体* 用来标"动作/状态"（旁白），和对白区分：中文没斜体字形，改用淡色；
                 // 英文顺带保留斜体。
                 FontStyle(.italic)
-                ForegroundColor(Color.primary.opacity(0.5))
+                ForegroundColor(base.opacity(0.5))
             }
             .code {
+                // 行内码：炭黑实底 + 浅字，固定不变——不随深浅模式、不随人物色（§3.1）。
                 FontFamilyVariant(.monospaced)
                 FontSize(.em(0.88))
-                BackgroundColor(Color(.systemGray4))
+                ForegroundColor(Color(hex: 0xE6E6E6))
+                BackgroundColor(Color(hex: 0x2E2F33))
             }
             .codeBlock { configuration in
                 CodeBlockView(configuration: configuration)
@@ -74,7 +81,7 @@ struct MarkdownMessageView: View {
                             .fill(Color.gray.opacity(0.5))
                             .frame(width: 3)
                     }
-                    .markdownTextStyle { ForegroundColor(Color.primary.opacity(0.75)) }
+                    .markdownTextStyle { ForegroundColor(base.opacity(0.75)) }
             }
             .table { configuration in
                 // 宽表格能左右滑，不被裁掉。
@@ -117,7 +124,7 @@ private struct CodeBlockView: View {
             }
         }
         .background(Color(red: 0.16, green: 0.17, blue: 0.21))   // atom-one-dark ≈ #282c34
-        .clipShape(RoundedRectangle(cornerRadius: 10))
+        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))   // 圆角全局对准气泡（§6）
         .markdownMargin(top: 8, bottom: 8)
     }
 

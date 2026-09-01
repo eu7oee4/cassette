@@ -190,7 +190,7 @@ struct GamePage: View {
                 Text(note)
                     .font(.footnote).foregroundStyle(.white)
                     .padding(.horizontal, 14).padding(.vertical, 8)
-                    .background(Capsule().fill(Color.theme))
+                    .background(Capsule().fill(Color.userAccent))
                     .padding(.bottom, 12)
             }
         }
@@ -336,7 +336,7 @@ struct GamePage: View {
             HStack(spacing: 10) {
                 Image(systemName: effectivePreset == p.name
                       ? "largecircle.fill.circle" : "circle")
-                    .foregroundStyle(effectivePreset == p.name ? Color.theme : .secondary)
+                    .foregroundStyle(effectivePreset == p.name ? Color.userAccent : .secondary)
                 Text(p.name).foregroundStyle(.primary)
                 Spacer()
                 Text("\(p.names.count) 个任务")
@@ -373,7 +373,7 @@ struct GamePage: View {
             HStack(spacing: 10) {
                 Image(systemName: selected.contains(t.name)
                       ? "checkmark.circle.fill" : "circle")
-                    .foregroundStyle(selected.contains(t.name) ? Color.theme : .secondary)
+                    .foregroundStyle(selected.contains(t.name) ? Color.userAccent : .secondary)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(t.name).foregroundStyle(.primary)
                     if let doc = t.doc, !doc.isEmpty {
@@ -388,7 +388,7 @@ struct GamePage: View {
                     } label: {
                         Image(systemName: expanded.contains(t.name)
                               ? "gearshape.fill" : "gearshape")
-                            .foregroundStyle(hasCustomChoices(t) ? Color.theme : .secondary)
+                            .foregroundStyle(hasCustomChoices(t) ? Color.userAccent : .secondary)
                     }
                     .buttonStyle(.plain)
                 }
@@ -423,7 +423,7 @@ struct GamePage: View {
                         Text(opt.name).font(.caption).foregroundStyle(.primary)
                         Spacer()
                         Text(currentChoice(task: task, option: opt) ?? "（默认）")
-                            .font(.caption).foregroundStyle(Color.theme)
+                            .font(.caption).foregroundStyle(Color.userAccent)
                         Image(systemName: "chevron.up.chevron.down")
                             .font(.caption2).foregroundStyle(.secondary)
                     }

@@ -168,10 +168,10 @@ struct MemoryPage: View {
             } label: {
                 Label(sort.label, systemImage: sort.icon)
                     .font(.footnote.weight(.medium))
-                    .foregroundStyle(Color.theme)
+                    .foregroundStyle(Color.userAccent)
                     .padding(.horizontal, 10)
                     .padding(.vertical, 7)
-                    .background(Color.theme.opacity(0.12), in: Capsule())
+                    .background(Color.userAccent.opacity(0.12), in: Capsule())
             }
             .buttonStyle(.plain)
             TextField("搜索记忆", text: $query)
@@ -219,14 +219,14 @@ struct MemoryPage: View {
                             Button(role: .destructive) {
                                 Task { try? await service.archiveMemory(id: m.id); await reload() }
                             } label: { Label("删除", systemImage: "trash") }
-                            .tint(.red)   // 全 app 的 .tint(Color.theme) 会盖掉破坏性默认红，显式压回红
+                            .tint(.red)   // 全 app 的 .tint(Color.userAccent) 会盖掉破坏性默认红，显式压回红
                         } else {
                             // 删除：真正让它从列表/搜索/回忆里消失（红键）。名字叫「删除」跟
                             // 「自动归档」栏区分开——底层仍是 delete-to-archive，Ombre 侧可 restore。
                             Button(role: .destructive) {
                                 Task { try? await service.archiveMemory(id: m.id); await reload() }
                             } label: { Label("删除", systemImage: "trash") }
-                            .tint(.red)   // 全 app 的 .tint(Color.theme) 会盖掉破坏性默认红，显式压回红
+                            .tint(.red)   // 全 app 的 .tint(Color.userAccent) 会盖掉破坏性默认红，显式压回红
                             // 遗忘/取消遗忘：toggle，按钮文案本身就是当前状态（灰键，非破坏性）。
                             Button {
                                 Task { try? await service.forgetMemory(id: m.id); await reload() }
@@ -295,7 +295,7 @@ private struct MemoryRow: View {
         VStack(alignment: .leading, spacing: 5) {
             HStack(spacing: 6) {
                 if item.pinned == true {
-                    Image(systemName: "pin.fill").font(.caption2).foregroundStyle(Color.theme)
+                    Image(systemName: "pin.fill").font(.caption2).foregroundStyle(Color.userAccent)
                 }
                 Text(item.title).font(.callout.weight(.medium)).lineLimit(1)
                 if item.dont_surface == true {
@@ -348,7 +348,7 @@ private struct MemoryDetailPage: View {
                     VStack(alignment: .leading, spacing: 12) {
                         HStack(spacing: 12) {
                             if d.metadata.pinned == true {
-                                Label("置顶", systemImage: "pin.fill").foregroundStyle(Color.theme)
+                                Label("置顶", systemImage: "pin.fill").foregroundStyle(Color.userAccent)
                             }
                             if let imp = d.metadata.importance { Text("★ \(imp)") }
                             // 时间优先用 epoch 转北京；搜索进来的没有 epoch → 退回原字符串

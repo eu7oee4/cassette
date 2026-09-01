@@ -73,7 +73,7 @@ struct DrawerPanel: View {
                     HStack(spacing: 14) {
                         Image(systemName: page.icon)
                             .font(.system(size: 17))
-                            .foregroundStyle(Color.theme)
+                            .foregroundStyle(Color.userAccent)
                             .frame(width: 24)
                         Text(page.title)
                             .foregroundStyle(.primary)
@@ -84,7 +84,7 @@ struct DrawerPanel: View {
                                 .font(.caption2.bold())
                                 .foregroundStyle(.white)
                                 .padding(.horizontal, 6).padding(.vertical, 2)
-                                .background(Capsule().fill(Color.theme))
+                                .background(Capsule().fill(Color.userAccent))
                         }
                         Spacer()
                     }
@@ -111,7 +111,7 @@ struct DrawerPlaceholderPage: View {
         VStack(spacing: 12) {
             Image(systemName: page.icon)
                 .font(.system(size: 44))
-                .foregroundStyle(Color.theme.opacity(0.5))
+                .foregroundStyle(Color.userAccent.opacity(0.5))
             Text("这里以后是\(page.title)")
                 .foregroundStyle(.secondary)
         }

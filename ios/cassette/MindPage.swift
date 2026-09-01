@@ -72,7 +72,7 @@ struct MindPage: View {
                                             await load()
                                         }
                                     } label: { Label("删除", systemImage: "trash") }
-                                    .tint(.red)   // 全 app 的 .tint(Color.theme) 会盖掉破坏性默认红，显式压回红
+                                    .tint(.red)   // 全 app 的 .tint(Color.userAccent) 会盖掉破坏性默认红，显式压回红
                                 }
                             }
                     }
@@ -168,7 +168,7 @@ private struct MindRow: View {
                             } label: {
                                 Text(u)
                                     .font(.caption)
-                                    .foregroundStyle(Color.theme)
+                                    .foregroundStyle(Color.userAccent)
                                     .lineLimit(1)
                                     .truncationMode(.middle)
                             }

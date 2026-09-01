@@ -255,7 +255,7 @@ struct ChatView: View {
                     .foregroundStyle(.white)
                     .padding(.horizontal, 12)
                     .padding(.vertical, 7)
-                    .background(Capsule().fill(Color.theme))
+                    .background(Capsule().fill(Color.userAccent))
                     .shadow(color: .black.opacity(0.15), radius: 4, y: 1)
                 }
                 .padding(.bottom, 8)
@@ -531,7 +531,7 @@ private struct BrowseNoteRow: View {
                         } label: {
                             Text(u)
                                 .font(.caption2)
-                                .foregroundStyle(Color.theme)
+                                .foregroundStyle(Color.userAccent)
                                 .lineLimit(1)
                                 .truncationMode(.middle)
                         }
@@ -548,6 +548,7 @@ private struct BrowseNoteRow: View {
 
 /// 单行消息：根据发送方决定左右布局与头像位置。
 private struct MessageRow: View {
+    @Environment(\.colorScheme) private var scheme
     let message: ChatMessage
     let charID: String                  // 头像认这个，不认「当前是谁」
     var contentWidth: CGFloat = 320
@@ -559,6 +560,13 @@ private struct MessageRow: View {
     var onTapWebpage: (String, String) -> Void = { _, _ in }
 
     private var isMe: Bool { message.sender == .me }
+
+    /// §1.2：机主气泡染机主人物色（实底+反色字）；AI 气泡统一灰底默认字色。
+    private var bubbleFill: Color {
+        isMe ? ChatTint.fill(IdentityColor.palette(for: "user"), scheme)
+             : ChatPalette.current(scheme).bubbleAI
+    }
+    private var bubbleText: Color? { isMe ? ChatTint.text(scheme) : nil }
 
     /// 文字消息的原文（非文字返回 nil）。
     private var rawText: String? {
@@ -602,7 +610,7 @@ private struct MessageRow: View {
             // 表情保持自适应比例（透明底/长条表情裁成方形会毁）
             StickerImage(url: url)
                 .frame(maxWidth: 160, maxHeight: 160)
-                .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
         case .image(let url):
             // 和堆叠卡同款：160×160 填充裁切 + 16 圆角，聊天里所有照片观感一致
             Group {
@@ -614,14 +622,14 @@ private struct MessageRow: View {
                 }
             }
             .frame(width: 160, height: 160)
-            .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
             .onTapGesture { onTapImage(url) }
         case .file(let url, let name):
             // 文件卡片：图标 + 文件名，点开 QuickLook 预览
             HStack(spacing: 10) {
                 Image(systemName: "doc.fill")
                     .font(.system(size: 26))
-                    .foregroundStyle(Color.theme)
+                    .foregroundStyle(Color.userAccent)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(name).font(.callout.weight(.medium)).lineLimit(2)
                     Text(url.pathExtension.uppercased())
@@ -634,8 +642,8 @@ private struct MessageRow: View {
             // 实底白卡 + 细描边：聊天背景是 systemGroupedBackground，
             // secondarySystemBackground 和它几乎同色，看着像透明（真机反馈）
             .background(Color(.systemBackground),
-                        in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-            .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous)
+                        in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous)
                 .strokeBorder(Color(.systemGray4), lineWidth: 0.5))
             .onTapGesture { onTapFile(url) }
         case .webpage(let pid, let title):
@@ -643,7 +651,7 @@ private struct MessageRow: View {
             HStack(spacing: 10) {
                 Image(systemName: "doc.richtext.fill")
                     .font(.system(size: 26))
-                    .foregroundStyle(Color.theme)
+                    .foregroundStyle(Color.userAccent)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(title).font(.callout.weight(.medium)).lineLimit(2)
                     Text("网页 · 点开查看")
@@ -654,8 +662,8 @@ private struct MessageRow: View {
             .padding(.vertical, 12)
             .frame(maxWidth: min(240, bubbleMaxWidth), alignment: .leading)
             .background(Color(.systemBackground),
-                        in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-            .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous)
+                        in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous)
                 .strokeBorder(Color(.systemGray4), lineWidth: 0.5))
             .onTapGesture { onTapWebpage(pid, title) }
         case .system, .memoryNote, .browseNote:
@@ -681,11 +689,12 @@ private struct MessageRow: View {
             StreamingPulseDot()
                 .padding(.bottom, 5)
         }
+            .foregroundStyle(bubbleText ?? .primary)
             .padding(.horizontal, 14)
             .padding(.vertical, 10)
             .background(
                 RoundedRectangle(cornerRadius: 18, style: .continuous)
-                    .fill(isMe ? Color.bubbleMe : Color(.systemGray5))
+                    .fill(bubbleFill)
             )
             .frame(maxWidth: bubbleMaxWidth, alignment: isMe ? .trailing : .leading)
     }
@@ -693,12 +702,12 @@ private struct MessageRow: View {
     @ViewBuilder private func segmentView(_ seg: MessageSegment) -> some View {
         switch seg {
         case .bubble(let md):
-            MarkdownMessageView(text: md)
+            MarkdownMessageView(text: md, textColor: bubbleText)
                 .padding(.horizontal, 14)
                 .padding(.vertical, 10)
                 .background(
                     RoundedRectangle(cornerRadius: 18, style: .continuous)
-                        .fill(isMe ? Color.bubbleMe : Color(.systemGray5))
+                        .fill(bubbleFill)
                 )
                 .frame(maxWidth: bubbleMaxWidth, alignment: isMe ? .trailing : .leading)
         case .card(let md):
@@ -768,7 +777,7 @@ struct StickerImage: View {
                 .resizable()
                 .scaledToFit()
         } else {
-            RoundedRectangle(cornerRadius: 16)
+            RoundedRectangle(cornerRadius: 18)
                 .fill(Color(.systemGray5))
                 .overlay(Image(systemName: "photo").foregroundStyle(.secondary))
         }
@@ -843,7 +852,7 @@ struct PhotoStackCard: View {
         ZStack {
             // 最底叠影：静态底片，示意"还有更多"
             if urls.count > 2 {
-                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
                     .fill(Color(.systemGray4))
                     .frame(width: 152, height: 152)
                     .rotationEffect(.degrees(4))
@@ -852,14 +861,14 @@ struct PhotoStackCard: View {
             // 升顶中的下层卡：随拖动进度 由小变大、由暗变亮
             photo(incoming)
                 .frame(width: cardW, height: cardW)
-                .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
                 .scaleEffect(0.9 + 0.1 * progress)
                 .opacity(urls.count > 1 ? 0.55 + 0.45 * Double(progress) : 0)
                 .rotationEffect(.degrees(Double(1 - progress) * -3))
             // 顶层卡：跟手位移 + 顺向旋转（~8° 封顶）
             photo(current)
                 .frame(width: cardW, height: cardW)
-                .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
                 .overlay(alignment: .topTrailing) {
                     Text("\(current + 1)/\(urls.count)")
                         .font(.caption.bold())
@@ -932,7 +941,7 @@ struct AvatarView: View {
                     .scaledToFill()
             } else {
                 // 我方默认头像用主题深色（别用 accentColor——它在自定义视图里会回落成系统蓝）
-                (sender == .me ? Color.theme : Color(.systemGray3))
+                (sender == .me ? Color.userAccent : Color(.systemGray3))
                     .overlay(
                         Image(systemName: sender == .me ? "person.fill" : "person")
                             .font(.system(size: size * 0.47))

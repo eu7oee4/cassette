@@ -15,6 +15,7 @@ struct ContentView: View {
     @AppStorage(CurrentCharacter.key) private var currentCharID = "default"
 
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.colorScheme) private var colorScheme
 
     @State private var draft: String = ""
     @State private var draftLoaded = false           // 首次进前台时把本角色的草稿铺回输入区（只做一次）
@@ -354,7 +355,7 @@ struct ContentView: View {
             // 逐个手动清那 10 个 @State 是跟漏清赛跑，换 id 让 SwiftUI 整份重建才是根治。
             // nonce 让「点当前这一行」也能重建：显示错乱时那是唯一的手动复位口。
             .id("\(currentCharID)#\(chatViewNonce)")
-            .background(Color(.systemGroupedBackground))
+            .background(ChatPalette.current(colorScheme).bg)
             .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { chatAreaHeight = $0 }
             // Code 模式的终端：**盖在**气泡区上，不压缩它。压缩那版的代价见
             // CodeTerminalPanel 的开头注释——一句话：气泡区布局全程不动，面板才有
@@ -614,7 +615,7 @@ struct ContentView: View {
             } label: {
                 Image(systemName: phoneOpen ? "chevron.down" : "pawprint")
                     .font(.system(size: 18, weight: .medium))
-                    .foregroundStyle(Color.theme)
+                    .foregroundStyle(Color.userAccent)
                     .frame(width: 40, height: 40)
             }
             // 左侧配平位：右边多出 ⏸ 时补一个等宽空位，标题才不偏
@@ -632,7 +633,7 @@ struct ContentView: View {
                         .lineLimit(1)
                         .truncationMode(.tail)
                     if chatStore.otherUnreadTotal > 0 {
-                        Circle().fill(Color.theme).frame(width: 7, height: 7)
+                        Circle().fill(Color.userAccent).frame(width: 7, height: 7)
                     }
                     Image(systemName: "chevron.down")
                         .font(.caption2.weight(.semibold))
@@ -642,7 +643,7 @@ struct ContentView: View {
                 if let line = charListStore.items.first(where: { $0.id == currentCharID })?.statusLine {
                     Text(line)
                         .font(.caption2)
-                        .foregroundStyle(Color.theme)
+                        .foregroundStyle(Color.userAccent)
                         .lineLimit(1)
                 }
             }
@@ -680,15 +681,15 @@ struct ContentView: View {
         Button(action: toggleGamePause) {
             Group {
                 if gamePauseSwitching {
-                    ProgressView().tint(gamePaused ? .white : Color.theme)
+                    ProgressView().tint(gamePaused ? .white : Color.userAccent)
                 } else {
                     Image(systemName: gamePaused ? "pause.circle.fill" : "pause.circle")
                         .font(.system(size: 17, weight: .semibold))
-                        .foregroundStyle(gamePaused ? Color.white : Color.theme)
+                        .foregroundStyle(gamePaused ? Color.white : Color.userAccent)
                 }
             }
             .frame(width: 40, height: 30)
-            .background(Capsule().fill(gamePaused ? Color.theme : Color.clear))
+            .background(Capsule().fill(gamePaused ? Color.userAccent : Color.clear))
         }
         .disabled(gamePauseSwitching)
         .accessibilityLabel(gamePaused ? "游戏急停：开（点这里解除）" : "游戏急停")
@@ -729,16 +730,16 @@ struct ContentView: View {
         Button(action: toggleCodeMode) {
             Group {
                 if codeSwitching {
-                    ProgressView().tint(sessionMode ? .white : Color.theme)
+                    ProgressView().tint(sessionMode ? .white : Color.userAccent)
                 } else {
                     Image(systemName: gameMine ? "gamecontroller.fill"
                           : "chevron.left.forwardslash.chevron.right")
                         .font(.system(size: 15, weight: .semibold))
-                        .foregroundStyle(sessionMode ? Color.white : Color.theme)
+                        .foregroundStyle(sessionMode ? Color.white : Color.userAccent)
                 }
             }
             .frame(width: 40, height: 30)
-            .background(Capsule().fill(sessionMode ? Color.theme : Color.clear))
+            .background(Capsule().fill(sessionMode ? Color.userAccent : Color.clear))
             .opacity(codeOwnedByMe ? 1 : 0.35)
         }
         .disabled(codeSwitching || !codeOwnedByMe)

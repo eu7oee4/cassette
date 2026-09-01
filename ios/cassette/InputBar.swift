@@ -20,7 +20,7 @@ struct InputBar: View {
             Button(action: onAttach) {
                 Image(systemName: "plus.circle")
                     .font(.system(size: 22, weight: .regular))
-                    .foregroundStyle(sending ? Color(.systemGray3) : Color.theme)
+                    .foregroundStyle(sending ? Color(.systemGray3) : Color.userAccent)
                     .frame(width: 32, height: 32)
             }
             .disabled(sending)
@@ -29,7 +29,7 @@ struct InputBar: View {
             Button(action: onStickers) {
                 Image(systemName: stickersActive ? "face.smiling.inverse" : "face.smiling")
                     .font(.system(size: 22, weight: .regular))
-                    .foregroundStyle(sending ? Color(.systemGray3) : Color.theme)
+                    .foregroundStyle(sending ? Color(.systemGray3) : Color.userAccent)
                     .frame(width: 32, height: 32)
             }
             .disabled(sending)
@@ -54,7 +54,7 @@ struct InputBar: View {
                 )
                 .padding(.horizontal, 9)          // 5+9=14，视觉边距和惯例一致
                 .background(
-                    RoundedRectangle(cornerRadius: 20, style: .continuous)
+                    RoundedRectangle(cornerRadius: 18, style: .continuous)   // 圆角全局对准气泡（§6）
                         .fill(Color(.systemGray6))
                 )
 
@@ -66,7 +66,7 @@ struct InputBar: View {
                 } else {
                     Image(systemName: "chevron.up.circle.fill")
                         .font(.system(size: 30))
-                        .foregroundStyle(canSend ? Color.theme : Color(.systemGray3))
+                        .foregroundStyle(canSend ? Color.userAccent : Color(.systemGray3))
                 }
             }
             .disabled(!canSend)
@@ -89,7 +89,7 @@ struct PendingFilesBar: View {
                     HStack(spacing: 6) {
                         Image(systemName: "doc.fill")
                             .font(.system(size: 14))
-                            .foregroundStyle(Color.theme)
+                            .foregroundStyle(Color.userAccent)
                         Text(f.name).font(.footnote).lineLimit(1)
                         Button { onRemove(idx) } label: {
                             Image(systemName: "xmark.circle.fill")

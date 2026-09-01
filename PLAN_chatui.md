@@ -447,8 +447,13 @@ hold/grow/trace/I/webpage_write/code_start/task_run/game_start/mail_send。
 
 1. **U0 · 色 token 落地**：`ChatPalette` + `CharPalette` + 深浅两份 + 解掉 §1.4 冲突。
    不改任何布局，只把现有硬编码色换成 token。**改完外观应该几乎没变化**——
-   这是这一步做对了的判据。
-2. **U1 · 染色口径上身**：机主气泡染色 + AI 气泡回灰 + 圆角统一。
+   这是这一步做对了的判据。✅ 09-01（`Color.theme` 全 app 换 `Color.userAccent`
+   =机主玫瑰，这是 §1.4 的既定改动、不算破判据；ThemePalette/bubbleMe 退役）
+2. **U1 · 染色口径上身**：机主气泡染色 + AI 气泡回灰 + 圆角统一。✅ 09-01
+   （§1.2 口径进 `ChatTint`（Theme.swift）一处；三角色 light/dark 第一版色值
+   =base 掺 40% 白/25% 黑，看效果再调：玫瑰 D4A0A3/8A494D、雾蓝 B2CBDE/5F7E97、
+   琥珀 DFC79D/977944；行内码炭黑 2E2F33+浅字 E6E6E6；染色底上链接=反色字靠
+   下划线区分；圆角 16/10/20→18 含输入栏；模拟器编译过，真机没看）
 3. **U2 · 流式分裂**（§4，路 C）。独立，可跟 U1 并行。
 4. **U3 · 小字提醒**：logo 前缀 + 呼吸动效 + 三类内容接线 + **聚合**。
    **前置：§7.2 那条口径先拍**（含聚合规则）。

@@ -20,7 +20,7 @@ struct OnboardingView: View {
             Spacer()
             Image(systemName: "recordingtape")
                 .font(.system(size: 48, weight: .medium))
-                .foregroundStyle(Color.theme)
+                .foregroundStyle(Color.userAccent)
             Text("先起个名字")
                 .font(.title2.bold())
 
@@ -70,7 +70,7 @@ struct OnboardingView: View {
                             .overlay(
                                 Image(systemName: "plus")
                                     .font(.system(size: 22, weight: .medium))
-                                    .foregroundStyle(Color.theme)
+                                    .foregroundStyle(Color.userAccent)
                             )
                     }
                 }

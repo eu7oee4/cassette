@@ -1,24 +1,59 @@
 import SwiftUI
 
-/// 一套主题色：现在两个常用色（以后可能扩到三个）。
-/// 换主题功能（以后做）＝切换整套 palette，而不是散改各处颜色。
-struct ThemePalette {
-    let accent: Color    // 深色：按钮 / 角标 / 新消息胶囊 / 默认头像
-    let bubbleMe: Color  // 浅色：我方气泡底（自带透明度，深色模式下也柔和）
+/// 聊天页整套色 token（PLAN_chatui §1.1）：浅/深各显式一份，深浅切换整套换。
+/// bg 目前仍取系统语义色（观感与从前一致）；背景图 bgImage/bgImageDim 是 U6 的活。
+struct ChatPalette {
+    let bg: Color            // 聊天流背景
+    let bubbleAI: Color      // AI 气泡统一灰底（§3.1，跟是哪个角色无关）
+    let textOnDark: Color    // 机主命名 text_light：深底上的浅色字
+    let textOnLight: Color   // 机主命名 text_dark：浅底上的深色字
+    let theme: Color         // 主题色（§1.4 拍板：保留但暂无处可用，别硬塞）
 }
 
-extension ThemePalette {
-    /// 内置主题：紫。以后加主题＝多一个 static let，换主题＝改 Color.current 的来源。
-    static let violet = ThemePalette(
-        accent: Color(hex: 0x673AB7),
-        bubbleMe: Color(hex: 0x9575CD).opacity(0.30)
+extension ChatPalette {
+    static let light = ChatPalette(
+        bg: Color(uiColor: .systemGroupedBackground),
+        bubbleAI: Color(uiColor: .systemGray5),
+        textOnDark: .white,
+        textOnLight: .black,
+        theme: Color(hex: 0x352526)
+    )
+    static let dark = ChatPalette(
+        bg: Color(uiColor: .systemGroupedBackground),
+        bubbleAI: Color(uiColor: .systemGray5),
+        textOnDark: .white,
+        textOnLight: .black,
+        theme: Color(hex: 0x352526)
     )
 
-    /// 深梅（2026-08-16 试验）：取小屋玫瑰灰主题的 tint 色当聊天主题色。
-    static let plumTint = ThemePalette(
-        accent: Color(hex: 0x352526),
-        bubbleMe: Color(hex: 0x352526).opacity(0.30)
-    )
+    static func current(_ scheme: ColorScheme) -> ChatPalette {
+        scheme == .dark ? .dark : .light
+    }
+}
+
+/// 人物色一套（PLAN_chatui §1.1）：base 本体（头像描边/名字/默认头像），
+/// light 浅身＝深色模式的染色底，dark 深身＝浅色模式的染色底，
+/// bullet 气泡内小装饰（用途待定 §8），logo 小字提醒的前缀符号（U3 接线，
+/// 机主的符号待定 §8，🐾 的实色 SVG 也是 U3 的活——先拿字符占位）。
+struct CharPalette {
+    let base: Color
+    let light: Color
+    let dark: Color
+    let bullet: Color
+    let logo: String
+}
+
+/// §1.2 染色的唯一口径（全局只有这一条）：
+/// 浅色模式 → 人物色的 dark 当底 + text_light（白字）；
+/// 深色模式 → 人物色的 light 当底 + text_dark（黑字）。
+/// 适用面只有两个：机主的气泡、要机主动手的卡片（permit 卡/问答卡）。
+enum ChatTint {
+    static func fill(_ p: CharPalette, _ scheme: ColorScheme) -> Color {
+        scheme == .dark ? p.light : p.dark
+    }
+    static func text(_ scheme: ColorScheme) -> Color {
+        scheme == .dark ? ChatPalette.dark.textOnLight : ChatPalette.light.textOnDark
+    }
 }
 
 /// 小屋（同居世界）的整套配色：房子/房间视图是一个独立的暖色深色世界，不随系统深浅色走。
@@ -77,31 +112,52 @@ extension HousePalette {
     )
 }
 
-/// 角色识别色：小屋里「谁说的」一眼可辨——气泡底、名字、头像描边都用它。
-/// 与主题解耦（换主题不换身份色）；新角色没配就按 id 哈希出一个稳定色。
+/// 角色识别色：「谁说的」一眼可辨——名字、头像描边、默认头像、染色底都从这儿查。
+/// 与主题解耦（换主题不换身份色）；新角色没配就按 id 哈希出一套稳定色。
+/// light/dark 两身是 2026-09-01 的第一版（base 掺 40% 白 / 掺 25% 黑），看效果再调。
 enum IdentityColor {
-    static func color(for entityID: String) -> Color {
+    static func palette(for entityID: String) -> CharPalette {
         switch entityID {
-        case "user":    return Color(hex: 0xB86166)   // 眠眠：玫瑰
-        case "default": return Color(hex: 0x7FA8C9)   // 小卡：雾蓝
-        case "cass":    return Color(hex: 0xC9A15B)   // Cassius：琥珀
+        case "user":            // 眠眠：玫瑰
+            return CharPalette(base: Color(hex: 0xB86166),
+                               light: Color(hex: 0xD4A0A3),
+                               dark: Color(hex: 0x8A494D),
+                               bullet: Color(hex: 0xB86166),
+                               logo: "")                    // 机主的符号待定（§8）
+        case "default":         // 小卡：雾蓝
+            return CharPalette(base: Color(hex: 0x7FA8C9),
+                               light: Color(hex: 0xB2CBDE),
+                               dark: Color(hex: 0x5F7E97),
+                               bullet: Color(hex: 0x7FA8C9),
+                               logo: "🐾")
+        case "cass":            // Cassius：琥珀
+            return CharPalette(base: Color(hex: 0xC9A15B),
+                               light: Color(hex: 0xDFC79D),
+                               dark: Color(hex: 0x977944),
+                               bullet: Color(hex: 0xC9A15B),
+                               logo: "✦")
         default:
             var h = 0
             for u in entityID.unicodeScalars { h = (h &* 31 &+ Int(u.value)) & 0xFFFF }
-            return Color(hue: Double(h % 360) / 360.0, saturation: 0.38, brightness: 0.72)
+            let hue = Double(h % 360) / 360.0
+            return CharPalette(base: Color(hue: hue, saturation: 0.38, brightness: 0.72),
+                               light: Color(hue: hue, saturation: 0.30, brightness: 0.86),
+                               dark: Color(hue: hue, saturation: 0.45, brightness: 0.52),
+                               bullet: Color(hue: hue, saturation: 0.38, brightness: 0.72),
+                               logo: "·")
         }
     }
+
+    static func color(for entityID: String) -> Color { palette(for: entityID).base }
 }
 
 extension Color {
-    /// 当前生效的主题（以后做换主题时，改成从 UserDefaults 读用户选中的那套）。
-    static let current = ThemePalette.plumTint
-
     /// 小屋当前主题：换主题改这一行。
     static let house = HousePalette.oatMilk
 
-    static var theme: Color { current.accent }
-    static var bubbleMe: Color { current.bubbleMe }
+    /// 机主人物色（PLAN_chatui §1.4 拍板：凡要用色的地方一律用它——按钮/角标/
+    /// 链接/默认头像；主题色 theme 另存在 ChatPalette 里，暂时无处可用）。
+    static var userAccent: Color { IdentityColor.palette(for: "user").base }
 
     /// 0xRRGGBB 十六进制建色。
     init(hex: UInt) {

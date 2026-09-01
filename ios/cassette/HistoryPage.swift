@@ -161,7 +161,7 @@ struct HistoryPage: View {
                 .font(.subheadline.monospacedDigit().bold())
                 .frame(width: 56)
                 .padding(.vertical, 4)
-                .background(over ? Color.theme : Color(.systemGray5),
+                .background(over ? Color.userAccent : Color(.systemGray5),
                             in: RoundedRectangle(cornerRadius: 8, style: .continuous))
                 .foregroundStyle(over ? .white : .primary)
                 .onSubmit { commit() }
@@ -533,7 +533,7 @@ private struct EntryRow: View {
                 .foregroundStyle(.secondary)
                 .frame(width: 50, alignment: .trailing)
             Circle()
-                .fill(entry.msg.sender == .me ? Color.theme : Color(.systemGray3))
+                .fill(entry.msg.sender == .me ? Color.userAccent : Color(.systemGray3))
                 .frame(width: 7, height: 7)
             Text((showDate ? HistoryPage.fullFmt : HistoryPage.timeFmt)
                     .string(from: entry.msg.timestamp))
@@ -590,7 +590,7 @@ private struct EntryDetail: View {
                             .frame(maxWidth: .infinity)
                     }
                     .buttonStyle(.borderedProminent)
-                    .tint(Color.theme)
+                    .tint(Color.userAccent)
                     Text("窗口按你的聊天频率和 token 额度自由定，100 只是默认值")
                         .font(.caption2).foregroundStyle(.secondary)
                 }

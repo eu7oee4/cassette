@@ -26,7 +26,7 @@ struct ConversationsPage: View {
                         if let line = c.statusLine {
                             Text(line)
                                 .font(.footnote)
-                                .foregroundStyle(Color.theme)
+                                .foregroundStyle(Color.userAccent)
                                 .lineLimit(1)
                         }
                         let preview = chatStore.preview(for: c.id)
@@ -44,12 +44,12 @@ struct ConversationsPage: View {
                             .foregroundStyle(.white)
                             .padding(.horizontal, 7)
                             .padding(.vertical, 3)
-                            .background(Capsule().fill(Color.theme))
+                            .background(Capsule().fill(Color.userAccent))
                     }
                     if c.id == currentID {
                         Image(systemName: "checkmark")
                             .font(.footnote.weight(.semibold))
-                            .foregroundStyle(Color.theme)
+                            .foregroundStyle(Color.userAccent)
                     }
                 }
                 .contentShape(Rectangle())
@@ -84,11 +84,11 @@ struct ConversationsPage: View {
                 .clipShape(Circle())
         } else {
             Circle()
-                .fill(Color.theme.opacity(0.15))
+                .fill(Color.userAccent.opacity(0.15))
                 .frame(width: 44, height: 44)
                 .overlay(Image(systemName: "pawprint")
                     .font(.system(size: 18))
-                    .foregroundStyle(Color.theme))
+                    .foregroundStyle(Color.userAccent))
         }
     }
 }

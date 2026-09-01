@@ -201,7 +201,7 @@ struct PluginsPage: View {
                             Text(c).font(.caption2.monospaced()).foregroundStyle(.tertiary)
                         }
                         if p.isStale {
-                            Text("可更新").font(.caption2).foregroundStyle(Color.theme)
+                            Text("可更新").font(.caption2).foregroundStyle(Color.userAccent)
                         }
                         if p.valid == false {
                             Text("清单损坏").font(.caption2).foregroundStyle(.red)
@@ -229,7 +229,7 @@ struct PluginsPage: View {
                         Task { await run(p.name, note: "已安装") { try await service.installPlugin(name: p.name) } }
                     }
                     .buttonStyle(.borderedProminent)
-                    .tint(Color.theme)
+                    .tint(Color.userAccent)
                     .font(.footnote.weight(.medium))
                 } else {
                     Toggle("", isOn: Binding(
@@ -237,7 +237,7 @@ struct PluginsPage: View {
                         set: { on in Task { await run(p.name) { try await service.togglePlugin(name: p.name, enabled: on) } } }
                     ))
                     .labelsHidden()
-                    .tint(Color.theme)
+                    .tint(Color.userAccent)
                     // 不归你就别让拨——拨得动却不生效，比拨不动更难懂。
                     .disabled(p.valid == false || p.blockedByOwner)
                 }
@@ -258,7 +258,7 @@ struct PluginsPage: View {
                         set: { on in Task { await run(p.name) { try await service.wakeTogglePlugin(name: p.name, enabled: on) } } }
                     ))
                     .labelsHidden()
-                    .tint(Color.theme)
+                    .tint(Color.userAccent)
                 }
                 .padding(.leading, 12)
             }
@@ -273,7 +273,7 @@ struct PluginsPage: View {
                     Button {
                         Task { await update(p) }
                     } label: { Label("更新", systemImage: "arrow.triangle.2.circlepath") }
-                    .tint(Color.theme)
+                    .tint(Color.userAccent)
                 }
             }
         }
@@ -410,7 +410,7 @@ struct OwnershipPage: View {
                         Image(systemName: "chevron.up.chevron.down").font(.caption2)
                     }
                     .font(.footnote)
-                    .foregroundStyle(Color.theme)
+                    .foregroundStyle(Color.userAccent)
                 }
             }
         }

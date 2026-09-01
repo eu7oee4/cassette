@@ -57,7 +57,7 @@ struct WebpagesPage: View {
                         Button { opened = p } label: {
                             HStack {
                                 Image(systemName: "doc.richtext")
-                                    .foregroundStyle(Color.theme)
+                                    .foregroundStyle(Color.userAccent)
                                 VStack(alignment: .leading, spacing: 2) {
                                     Text(p.title).foregroundStyle(.primary).lineLimit(1)
                                     Text(Self.fmt.string(from: Date(timeIntervalSince1970: TimeInterval(p.ts))))
