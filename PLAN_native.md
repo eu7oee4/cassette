@@ -188,7 +188,10 @@ hook deny 的调用到不了审批；hook 放过的写类（返回 `{}`）落进
   + 内存待批单 + 超时；REST 两个端点 + Bark。拨闸复用 `WRITE_TOOLS_ENABLED`
   （语义不变：拨开=写类 schema 挂载 + 审批通路生效）。**先写测试**：挂起 / 批准 /
   拒绝 / 超时 / 后端重启作废，五条都要有。✅ 09-01
-- **N2 · iOS 权限卡**（§6）：拨闸的硬前置。
+- **N2 · iOS 权限卡**（§6）：拨闸的硬前置。✅ 09-01 落码未上电（施工在
+  PLAN_chatui U4：PermitCardView + sse permit 事件 + syncPermits；
+  批准免二次确认照 §6 倾向先做了，待拍④机主看真机效果再改）。
+  拨闸剩的只有待验④（写类 schema token 实测）——实测完拨 WRITE_TOOLS=1。
 - **N3 · 拆迁**（§9）：分两批。第一批（门侧，随 N1 同一个 PR）：`code_permits`
   整件、互斥检查、每轮 addendum 注入。✅ 09-01 第二批（code_bridge 的 code 半边）：
   **先核 game 线的依赖**（§9 两处 ⚠️）再动。

@@ -478,7 +478,16 @@ hold/grow/trace/I/webpage_write/code_start/task_run/game_start/mail_send。
      回前台/轮询 syncQuestions 对齐（游戏泵轮里弹的卡靠这条补）；换角色清队重拉。
    - **拨闸**：`.env` 加 `QUESTION_CARDS=1` + 重启后端（默认关；灰度独立于
      WRITE_TOOLS，问答卡可以先上）。自测场景：让他用 AskUserQuestion 问任意选择题。
-   - 剩 permit 卡（=native N2）：复用这张卡的骨架（§6 那份说了同一张卡的形状）。
+   - **permit 卡半边也 ✅ 09-01 全链路落码未上电**（=native N2，拨写闸的硬前置
+     由此解除）：sse `permit` 事件（写类 tool_use 现身即推卡，带参数原文——
+     Bash 命令全文/Edit 文件和改动，运输帽 600–2000 字符）+ iOS
+     `PermitCardView`（同问答卡骨架：染色/超时置灰/收起；批准免二次确认，
+     拒绝可附一句理由）+ `/permits/*` 现成 REST + syncPermits 轮询对齐。
+     批准后小字 `批了：{tool} {摘要}`（§5.1 的「命令调用」小字等 U3 成形再换）；
+     拒绝不出小字（「生成中」呼吸本来就亮着）。
+     ⚠️ 幽灵卡：路径闸拒的调用推了卡却到不了 permits——靠轮询收走+409 有声，
+     罕见路，实时性换这个代价（sse._permit_events 注释里记了）。
+     上电顺序照 native：写类 schema token 真机实测后拨 WRITE_TOOLS=1。
 6. **U5 · 摘掉终端面板**（§7.3）。前置只有 U4 的 permit 卡（code 那半边要有人接），
    game 那半边靠气泡流本来就够。
 7. **U6 · 背景图 + 蒙版**。完全独立，随时可插。

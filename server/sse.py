@@ -101,6 +101,49 @@ def _question_events(ev: dict):
                        "deadline": int(time.time()) + questions.TIMEOUT_SEC})
 
 
+_PERMIT_TOOLS = {"Edit", "Write", "NotebookEdit", "Bash"}
+
+
+def _permit_detail(tool: str, inp: dict) -> tuple[str, str]:
+    """(一行摘要, 参数原文) —— 权限卡的正文（PLAN_native §6：Bash 显示命令
+    原文，Edit 显示文件和改动）。截断只为运输别撑爆 SSE，拍板要看的头部信息
+    都在帽内。"""
+    def cap(s, n: int) -> str:
+        s = str(s or "")
+        return s if len(s) <= n else s[:n] + "\n…（截断）"
+    inp = inp or {}
+    if tool == "Bash":
+        cmd = str(inp.get("command") or "")
+        first = cmd.splitlines()[0] if cmd else ""
+        return first[:120], cap(cmd, 2000)
+    if tool == "Edit":
+        fp = str(inp.get("file_path") or "")
+        return fp, (fp + "\n── 删：\n" + cap(inp.get("old_string"), 600)
+                    + "\n── 换成：\n" + cap(inp.get("new_string"), 600))
+    if tool in ("Write", "NotebookEdit"):
+        fp = str(inp.get("file_path") or inp.get("notebook_path") or "")
+        body = inp.get("content") or inp.get("new_source")
+        return fp, fp + "\n" + cap(body, 1200)
+    return "", cap(json.dumps(inp, ensure_ascii=False), 800)
+
+
+def _permit_events(ev: dict):
+    """写类 tool_use 一出现就把权限卡推给 app（PLAN_native §6 / chatui U4）。
+    单号=tool_use_id，跟 can_use_tool 那头 permits.ask 登记的一致。
+    ⚠️ 这儿在权限判定**之前**：被 PreToolUse 路径闸拒掉的调用到不了 permits，
+    会推出一张「幽灵卡」——app 侧靠 pending 轮询收走（没超时又不在册＝作废），
+    拍板撞上 409 也有声。路径闸拒是罕见路，实时性换这个代价划算。
+    老 -p 路没挂写类工具，此函数天然空转。"""
+    for b in (ev.get("message", {}).get("content") or []):
+        if (isinstance(b, dict) and b.get("type") == "tool_use"
+                and b.get("name") in _PERMIT_TOOLS):
+            import permits
+            summary, detail = _permit_detail(b["name"], b.get("input") or {})
+            yield sse({"type": "permit", "id": b.get("id", ""),
+                       "tool": b["name"], "summary": summary, "detail": detail,
+                       "deadline": int(time.time()) + permits.CHAT_TIMEOUT_SEC})
+
+
 def _memory_events(item: dict):
     """一条定了案的 stored → 要发给 app 的 memory 事件（0 或 1 条）。
     codemode/gamemode 是借 stored 走的控制信号（TA 自切 code 模式/游戏会话），不是
@@ -158,6 +201,8 @@ async def translate_events(events, finalize):
             # 干成没干成要等下面的 tool_result。先发的话失败的调用也会亮一条「记住了一件事」。
             collector.on_assistant(ev)
             for chunk in _question_events(ev):
+                yield chunk
+            for chunk in _permit_events(ev):
                 yield chunk
         elif t == "user":
             # 工具返回了 → 定案，成功/失败各自往下游发一条 memory 灰字。

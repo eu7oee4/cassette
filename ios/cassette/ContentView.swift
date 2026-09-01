@@ -60,6 +60,8 @@ struct ContentView: View {
     // 问答卡队列（PLAN_chatui §3.5/U4）：队头亮在输入栏上方，答完/跳过出队。
     // SSE question 事件实时进（去重），回前台/轮询靠 syncQuestions 对齐。
     @State private var questionCards: [QuestionCard] = []
+    // 权限卡队列（PLAN_native §6/U4）：同款通道，permit 事件实时进 + 轮询对齐。
+    @State private var permitCards: [PermitCard] = []
 
     /// 一条等待补投的轮：断流时的半截气泡 ids + 登记时间 + 是否已放弃等待（放弃后仍留着兜迟到补投）。
     struct RescueWait {
@@ -212,6 +214,7 @@ struct ContentView: View {
             await syncCodeMode()   // 他可能在断流/后台期间自己切进了 Code 模式 → 回前台对齐
             await syncPending()
             await syncQuestions()
+            await syncPermits()
             await reconcileRescues()
             await refreshDraftCount()
             await refreshGameStatus()
@@ -221,6 +224,7 @@ struct ContentView: View {
                 try? await Task.sleep(for: .seconds(sessionMode ? 3 : 15))
                 await syncPending()
                 await syncQuestions()
+                await syncPermits()
                 await reconcileRescues()
                 await refreshDraftCount()
                 await refreshGameStatus()
@@ -382,6 +386,15 @@ struct ContentView: View {
             .animation(.easeOut(duration: 0.22), value: terminalRatio)
             .safeAreaInset(edge: .bottom, spacing: 0) {
                 VStack(spacing: 0) {
+                    if let pcard = permitCards.first {
+                        // 权限卡（U4/native §6）：写类调用挂起等批，最新位置插卡
+                        PermitCardView(card: pcard, charID: currentCharID,
+                                       onDecide: { decidePermit(pcard, allow: $0, reason: $1) },
+                                       onClose: { removePermit(pcard.id) })
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 6)
+                            .transition(.move(edge: .bottom).combined(with: .opacity))
+                    }
                     if let card = questionCards.first {
                         // 问答卡（U4）：钉在输入栏上方＝聊天最新位置，答案走 REST 回填
                         QuestionCardView(card: card, charID: currentCharID,
@@ -430,6 +443,7 @@ struct ContentView: View {
                 .animation(.easeInOut(duration: 0.2), value: pendingSticker)
                 .animation(.easeInOut(duration: 0.2), value: pendingImages.count)
                 .animation(.easeInOut(duration: 0.2), value: questionCards)
+                .animation(.easeInOut(duration: 0.2), value: permitCards)
             }
             .alert("发送失败", isPresented: Binding(
                 get: { errorText != nil },
@@ -613,9 +627,11 @@ struct ContentView: View {
         // 老版本在这行调 profileStore.switchCharacter(id)，而它蹲在上面那道 guard 后面
         // ——guard 一提前 return，别人都换了人、头像还停在上一位身上（08-30 实锤）。
         sessionId = nil
-        // 问答卡是署名的：换人清队，syncQuestions 马上按新角色补齐
+        // 问答卡/权限卡是署名的：换人清队，sync 马上按新角色补齐
         questionCards.removeAll()
+        permitCards.removeAll()
         Task { await syncQuestions() }
+        Task { await syncPermits() }
         Task { await proactiveStore.reloadForCurrentCharacter() }
         // 会话入口/归属说明是按角色变的，切完顺手对齐一次（路由本身不等它——
         // sessionMine 是派生的，currentCharID 一变就生效）。
@@ -1094,6 +1110,14 @@ struct ContentView: View {
                     if !questionCards.contains(where: { $0.id == c.id }) {
                         withAnimation { questionCards.append(c) }
                     }
+                case .permit(let card):
+                    // 权限卡（U4/native §6）：同款通道。幽灵卡（路径闸拒的）靠
+                    // syncPermits 收走，拍板撞 409 也有声。
+                    var pc = card
+                    pc.char = currentCharID
+                    if !permitCards.contains(where: { $0.id == pc.id }) {
+                        withAnimation { permitCards.append(pc) }
+                    }
                 case .error(let msg):
                     errorText = msg
                 case .done(let resp):
@@ -1334,6 +1358,45 @@ struct ContentView: View {
             questionCards.removeAll { qc in
                 !cards.contains(where: { $0.id == qc.id })
                     && (qc.deadline.map { now < $0 } ?? true)
+            }
+        }
+    }
+
+    // MARK: - 权限卡（PLAN_native §6/U4）
+
+    /// 拍板：批了那次调用原地执行（出小字留痕 §5.1），拒了 TA 收到理由接着说
+    /// （小字不出——「生成中」的呼吸本来就亮着）。409＝已超时/作废，有声收卡。
+    private func decidePermit(_ card: PermitCard, allow: Bool, reason: String) {
+        removePermit(card.id)
+        if allow {
+            let what = card.summary ?? card.tool
+            let brief = what.count > 30 ? String(what.prefix(30)) + "…" : what
+            chatStore.appendMemoryNote("批了：\(card.tool) \(brief)")
+        }
+        Task {
+            do { try await chatService.decidePermit(id: card.id, allow: allow, reason: reason) }
+            catch { errorText = "这张卡已经不在了（可能超时/后端重启）——他想做会再申请" }
+        }
+    }
+
+    private func removePermit(_ id: String) {
+        withAnimation { permitCards.removeAll { $0.id == id } }
+    }
+
+    /// 回前台/轮询对齐：口径同 syncQuestions——后端不认的卡收走（幽灵卡也在此
+    /// 收），刚超时的留着置灰等机主收起。
+    @MainActor
+    private func syncPermits() async {
+        guard let cards = try? await chatService.pendingPermits(char: currentCharID)
+        else { return }
+        let now = Int(Date().timeIntervalSince1970)
+        withAnimation {
+            for c in cards where !permitCards.contains(where: { $0.id == c.id }) {
+                permitCards.append(c)
+            }
+            permitCards.removeAll { pc in
+                !cards.contains(where: { $0.id == pc.id })
+                    && (pc.deadline.map { now < $0 } ?? true)
             }
         }
     }

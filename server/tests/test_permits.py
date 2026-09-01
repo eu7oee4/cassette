@@ -293,5 +293,48 @@ class CapsuleTest(unittest.TestCase):
         self.assertEqual(self.al.recent_acts("cass"), [])
 
 
+class SsePermitEventTest(unittest.TestCase):
+    """sse._permit_events：写类 tool_use → 一条 permit SSE（单号=tool_use_id，
+    带参数原文）；只读工具不触发。幽灵卡（路径闸拒）由 app 轮询收走，不在此测。"""
+
+    @staticmethod
+    def _payload(ev):
+        import json
+        import sse
+        chunks = list(sse._permit_events(ev))
+        return [json.loads(c.decode("utf-8")[len("data: "):]) for c in chunks]
+
+    def test_edit_card_carries_diff(self):
+        out = self._payload({"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "id": "toolu_p1", "name": "Edit",
+             "input": {"file_path": "server/x.py",
+                       "old_string": "a = 1", "new_string": "a = 2"}},
+        ]}})
+        self.assertEqual(len(out), 1)
+        p = out[0]
+        self.assertEqual((p["type"], p["id"], p["tool"]),
+                         ("permit", "toolu_p1", "Edit"))
+        self.assertEqual(p["summary"], "server/x.py")
+        self.assertIn("a = 1", p["detail"])
+        self.assertIn("a = 2", p["detail"])
+        self.assertGreater(p["deadline"], 0)
+
+    def test_bash_card_shows_command(self):
+        out = self._payload({"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "id": "p2", "name": "Bash",
+             "input": {"command": "git add x.py\ngit commit -m ok"}},
+        ]}})
+        self.assertEqual(out[0]["summary"], "git add x.py")
+        self.assertIn("git commit -m ok", out[0]["detail"])
+
+    def test_readonly_does_not_emit(self):
+        out = self._payload({"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "id": "r", "name": "Read",
+             "input": {"file_path": "a.py"}},
+            {"type": "text", "text": "看一眼"},
+        ]}})
+        self.assertEqual(out, [])
+
+
 if __name__ == "__main__":
     unittest.main()

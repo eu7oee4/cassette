@@ -120,6 +120,19 @@ struct QuestionCard: Codable, Identifiable, Equatable {
     var char: String?                        // pending 拉回来的带；SSE 的不带（就是当前会话角色）
 }
 
+/// 权限卡（PLAN_native §6 / chatui U4）：TA 的一次写类调用挂起等批。
+/// SSE "permit" 事件带参数原文（detail）；/permits/pending 拉回来的带 title
+/// 没 detail（够拍板用）。批/拒 POST /permits/decide，批了那次调用原地执行。
+struct PermitCard: Codable, Identifiable, Equatable {
+    let id: String                           // 就是那次调用的 tool_use_id
+    let tool: String
+    let summary: String?                     // 一行摘要（文件路径/命令首行）
+    let detail: String?                      // 参数原文（Bash 命令全文、Edit 的改动）
+    let title: String?                       // SDK 生成的整句（pending 拉回来的有）
+    let deadline: Int?
+    var char: String?
+}
+
 /// /chat/stream 的一条 SSE 事件（后端统一协议）。
 enum StreamEvent {
     case text(String)                        // 正文片段，追加进当前流式气泡
@@ -127,6 +140,7 @@ enum StreamEvent {
     // 这轮的一次工具操作 → 内联灰字。ok=false 是「他想做但没做成」，照样要说（带原因）。
     case memory(tool: String, text: String, ok: Bool, error: String)
     case question(QuestionCard)              // 问答卡：TA 想让机主拍板（U4）
+    case permit(PermitCard)                  // 权限卡：TA 想动手，等批（U4/native §6）
     case error(String)                       // 出错提示
     case done(ChatResponse?)                 // 结束：附完整 ChatResponse（错误/空回复时为 nil）
 }
@@ -281,6 +295,10 @@ struct ChatService {
             guard let card = try? JSONDecoder().decode(QuestionCard.self, from: data)
             else { return nil }
             return .question(card)
+        case "permit":
+            guard let card = try? JSONDecoder().decode(PermitCard.self, from: data)
+            else { return nil }
+            return .permit(card)
         case "error":      return .error(obj["content"] as? String ?? "出错了")
         case "done":       return .done(try? JSONDecoder().decode(ChatResponse.self, from: data))
         default:           return nil
@@ -307,6 +325,28 @@ struct ChatService {
         }
         let body = try JSONEncoder().encode(Body(id: id, answers: answers, note: note))
         _ = try await perform(authedRequest("POST", "/questions/decide", jsonBody: body,
+                                            timeout: 30))
+    }
+
+    // MARK: - 权限卡（U4 / PLAN_native §6）
+
+    /// 待批的写类调用（回前台对齐用；char 缺省＝全部角色）。
+    func pendingPermits(char: String? = nil) async throws -> [PermitCard] {
+        let data = try await perform(authedRequest("GET", "/permits/pending", char: char))
+        struct Resp: Decodable { let pending: [PermitCard] }
+        do { return try JSONDecoder().decode(Resp.self, from: data).pending }
+        catch { throw ChatServiceError.badResponse }
+    }
+
+    /// 拍板：批了那次调用原地执行；拒了 TA 收到 reason 接着说话。409＝已超时/作废。
+    func decidePermit(id: String, allow: Bool, reason: String = "") async throws {
+        struct Body: Encodable {
+            let id: String
+            let allow: Bool
+            let reason: String
+        }
+        let body = try JSONEncoder().encode(Body(id: id, allow: allow, reason: reason))
+        _ = try await perform(authedRequest("POST", "/permits/decide", jsonBody: body,
                                             timeout: 30))
     }
 
