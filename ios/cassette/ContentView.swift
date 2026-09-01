@@ -321,7 +321,8 @@ struct ContentView: View {
     private var chatBody: some View {
         ChatView(messages: chatStore.messages,
                  charID: currentCharID,                  // 头像认这个，不认 ProfileStore 里的缓存
-                 isWaiting: isWaiting || rescueActive,   // 后台生成期间点点不灭，补投到达才熄
+                 charName: topTitle,                     // 「正在思考…」小字念名字用
+                 isWaiting: isWaiting || rescueActive,   // 后台生成期间小字不灭，补投到达才熄
                  onEdit: startEdit,
                  onDelete: { msg in deleteCandidates = [msg] },
                  onTapChatArea: { if showStickers { showStickers = false } },
@@ -1071,15 +1072,11 @@ struct ContentView: View {
                     // 对方去用工具了，下一段还没来 → 重新亮"正在输入"，
                     // 分清"说完了"和"还在忙"（下一段 .text 一到会自动收起）
                     isWaiting = true
-                case .memory(let tool, let text, let ok, let reason):
-                    // 中途工具操作 → 就地内联灰字（成功的网页除外：finalize 会补一张可点的卡片）
-                    if !ok {
-                        chatStore.appendMemoryNote(memoryFailNoteText(tool: tool, reason: reason))
-                    } else if tool == "gametask" {
-                        // 派引擎跑日常：灰字带上任务清单（text），机主一眼能核对派了什么
-                        chatStore.appendMemoryNote("派引擎去跑日常：\(text)")
-                    } else if tool != "webpage" {
-                        chatStore.appendMemoryNote(memoryNoteText(tool: tool))
+                case .memory(let tool, let name, let text, let ok, let reason):
+                    // 中途工具操作 → 就地内联小字（成功的网页除外：finalize 会补一张可点的卡片）
+                    if let note = toolNoteText(tool: tool, name: name, text: text,
+                                               ok: ok, reason: reason) {
+                        chatStore.appendMemoryNote(note)
                     }
                 case .question(let card):
                     // 问答卡（U4）：随流实时到。SSE 的卡不带 char＝当前会话角色。
@@ -1184,9 +1181,10 @@ struct ContentView: View {
             chatStore.appendMemoryNote(updates.count == 1
                 ? "更新了一个表情的描述" : "更新了 \(updates.count) 个表情的描述")
         }
-        // 他这轮顺手定了下次醒来 → 灰字提示（后端已拼好文案：原话 + 绝对时间点）。
+        // 他这轮顺手定了下次醒来 → 小字提醒（§3.4：`✦ Cassius 决定下次21:13醒来`；
+        // 后端文案从「决定」说起，名字在这儿接上）。
         if let hint = resp.next_wake_hint, !hint.isEmpty {
-            chatStore.appendMemoryNote(hint)
+            chatStore.appendMemoryNote("\(topTitle) \(hint)")
         }
         // 他这轮自己切进了 Code 模式（调了 code_start 工具）→ 翻开关，后续消息改道会话。
         if resp.code_started == true, !codeMode {
@@ -1249,7 +1247,29 @@ struct ContentView: View {
         }
     }
 
-    /// 一次工具产物的灰字文案（内容去记忆页/聊天记录页看，这里只标动作）。
+    /// 一次工具调用的小字文案（§7.2 拍板 09-01：全裸工具名，零维护；失败读 ret
+    /// 追加原因短句）。nil = 这次不上屏（成功的网页等卡片、老后端的 webpage）。
+    /// name 空 = 老后端没发裸名 → 回落旧的人话文案（下面两个函数）。
+    private func toolNoteText(tool: String, name: String, text: String,
+                              ok: Bool, reason: String) -> String? {
+        guard !name.isEmpty else {
+            if !ok { return memoryFailNoteText(tool: tool, reason: reason) }
+            if tool == "gametask" { return "派引擎去跑日常：\(text)" }
+            return tool == "webpage" ? nil : memoryNoteText(tool: tool)
+        }
+        if !ok {
+            let why = reason.trimmingCharacters(in: .whitespacesAndNewlines)
+            return why.isEmpty ? "\(name)，没成" : "\(name)，没成：\(why)"
+        }
+        switch tool {
+        case "webpage":    return nil                 // 成功的网页：finalize 补可点的卡片
+        case "gametask":   return "\(name)：\(text)"  // 带任务清单，机主要核对派了什么（§3.4）
+        case "mail_draft": return "\(name)，落草稿信箱等你过目"   // 「等你过目」≠「寄出了」
+        default:           return name
+        }
+    }
+
+    /// 【老后端回落】一次工具产物的灰字文案（内容去记忆页/聊天记录页看，这里只标动作）。
     private func memoryNoteText(tool: String) -> String {
         switch tool {
         case "feel":    return "记下了一份心情"
@@ -1263,7 +1283,7 @@ struct ContentView: View {
         }
     }
 
-    /// 想做但没做成的那次（工具报错/被婉拒）。以前这种也显示成「记住了一件事」——
+    /// 【老后端回落】想做但没做成的那次（工具报错/被婉拒）。以前这种也显示成「记住了一件事」——
     /// 灰字在骗人，记忆其实没落盘。带上原因，TA 下次自己就知道该补什么。
     private func memoryFailNoteText(tool: String, reason: String) -> String {
         let what: String
@@ -1300,7 +1320,8 @@ struct ContentView: View {
     /// 答完一个问题 → 小字提醒（§5.2：只留所选的前几个字），下一张卡内自己浮现。
     private func questionPicked(_ question: String, _ answer: String) {
         let brief = answer.count > 14 ? String(answer.prefix(14)) + "…" : answer
-        chatStore.appendMemoryNote("选了「\(brief)」")
+        // 选是机主选的，不是角色做的事 → senderID 归 user（机主符号待定 §8，先无 logo）
+        chatStore.appendMemoryNote("选了「\(brief)」", senderID: "user")
     }
 
     /// 整卡答完：收卡 + 答案 POST 回填（TA 同轮拿到接着说）。
@@ -1349,7 +1370,8 @@ struct ContentView: View {
         if allow {
             let what = card.summary ?? card.tool
             let brief = what.count > 30 ? String(what.prefix(30)) + "…" : what
-            chatStore.appendMemoryNote("批了：\(card.tool) \(brief)")
+            // 批是机主批的 → senderID 归 user（无 logo 的素小字）；工具名保持裸名（§7.2）
+            chatStore.appendMemoryNote("批了 \(card.tool)：\(brief)", senderID: "user")
         }
         Task {
             do { try await chatService.decidePermit(id: card.id, allow: allow, reason: reason) }

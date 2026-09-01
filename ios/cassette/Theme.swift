@@ -33,14 +33,16 @@ extension ChatPalette {
 
 /// 人物色一套（PLAN_chatui §1.1）：base 本体（头像描边/名字/默认头像），
 /// light 浅身＝深色模式的染色底，dark 深身＝浅色模式的染色底，
-/// bullet 气泡内小装饰（用途待定 §8），logo 小字提醒的前缀符号（U3 接线，
-/// 机主的符号待定 §8，🐾 的实色 SVG 也是 U3 的活——先拿字符占位）。
+/// bullet 气泡内小装饰（用途待定 §8），logo/logoSymbol 小字提醒的前缀符号（§2）。
+/// logoSymbol 是 SF Symbol 名，优先于 logo——🐾 emoji 是彩色位图染不上灰字色，
+/// 小卡用系统爪印（单色模板，跟着字色走）；✦ 本来就是单色文本字符，走 logo。
 struct CharPalette {
     let base: Color
     let light: Color
     let dark: Color
     let bullet: Color
     let logo: String
+    var logoSymbol: String? = nil
 }
 
 /// §1.2 染色的唯一口径（全局只有这一条）：
@@ -129,7 +131,8 @@ enum IdentityColor {
                                light: Color(hex: 0xB2CBDE),
                                dark: Color(hex: 0x5F7E97),
                                bullet: Color(hex: 0x7FA8C9),
-                               logo: "🐾")
+                               logo: "",
+                               logoSymbol: "pawprint.fill")
         case "cass":            // Cassius：琥珀
             return CharPalette(base: Color(hex: 0xC9A15B),
                                light: Color(hex: 0xDFC79D),
@@ -158,6 +161,11 @@ extension Color {
     /// 机主人物色（PLAN_chatui §1.4 拍板：凡要用色的地方一律用它——按钮/角标/
     /// 链接/默认头像；主题色 theme 另存在 ChatPalette 里，暂时无处可用）。
     static var userAccent: Color { IdentityColor.palette(for: "user").base }
+
+    /// 小字提醒/「正在思考」的固定灰（§3.4）：不随深浅模式换值——它直接坐在背景上，
+    /// 要在浅深两种背景和自定义背景图（蒙版兜底）上都读得清。第一版取中性灰，
+    /// 具体值 §8.A 待机主拍（拍板前提是别用 .secondary——那会跟着系统漂）。
+    static let noteGray = Color(hex: 0x8A8A8E)
 
     /// 0xRRGGBB 十六进制建色。
     init(hex: UInt) {

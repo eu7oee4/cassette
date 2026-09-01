@@ -20,10 +20,12 @@ struct DescUpdate: Decodable {
 
 /// 一次记忆操作（tool: hold/feel/grow/trace/i…，text: 内容摘要）。
 /// ok=false ＝那次调用其实没成功（工具报错/被婉拒），error 是原因。
-/// 老后端不发这两个字段 → nil，按成功处理（和以前一样）。
+/// name 是裸工具名（mcp_mail_send，小字提醒 §7.2 的文案）。
+/// 老后端不发这些字段 → nil，按成功/人话文案处理（和以前一样）。
 struct StoredMemory: Decodable {
     let tool: String
     let text: String
+    let name: String?
     let ok: Bool?
     let error: String?
 }
@@ -137,8 +139,9 @@ struct PermitCard: Codable, Identifiable, Equatable {
 enum StreamEvent {
     case text(String)                        // 正文片段，追加进当前流式气泡
     case textBreak                           // 当前气泡定稿保留，下一段正文另起新气泡（工具调用切段）
-    // 这轮的一次工具操作 → 内联灰字。ok=false 是「他想做但没做成」，照样要说（带原因）。
-    case memory(tool: String, text: String, ok: Bool, error: String)
+    // 这轮的一次工具操作 → 内联小字。name=裸工具名（§7.2 拍板的文案；老后端为空）。
+    // ok=false 是「他想做但没做成」，照样要说（带原因）。
+    case memory(tool: String, name: String, text: String, ok: Bool, error: String)
     case question(QuestionCard)              // 问答卡：TA 想让机主拍板（U4）
     case permit(PermitCard)                  // 权限卡：TA 想动手，等批（U4/native §6）
     case error(String)                       // 出错提示
@@ -288,6 +291,7 @@ struct ChatService {
         case "text":       return .text(obj["content"] as? String ?? "")
         case "text_break": return .textBreak
         case "memory":     return .memory(tool: obj["tool"] as? String ?? "",
+                                          name: obj["name"] as? String ?? "",
                                           text: obj["text"] as? String ?? "",
                                           ok: obj["ok"] as? Bool ?? true,
                                           error: obj["error"] as? String ?? "")

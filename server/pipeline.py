@@ -351,8 +351,10 @@ def parse_chat_next(reply: str) -> tuple[str, Optional[int], Optional[str], str]
 
 def next_wake_note(raw: str, at: int) -> str:
     """定了下次醒来的提示文案：原话(相对) + 夹取后的绝对时间点。聊天灰字用。
-    只放时间部分——待办是他给自己留的话，不往用户那边灰字里漏。"""
-    return f"已定下次醒来：{raw}（{fmt_ts(at)}）"
+    只放时间部分——待办是他给自己留的话，不往用户那边灰字里漏。
+    措辞按小字提醒的口吻（PLAN_chatui §3.4：`✦ Cassius 决定下次21:13醒来`——
+    app 端把角色名接在前面，这里从「决定」说起）。"""
+    return f"决定下次 {fmt_ts(at)} 醒来（{raw}）"
 
 
 # ---------- 「你只有这一轮」 ----------
@@ -1037,6 +1039,15 @@ def _describe_trace(inp: dict) -> str:
     return "（对一条记忆：" + "、".join(parts) + "）" if parts else "（调整了一条记忆）"
 
 
+def bare_tool_name(name: str) -> str:
+    """小字提醒用的裸工具名（PLAN_chatui §7.2 拍板 09-01：全裸名，零维护）。
+    mcp__server__tool → mcp_tool——server 段是挂载编号不是工具身份，掐掉；
+    内置工具（Edit/Bash）本来就是裸名，照原样。"""
+    if name.startswith("mcp__"):
+        return "mcp_" + name.rsplit("__", 1)[-1]
+    return name
+
+
 def _stored_from_tool_use(name: str, inp: dict) -> Optional[dict]:
     """工具调用 → stored 条目（app 灰字提示用）。只记「写」操作，breath 等读操作不算产物。
     ⚠️ 这里只看得到「他想干什么」。干成没干成要等 tool_result，见 StoredCollector。"""
@@ -1294,6 +1305,9 @@ class StoredCollector:
             s = _stored_from_tool_use(b.get("name", ""), b.get("input", {}) or {})
             if not s:
                 continue
+            # 裸工具名随条目走（小字提醒 §7.2 拍板：文案=裸名）。tool 标签继续留着——
+            # mail_draft 改判 / 心流日志 / webpage 卡片反查都认它，两个字段各干各的。
+            s["name"] = bare_tool_name(b.get("name", ""))
             if tid:
                 self._pending[tid] = s
             else:

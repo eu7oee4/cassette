@@ -6,7 +6,9 @@ struct ChatView: View {
     /// 这些气泡属于**哪个角色**的会话。头像靠它取（ProfileStore 里没有「当前是谁」，
     /// 见那边的注释）——身份跟着数据一起传下来，不去问一个可变的全局。
     let charID: String
-    var isWaiting: Bool = false   // 等待对方回复中：底部显示"正在输入"
+    /// 角色显示名：「正在思考…」小字要念出名字（§3.4：`🐾 cassette 正在思考…`）。
+    var charName: String = ""
+    var isWaiting: Bool = false   // 等待对方回复中：底部显示「正在思考…」呼吸小字
 
     var onEdit: (ChatMessage) -> Void = { _ in }   // 时间戳旁小按钮：进编辑弹窗
     var onDelete: (ChatMessage) -> Void = { _ in } // 长按气泡：弹删除确认
@@ -37,7 +39,7 @@ struct ChatView: View {
                 // 它在列表最底端，滚动/离底期间跟着 isWaiting 插进拔出＝滚动中动布局，
                 // 正是 contentSize 污染的老病根（流式 text_break 会反复翻 isWaiting）。
                 if shownIsWaiting {
-                    TypingIndicatorRow(charID: charID)
+                    ThinkingNoteRow(charID: charID, charName: charName)
                         .flippedUpsideDown()
                         .transition(.opacity)
                 }
@@ -49,8 +51,15 @@ struct ChatView: View {
                                 // 空内容行（如断流残留的空文字消息）整行不渲染——
                                 // 不然会剩一条只有时间戳/纯空白的隐形行占位
                                 EmptyView()
-                            } else if message.isSystem || message.isMemoryNote {
+                            } else if message.isSystem {
                                 SystemMessageRow(text: message.plainText)
+                                    .contentShape(Rectangle())
+                                    .onLongPressGesture { onDelete(message) }
+                            } else if message.isMemoryNote {
+                                // 小字提醒和系统消息分成两档（§3.4/§3.9）：小字是某个
+                                // 角色做的事（靠左带 logo），系统消息是 app 自己说的话（居中）。
+                                NoteRow(text: message.plainText,
+                                        senderID: message.senderID ?? charID)
                                     .contentShape(Rectangle())
                                     .onLongPressGesture { onDelete(message) }
                             } else if case .browseNote(let urls) = message.kind {
@@ -447,49 +456,67 @@ struct StreamingPulseDot: View {
     }
 }
 
-/// "对方正在输入"指示：左侧对方头像 + 一个装着跳动圆点的气泡。
-private struct TypingIndicatorRow: View {
+/// 角色 logo（§2）：小字提醒的前缀符号，跟着小字的灰走（所以不能用彩色 emoji）。
+/// 小卡=爪印（SF Symbol 单色模板），Cassius=✦（单色文本字符）；
+/// 机主的符号待定（§8）→ 空，整个前缀不占位。头像 ≠ logo，别混。
+private struct CharLogo: View {
+    let senderID: String
+    var body: some View {
+        let p = IdentityColor.palette(for: senderID)
+        if let symbol = p.logoSymbol {
+            Image(systemName: symbol).font(.system(size: 10))
+        } else if !p.logo.isEmpty {
+            Text(p.logo).font(.caption)
+        }
+    }
+}
+
+/// 小字提醒（§3.4）：`{logo} {内容}`，固定灰、靠左，直接坐在背景上——
+/// 跟居中的系统消息分开：小字是某个角色做的事，系统消息是 app 自己说的话。
+private struct NoteRow: View {
+    let text: String
+    let senderID: String
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 5) {
+            CharLogo(senderID: senderID)
+            Text(text)
+        }
+        .font(.caption)
+        .foregroundStyle(Color.noteGray)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.leading, 4)
+        .padding(.vertical, 2)
+    }
+}
+
+/// 「正在思考…」呼吸小字（§3.4 第 1 条）：取代旧的头像+三跳点气泡。
+/// 模型还在生成、下一句还没跟上来时亮着，柔和地隐隐灭灭——呼吸感，不粗暴闪。
+private struct ThinkingNoteRow: View {
     let charID: String
+    let charName: String
+    @State private var dim = false
     var body: some View {
-        HStack(alignment: .top, spacing: 8) {
-            AvatarView(sender: .other, charID: charID)
-            TypingDots()
-                .padding(.horizontal, 16)
-                .padding(.vertical, 14)
-                .background(
-                    RoundedRectangle(cornerRadius: 18, style: .continuous)
-                        .fill(Color(.systemGray5))
-                )
-            Spacer(minLength: 40)
+        HStack(alignment: .firstTextBaseline, spacing: 5) {
+            CharLogo(senderID: charID)
+            Text("\(charName.isEmpty ? "cassette" : charName) 正在思考…")
         }
+        .font(.caption)
+        .foregroundStyle(Color.noteGray)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.leading, 4)
+        .padding(.vertical, 2)
+        .opacity(dim ? 0.3 : 0.95)
+        .animation(.easeInOut(duration: 1.5).repeatForever(autoreverses: true), value: dim)
+        .onAppear { dim = true }
     }
 }
 
-/// 三个轮流变亮的小圆点。
-private struct TypingDots: View {
-    @State private var phase = 0
-    private let timer = Timer.publish(every: 0.3, on: .main, in: .common).autoconnect()
-
-    var body: some View {
-        HStack(spacing: 5) {
-            ForEach(0..<3, id: \.self) { i in
-                Circle()
-                    .fill(Color.secondary)
-                    .frame(width: 7, height: 7)
-                    .opacity(phase == i ? 1.0 : 0.3)
-            }
-        }
-        .onReceive(timer) { _ in
-            phase = (phase + 1) % 3
-        }
-    }
-}
-
-/// 系统提示：居中灰字，不带头像/气泡。统一样式，各种提示都用它。
+/// 系统提示（§3.9）：居中灰字带破折号包裹，无 logo、无头像、无气泡——
+/// app 说的话，不属于任何角色（跟靠左带 logo 的小字提醒 NoteRow 的分界就在这）。
 private struct SystemMessageRow: View {
     let text: String
     var body: some View {
-        Text(text)
+        Text("——\(text)——")
             .font(.caption)
             .foregroundStyle(.secondary)
             .frame(maxWidth: .infinity, alignment: .center)

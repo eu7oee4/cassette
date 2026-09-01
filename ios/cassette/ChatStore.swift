@@ -110,9 +110,12 @@ final class ChatStore: ObservableObject {
         append(ChatMessage(sender: .me, kind: .system(text), timestamp: Date()))
     }
 
-    /// 追加一条「存了记忆」提示（居中灰字）。纯 UI：显示在聊天里，但不发回后端。
-    func appendMemoryNote(_ text: String) {
-        append(ChatMessage(sender: .other, kind: .memoryNote(text), timestamp: Date()))
+    /// 追加一条小字提醒（§3.4：靠左、logo 前缀、固定灰）。纯 UI：显示在聊天里，不发回后端。
+    /// senderID 不传＝当前会话角色（TA 做的事，带 TA 的 logo）；机主自己的动作
+    /// （答题/批权限）传 "user"——机主符号待定（§8），现在渲染成无 logo 的素小字。
+    func appendMemoryNote(_ text: String, senderID: String? = nil) {
+        append(ChatMessage(sender: .other, kind: .memoryNote(text), timestamp: Date(),
+                           senderID: senderID))
     }
 
     /// 修改某条消息的文字，保留其 id、发送方、身份。

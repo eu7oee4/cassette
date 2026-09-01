@@ -371,7 +371,8 @@ hold/grow/trace/I/webpage_write/code_start/task_run/game_start/mail_send。
    办没办成看回执原话，见 `41a4e82` / `80f877d`）。小字提醒是 `ret` 的第一个
    合适的读者。
 
-→ 这一条整体标**待定**（§8）。
+→ **09-01 已拍板**，结论在 §8.C：裸名 / ret 追加原因 / 读类跟聚合绑下期
+（所以后端下发面这期没扩，只是条目多带了 `name`）。
 
 ### 7.2.1 顺手挖出来的：breath 口径有两处没改干净（09-01 实读）
 
@@ -425,11 +426,13 @@ hold/grow/trace/I/webpage_write/code_start/task_run/game_start/mail_send。
 - [ ] 小字提醒靠左还是居中（本 plan 按靠左写，理由见 §3.9；机主没明说）
 
 **C. 口径**
-- [ ] §7.2 那整条：工具调用小字显示原始工具名还是人话？读类工具要不要显示？
-      失败和原因怎么带（挂到 `ret` 上？）
-- [ ] **聚合规则**（§7.2 第 1 条，已降级成优化项，不挡任何一步）：
-      按什么合？连续同名工具？连续同一插件？一整段工具区？
-      合起来的文案长什么样（「翻看了 12 处 ›」点开展开明细？）
+- [x] §7.2 那整条 **✅ 09-01 拍板**：
+      1. **文案=全裸工具名**（`🐾 mcp_mail_send`），现有写类人话文案换掉，零维护；
+      2. **失败=读 `ret` 判断，同一条小字后追加原因短句**（「，没成：{回执摘要}」）；
+      3. **读类=显示但跟聚合绑一个包**——聚合这期不做（见下），所以**这期读类
+         不下发，后端维持只发写类白名单**；读类+聚合下期一起上。
+- [x] **聚合规则 ✅ 09-01 拍板：这期不做**，先单条上屏真机跑几天看实际密度，
+      规则（按什么合、文案长什么样）到时候再定。
 - [ ] **游戏小字以后要补的时候，补成什么**（§3.4 例外，「要做后面再补」）：
       是聚合成一条（「操作了 8 次 ›」），还是只报有意义的节点（进了哪个界面、
       拿到什么），还是干脆走另一条通路（不进聊天流，进 Mind 页 / 游戏笔记本）
@@ -459,8 +462,23 @@ hold/grow/trace/I/webpage_write/code_start/task_run/game_start/mail_send。
    `streamingSegments` 便宜切分进 MessageSegments.swift，```/~~~ 围栏内不切，
    呼吸点只挂最后一段；松散列表流式里会暂时劈开、定稿块级解析自动纠正不落盘；
    模拟器编译过，真机没看）
-4. **U3 · 小字提醒**：logo 前缀 + 呼吸动效 + 三类内容接线 + **聚合**。
-   **前置：§7.2 那条口径先拍**（含聚合规则）。
+4. **U3 · 小字提醒**：logo 前缀 + 呼吸动效 + 三类内容接线。✅ 09-01
+   （口径见 §8.C 拍板：裸名/ret 追加原因/读类和聚合绑下期）。施工记录：
+   - **后端**：`pipeline.bare_tool_name`（`mcp__server__tool`→`mcp_tool`，server 段
+     是挂载编号掐掉；内置名照原样）；stored 条目带 `name` 字段（`tool` 标签不动——
+     mail_draft 改判/心流日志/网页卡反查都认它）；sse `memory` 事件带 `name`；
+     `StoredItem` 补字段；`next_wake_note` 措辞改「决定下次 {时间} 醒来（{原话}）」
+     （名字 app 端接）。测试 `test_tool_notes.py` 锁形，全套 490 绿。
+   - **iOS**：memoryNote 从 SystemMessageRow 分出来成 `NoteRow`（靠左 +
+     `CharLogo` 前缀 + `Color.noteGray` 固定灰 8A8A8E，§8.A 具体值待拍）；
+     小卡 logo 用 SF Symbol `pawprint.fill`（emoji 🐾 是彩色位图染不上灰，
+     CharPalette 加 `logoSymbol` 字段）、Cassius=✦ 文本字符；系统消息照 §3.9
+     补破折号包裹；三跳点气泡退役 → `ThinkingNoteRow` 呼吸小字
+     （`{logo} {名字} 正在思考…`，opacity 0.3↔0.95 缓 1.5s 往复）；
+     `.memory` 事件走 `toolNoteText`（裸名；失败「，没成：{ret 原因}」；gametask
+     带任务清单可核对；mail_draft 带「等你过目」；老后端 name 空回落人话文案）；
+     next_wake 小字=`{名字} 决定下次…`；「选了」「批了」senderID 归 user
+     （机主动作非角色动作，机主符号待定 §8 先无 logo）。模拟器编译过，真机没看。
 5. **U4 · 卡片**：先做问答卡（有 grill-me 这个现成场景可以自测），
    再做 permit 卡。**permit 卡是 PLAN_native 拨闸的硬前置**（那份 §7 N2）。
    **问答卡半边 ✅ 09-01 全链路落码未上电**：
@@ -483,7 +501,7 @@ hold/grow/trace/I/webpage_write/code_start/task_run/game_start/mail_send。
      Bash 命令全文/Edit 文件和改动，运输帽 600–2000 字符）+ iOS
      `PermitCardView`（同问答卡骨架：染色/超时置灰/收起；批准免二次确认，
      拒绝可附一句理由）+ `/permits/*` 现成 REST + syncPermits 轮询对齐。
-     批准后小字 `批了：{tool} {摘要}`（§5.1 的「命令调用」小字等 U3 成形再换）；
+     批准后小字 `批了 {tool}：{摘要}`（U3 成形时已换：senderID 归 user 无 logo）；
      拒绝不出小字（「生成中」呼吸本来就亮着）。
      ⚠️ 幽灵卡：路径闸拒的调用推了卡却到不了 permits——靠轮询收走+409 有声，
      罕见路，实时性换这个代价（sse._permit_events 注释里记了）。

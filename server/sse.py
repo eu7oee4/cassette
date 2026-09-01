@@ -153,6 +153,7 @@ def _memory_events(item: dict):
     if item["tool"] in ("codemode", "gamemode", "browse"):
         return
     yield sse({"type": "memory", "tool": item["tool"], "text": item["text"],
+               "name": item.get("name", ""),   # 裸工具名（§7.2 拍板：小字文案=它）
                "ok": item.get("ok", True), "error": item.get("error", "")})
 
 

@@ -357,6 +357,7 @@ class ChatRequest(BaseModel):
 class StoredItem(BaseModel):
     tool: str
     text: str
+    name: str = ""      # 裸工具名（mcp_mail_send；小字提醒 §7.2 的文案就是它）
     ok: bool = True     # 工具真的干成了吗（按 tool_result 定案，见 pipeline.StoredCollector）
     error: str = ""     # ok=False 时的原因，给人看的一句话
 
