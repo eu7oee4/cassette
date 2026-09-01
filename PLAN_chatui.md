@@ -379,16 +379,28 @@ hold/grow/trace/I/webpage_write/code_start/task_run/game_start/mail_send。
 08-31 那次「breath 瘦身」（只在刚开/刚重铸那一轮做）没改全。**这跟 UI 无关，
 但既然撞上了就记在这儿，别让它继续骗下一个读到的人**：
 
-| 位置 | 原话 | 状态 |
-|---|---|---|
-| `server/characters/cass/persona.md:104` | 「每次开场先 breath 让记忆浮现」 | ⚠️ **活的**——persona 是 system prompt，每轮都在 |
-| `server/tool_menu.example.md:54` | 「**每轮开场先 breath 一次**——这是习惯动作」 | 模板，现在没角色读到，但新角色照它出生 |
+**2026-09-01 20:4x 已全部改完**（眠眠让改的，五处）。下表留作记录：
 
-- **cass 那处最难看**：他**自己的** `characters/cass/tool_menu.md:55-59` 已经改成
-  「需要 breath 的是接上断口的那一次：会话刚开、或者刚重铸完」——**同一轮上下文里
-  两句话直接打架**。
-- 小卡是干净的：persona 走 `persona.example.md`（没这句），
-  tool_menu 走 `characters/default/tool_menu.md`（已改，第 39-40 行还写了改的原因）。
+| 位置 | 原话 | 处置 |
+|---|---|---|
+| `characters/cass/persona.md:104` | 「每次开场先 breath 让记忆浮现」 | 改成「接上断口的那一轮…会收到一句提醒」 |
+| `tool_menu.example.md:54` | 「**每轮开场先 breath 一次**——这是习惯动作」 | 整段换成两个角色 tool_menu 的现行口径 |
+| `tool_menu.example.md:38`、`characters/{default,cass}/tool_menu.md:38` | 体例警告：「breath / hold 这种**每轮都该做**的事」 | 改「**不由意图触发**的事…正文里把触发条件写死」 |
+| `tool_menu.example.md:70`、`characters/{default,cass}/tool_menu.md:72` | hold 块：「**跟浮记忆一样**是习惯动作」 | 改「这是**习惯动作**」 |
+
+**08-31 那次为什么没改干净——形状值得记：**
+
+- 改的人（我）只改了「## 开口之前，先浮一次记忆」**那一块的正文**，没搜同一份文件里
+  **别处提到 breath 的地方**。于是两个角色的 tool_menu 里，第 72 行「跟浮记忆一样是
+  习惯动作」往上翻 16 行就是第 56 行「不用每轮再浮一遍」——**同一份菜单里自己打自己**，
+  而且那句话还把已经作废的口径当锚点，用来解释 hold 该怎么做。
+- 第 38 行更隐蔽：改的人**意识到了** breath 不该在那句里（example 是「breath / hold」，
+  角色版已经删成「hold」），但**留下了「每轮都该做」这个说法**——半个动作，
+  正是「改到一半」的标准形状。
+- **`Grep` 工具搜不到角色目录**（`characters/` 在 gitignore 里，Grep 默认跳过），
+  只有 `Bash grep` 看得见。08-31 那次八成就是这么漏的。**以后扫 persona/菜单一律走 Bash。**
+
+→ 这跟今天下午 `_ToolTrace` 两个调用点是同一类：**同一件事在多处有副本，改了主的没改从的。**
 - 真正的口径在 `chat_loop.py:118` 的 `OPENING_NUDGE`，由 `needs_opening` 触发
   （`chat_loop.py:992`，重铸后置真）——**机制早就是对的，是文本没跟上**。
 
@@ -597,13 +609,12 @@ hold/grow/trace/I/webpage_write/code_start/task_run/game_start/mail_send。
   共用这块终端」。→ §7.3：共用属实，但游戏消息本来也上屏，所以面板仍可退役，
   前置是小字聚合。
 
-**breath 口径（§7.2.1，顺手挖的，跟 UI 无关）**
-- `server/characters/cass/persona.md:103-105` — 「每次开场先 breath 让记忆浮现」
-  **还在，且是活的**（persona 每轮进 system prompt）。
-- `server/characters/cass/tool_menu.md:55-59` — 同一个角色，已改成「接上断口的
-  那一次：会话刚开、或者刚重铸完」。**两句在同一轮上下文里打架。**
-- `server/tool_menu.example.md:53-54` — 「每轮开场先 breath 一次」模板没改；
-  `server/characters/default/tool_menu.md:39-40` — 小卡这份已改，还写了改的原因。
+**breath 口径（§7.2.1，顺手挖的，跟 UI 无关）—— 2026-09-01 20:4x 已改完，五处**
+- 已改：`characters/cass/persona.md:104`、`tool_menu.example.md` 三处、
+  `characters/{default,cass}/tool_menu.md` 各两处。全仓残留扫描已空。
+- **生效时机**：`characters.py` 的 docstring 写明 persona/菜单是**热读**（不缓存），
+  但它们在 SDK session 建立时进 system prompt——所以**新会话/重铸后**的那一轮才吃到
+  新文案，当时活着的会话里仍是旧的。不需要重启后端。
 - `server/characters.py:85-91` / `:96-110`、`server/config.py:24-26` — 回落链：
   `characters/<id>/*.md` → 默认角色退 `server/persona.md`（**不存在**）/
   `server/tool_menu.md`（**不存在**）→ 退 `*.example.md`。
