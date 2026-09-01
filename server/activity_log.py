@@ -210,11 +210,16 @@ def _write_opens(d: dict) -> None:
 # ---------- 行为账（开局包「行为清单」的机械来源，§5.4①） ----------
 
 def append_act(char_id: str, scene: str, tool: str, summary: str,
-               ok: bool = True) -> None:
+               ok: bool = True, ret: str = "") -> None:
     """碰了外部世界的工具调用留痕（判线 §5.2：对外部对象的读写都留；纯内部
-    记忆操作不留）。执行层确定性落账，不靠他自觉。"""
+    记忆操作不留）。执行层确定性落账，不靠他自觉。
+
+    ⚠️ `ok` = **协议层没报错**，不是「事情办成了」——业务层的拒绝（配额用尽、
+    对象不存在）在 `is_error` 上跟成功同形。「成没成」看 `ret`：执行层从
+    `tool_result` 里抽的回执原话，不解读、不改判 `ok`。两列各答一个问题。"""
     rec = {"ts": int(time.time()), "scene": scene, "tool": tool,
-           "ok": bool(ok), "text": (summary or "")[:200]}
+           "ok": bool(ok), "text": (summary or "")[:200],
+           "ret": (ret or "")[:200]}
     try:
         with _LOCK:
             ACT_DIR.mkdir(exist_ok=True)

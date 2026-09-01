@@ -946,6 +946,52 @@ class ToolTraceTest(_AlTmpBase):
         self.assertEqual(self.al.read_events("cass-game-1000"), [])
         self.assertEqual(self.al.recent_acts("cass"), [])
 
+    def test_receipt_lands_and_readonly_skips_it(self):
+        """回执列（§7.2）：写类存原话、只读工具不存（返回是内容不是回执）。"""
+        handle = sm.LoopHandle(char_id="cass", scene="chat")
+        handle.meta["game_pump"] = {"seg_id": "cass-game-1000"}
+        tr = chat_loop._ToolTrace(handle)
+        tr.use("t1", "Bash", {"command": "pytest -q"})
+        tr.result("t1", False, "5 failed, 430 passed")
+        tr.use("t2", "Read", {"file_path": "server/x.py"})
+        tr.result("t2", False, "整个文件的内容" * 100)
+        evs = self.al.read_events("cass-game-1000")
+        self.assertEqual(evs[0]["ret"], "5 failed, 430 passed")
+        self.assertEqual(evs[1]["ret"], "")          # 只读不存回执
+
+    def test_receipt_accepts_all_three_content_shapes(self):
+        """`ToolResultBlock.content` 是 str | list[dict] | None 三形。"""
+        self.assertEqual(chat_loop._result_text("寄到了。"), "寄到了。")
+        self.assertEqual(
+            chat_loop._result_text([{"type": "text", "text": "寄到了。"},
+                                    {"type": "image", "source": {}},
+                                    {"type": "text", "text": "没留副本。"}]),
+            "寄到了。\n没留副本。")
+        self.assertEqual(chat_loop._result_text(None), "")
+        self.assertEqual(chat_loop._result_text(object()), "")
+
+    def test_every_call_site_passes_content(self):
+        """09-01 复盘第 4 步扫出来的：`_ToolTrace` 有**两个**调用点——常规轮
+        (`_turn_events`) 和 game 泵轮——头一版补线只改了前一个，泵轮的回执
+        整条丢掉。补线类的坑一贯长这样：**改的是函数，漏的是第二个调用点。**
+        这条守着「以后再加第三个调用点也不许忘」。"""
+        import inspect
+        import re
+        src = inspect.getsource(chat_loop)
+        calls = re.findall(r"trace\.result\((.*?)\)", src, re.S)
+        self.assertGreaterEqual(len(calls), 2)
+        for c in calls:
+            self.assertEqual(len(c.split(",")), 3, f"少传 content: {c!r}")
+
+    def test_receipt_capped(self):
+        handle = sm.LoopHandle(char_id="cass", scene="chat")
+        handle.meta["game_pump"] = {"seg_id": "cass-game-1000"}
+        tr = chat_loop._ToolTrace(handle)
+        tr.use("t1", "Bash", {"command": "cat big"})
+        tr.result("t1", False, "x" * 5000)
+        self.assertEqual(len(self.al.read_events("cass-game-1000")[0]["ret"]),
+                         chat_loop.RET_CAP)
+
 
 class PronounHintTest(unittest.TestCase):
     """人称提示两个轴：代词性别常在；第二人称视角聊天/醒来要、同居世界不要。"""
@@ -1059,6 +1105,29 @@ class ActsFromExecutionTest(_AlTmpBase):
         self.assertEqual(act["scene"], "wake")
         self.assertEqual(act["text"], "1786430786")
 
+    def test_business_refusal_keeps_ok_but_keeps_receipt(self):
+        """09-01 11:10 回归样本：一封信被配额挡回来，一个字没寄出去。
+
+        业务层的拒绝在 `is_error` 上跟成功同形——所以 `ok` 照样 True（不猜、
+        不扫词改判），但回执原话留在 `ret` 里。**账从「只能答调没调」变成
+        「还能答成没成」**，两列各答一个问题。"""
+        tr = self._trace()
+        tr.use("t1", "mcp__beacon__write_letter",
+               {"to": "24c8ed", "subject": "你有两封信寄错到我这儿了"})
+        tr.result("t1", False, "今天已经寄了 3 封了。明天再来。")
+        act = self.al.recent_acts("cass")[0]
+        self.assertTrue(act["ok"])                   # 协议层确实没报错
+        self.assertEqual(act["ret"], "今天已经寄了 3 封了。明天再来。")
+
+    def test_real_send_receipt(self):
+        """对照组：同一个工具真寄出去了，回执长得不一样。"""
+        tr = self._trace()
+        tr.use("t1", "mcp__beacon__write_letter", {"subject": "那段距离"})
+        tr.result("t1", False, "寄到了。内容没有留下任何副本。")
+        act = self.al.recent_acts("cass")[0]
+        self.assertTrue(act["ok"])
+        self.assertEqual(act["ret"], "寄到了。内容没有留下任何副本。")
+
 
 
 class FoldTraceTest(_AlTmpBase):
@@ -1103,6 +1172,23 @@ class FoldTraceTest(_AlTmpBase):
         self.assertNotIn("亲手", out[2]["text"])
         # 确定性：同输入同字节
         self.assertEqual(out, chat_loop._frame_activities(self.HIST, "cass"))
+
+    def test_folded_frame_shows_receipt(self):
+        """写类那行带回执（§7.2 c）：ok=True 不等于办成了，原话才算数。
+        老账行没有 ret（09-01 之前落的）→ 缺键取空，那行与从前一字不差。"""
+        self._two_intervals()
+        seg = self.al.interval_seg_id("cass", "game", 1500)
+        self.al.append_event(seg, "tool", name="mcp__beacon__write_letter",
+                             text="你有两封信寄错到我这儿了", ok=True,
+                             ret="今天已经寄了 3 封了。明天再来。",
+                             ext=True, ro=False, turn="chat")
+        self.al.append_event(seg, "tool", name="Edit", text="server/x.py",
+                             ok=True, ext=True, ro=False, turn="chat")
+        folded = chat_loop._frame_activities(self.HIST, "cass")[1]["text"]
+        self.assertIn("write_letter：你有两封信寄错到我这儿了"
+                      " → 今天已经寄了 3 封了。明天再来。", folded)
+        self.assertIn("Edit：server/x.py", folded)    # 没 ret 的行原样
+        self.assertNotIn("Edit：server/x.py →", folded)
 
     def test_no_events_plain_frame(self):
         """事件账空（或过了保留窗被清）→ 折叠框与从前一字不差。"""
