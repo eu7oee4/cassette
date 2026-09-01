@@ -93,9 +93,8 @@ struct ContentView: View {
     /// 空 = 旧后端/手动开的会话，不设限。codeMode/gameSessionActive 只说"会话活着、是什么档案"，
     /// 归谁全靠这个字段——两件事拆开，切会话才能当场断路由、不用等一次网络往返。
     @State private var sessionChar = ""
-    @State private var terminalExpanded = false       // 内联终端面板展开着吗
     @State private var confirmStopBusy = false        // 退出时那边正干着活 → 先问一句
-    // 游戏（game_bridge）：剧情会话复用 code 那套终端面板和消息改道；急停/引擎状态给顶栏 ⏸。
+    // 游戏（game_bridge）：剧情会话复用 code 的消息改道；急停/引擎状态给顶栏 ⏸。
     @State private var gameSessionActive = false      // 剧情会话活着（/code/status 的 profile=game）
     @State private var gamePaused = false             // 急停锁状态（真相在后端 /game）
     @State private var gameEngineRunning = false      // 任务引擎正在跑
@@ -114,20 +113,6 @@ struct ContentView: View {
     private var gameMine: Bool { gameSessionActive && sessionMine }
     /// 消息该改道 tmux 会话吗（code 和游戏剧情共用同一条管道）。
     private var sessionMode: Bool { codeMine || gameMine }
-    /// 气泡区此刻有多高。终端面板是**盖在**气泡区上的 overlay，高度以它为唯一上限——
-    /// 所以面板绝不可能越过顶栏，键盘/附件条/输入框长高也都不用单独算：那些一动，
-    /// 气泡区就变矮，这个值自己跟上。
-    /// 量它不会成环，正因为面板是 overlay：面板高度影响不了气泡区的 frame。
-    /// （压缩式布局那版量过一次，是正反馈震荡——终端变高 → 输入栏被压 → 量出更小的值
-    /// → 终端算出自己还能更高 → 静止时黑条都会自己上下跳。overlay 把那条链断了。）
-    @State private var chatAreaHeight: CGFloat = 0
-    /// 终端面板此刻画出来多高（面板自己报上来）→ 转给 ChatView 当气泡的内容内边距，
-    /// 最新气泡就正好停在黑条上边、不被盖住。
-    @State private var terminalHeight: CGFloat = 0
-    /// 终端当前档位。只用来判断「这次高度变化要不要让气泡跟着做动画」——
-    /// 人主动换档才动画（气泡和面板一起走，不然气泡先跳、面板后滑，看着像自己滚了一下）；
-    /// 弹窗选项进出导致的高度变化保持瞬时，别把整个气泡列表拖进 220 毫秒的重排。
-    @State private var terminalRatio: CGFloat = 0
 
     // 编辑消息弹窗状态
     @State private var editingMessage: ChatMessage? = nil
@@ -351,8 +336,6 @@ struct ContentView: View {
                  onDeleteStack: { msgs in deleteCandidates = msgs },
                  editRefreshTick: editRefreshTick,
                  backToNowTick: backToNowTick,
-                 // 会话模式（code/游戏）：终端盖在气泡区上，气泡得留出这么高才不会被压在底下
-                 bottomOverlayHeight: sessionMode ? terminalHeight : 0,
                  scrollTarget: chatScrollTarget,
                  onScrollTargetHandled: { chatScrollTarget = nil })
             // ⚠️ 换会话 = 换一份列表身份，别继承上一份的任何滚动状态。
@@ -365,25 +348,6 @@ struct ContentView: View {
             // nonce 让「点当前这一行」也能重建：显示错乱时那是唯一的手动复位口。
             .id("\(currentCharID)#\(chatViewNonce)")
             .background(ChatPalette.current(colorScheme).bg)
-            .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { chatAreaHeight = $0 }
-            // Code 模式的终端：**盖在**气泡区上，不压缩它。压缩那版的代价见
-            // CodeTerminalPanel 的开头注释——一句话：气泡区布局全程不动，面板才有
-            // 一个诚实的高度上限，也才不会每次改高度都把整个气泡列表重排一遍。
-            // ⚠️ 顺序要紧：overlay 挂在 safeAreaInset **之前**，它才对齐到「输入栏顶」
-            // 而不是屏幕底。
-            .overlay(alignment: .bottom) {
-                // 游戏剧情会话共用这块终端（后端 /code/* 打的是「当前活着的会话」）
-                if sessionMode {
-                    CodeTerminalPanel(service: chatService, expanded: $terminalExpanded,
-                                      available: chatAreaHeight)
-                }
-            }
-            .onPreferenceChange(TerminalHeightKey.self) { terminalHeight = $0 }
-            .onPreferenceChange(TerminalRatioKey.self) { terminalRatio = $0 }
-            // 换档时气泡跟着面板一起动（同一条曲线、同一段时长）——不加这句气泡是瞬时
-            // 跳到位、面板还在滑，看着就是「上面的气泡自己滚了一下」。
-            // 挂在 ratio 上而不是 height 上：弹窗选项进出只改 height，那一路保持瞬时。
-            .animation(.easeOut(duration: 0.22), value: terminalRatio)
             .safeAreaInset(edge: .bottom, spacing: 0) {
                 VStack(spacing: 0) {
                     if let pcard = permitCards.first {
@@ -851,7 +815,6 @@ struct ContentView: View {
             codeMode = false
             gameSessionActive = false
             sessionChar = ""          // 会话没了，归属跟着清，别留陈值
-            terminalExpanded = false
             chatStore.appendSystemMessage(wasGame ? "游戏会话关掉了" : "已退出 Code 模式")
         } catch {
             // 停不掉就别翻开关：翻了下一次回前台 syncCodeMode 又会按"会话还活着"
@@ -883,17 +846,15 @@ struct ContentView: View {
         if gameAlive != gameSessionActive {
             gameSessionActive = gameAlive
             // 灰字只在会话是我这边的时候报：别人的活报在我的聊天里 = 把对方的活当成自己的。
-            if gameAlive { if sessionMine { chatStore.appendSystemMessage("去玩游戏了") } }
-            else { terminalExpanded = false }
+            if gameAlive, sessionMine { chatStore.appendSystemMessage("去玩游戏了") }
         }
         let codeAlive = st.alive && !isGame
         guard st.enabled else {
-            if codeMode { codeMode = false; terminalExpanded = false }
+            if codeMode { codeMode = false }
             return
         }
         guard codeAlive != codeMode else { return }
         codeMode = codeAlive
-        if !codeAlive { terminalExpanded = false }
         if codeAlive, sessionMine { chatStore.appendSystemMessage("已切进 Code 模式") }
     }
 

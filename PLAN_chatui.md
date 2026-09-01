@@ -489,7 +489,11 @@ hold/grow/trace/I/webpage_write/code_start/task_run/game_start/mail_send。
      罕见路，实时性换这个代价（sse._permit_events 注释里记了）。
      上电顺序照 native：写类 schema token 真机实测后拨 WRITE_TOOLS=1。
 6. **U5 · 摘掉终端面板**（§7.3）。前置只有 U4 的 permit 卡（code 那半边要有人接），
-   game 那半边靠气泡流本来就够。
+   game 那半边靠气泡流本来就够。✅ 09-01（CodeTerminalPanel.swift 整删；
+   挂载 overlay、bottomOverlayHeight 让位、TerminalHeightKey/RatioKey、
+   chatAreaHeight 量高、terminalExpanded 全摘；**sessionMode 和 /code/send
+   消息改道没动**——那是 native §9 第二批的活，拆它要和 app 投递口同一批；
+   模拟器编译过）
 7. **U6 · 背景图 + 蒙版**。完全独立，随时可插。
 8. **U7 · 文件卡文件名一行**、图片/表情圆角这些零碎。
 
