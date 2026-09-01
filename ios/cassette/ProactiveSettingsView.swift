@@ -1,9 +1,14 @@
+import PhotosUI
 import SwiftUI
 
 /// 主动消息设置页。进页面拉后端对齐，任何改动即时回写后端。
 struct ProactiveSettingsView: View {
     @ObservedObject var store: ProactiveSettingsStore
+    /// 聊天背景（U6）：纯本机偏好，改动即时生效，不走 loading/回写那套。
+    @ObservedObject var chatBG: ChatBackgroundStore
     @State private var loading = true
+    @State private var pickedLight: PhotosPickerItem? = nil
+    @State private var pickedDark: PhotosPickerItem? = nil
     // 「小屋当首页」是纯本机的界面偏好，不进后端设置——直接落 AppStorage。
     @AppStorage("houseAsRoot") private var houseAsRoot = false
 
@@ -42,6 +47,23 @@ struct ProactiveSettingsView: View {
                     Toggle("小屋当首页", isOn: $houseAsRoot)
                 } footer: {
                     Text("开启后，打开 app 先看到小屋（房子视图），聊天变成右下角随时可掏出的「手机」。关掉就回到现在的聊天首页。")
+                }
+
+                Section {
+                    bgRow("浅色模式", dark: false, image: chatBG.lightImage,
+                          picked: $pickedLight) { chatBG.clearImage(dark: false) }
+                    bgRow("深色模式", dark: true, image: chatBG.darkImage,
+                          picked: $pickedDark) { chatBG.clearImage(dark: true) }
+                    if chatBG.lightImage != nil || chatBG.darkImage != nil {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("蒙版浓度").font(.subheadline)
+                            Slider(value: $chatBG.dim, in: 0...1)
+                        }
+                    }
+                } header: {
+                    Text("聊天背景")
+                } footer: {
+                    Text("浅、深两种模式各一张，只在聊天页生效。\n蒙版是盖在图上的一层底色：图太花时往右滑，小字提醒才读得清；滑到底＝纯色背景。")
                 }
 
                 // wake 内部设置只在开关打开时显示（关=完全停摆，摆着一排没用的设置反而误导）。
@@ -103,6 +125,38 @@ struct ProactiveSettingsView: View {
     }
 
     // MARK: - 行构造
+
+    /// 背景图一行：缩略图 + 选图（PhotosPicker）+ 清除。选图落盘即生效。
+    private func bgRow(_ label: String, dark: Bool, image: UIImage?,
+                       picked: Binding<PhotosPickerItem?>,
+                       clear: @escaping () -> Void) -> some View {
+        HStack(spacing: 10) {
+            Text(label)
+            Spacer()
+            if let image {
+                Image(uiImage: image)
+                    .resizable().scaledToFill()
+                    .frame(width: 44, height: 30)
+                    .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                Button("清除", role: .destructive, action: clear)
+                    .font(.subheadline)
+                    .buttonStyle(.borderless)
+            }
+            PhotosPicker(selection: picked, matching: .images) {
+                Text(image == nil ? "选图" : "换图").font(.subheadline)
+            }
+            .buttonStyle(.borderless)
+        }
+        .onChange(of: picked.wrappedValue) { _, item in
+            guard let item else { return }
+            Task {
+                if let data = try? await item.loadTransferable(type: Data.self) {
+                    chatBG.setImage(data, dark: dark)
+                }
+                picked.wrappedValue = nil
+            }
+        }
+    }
 
     private func field<T>(_ kp: WritableKeyPath<ProactiveSettings, T>) -> Binding<T> {
         Binding(get: { store.settings[keyPath: kp] },

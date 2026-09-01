@@ -7,6 +7,7 @@ struct ContentView: View {
     @StateObject private var chatStore = ChatStore()       // 聊天记录的主人（本地持久化，按会话分仓）
     @StateObject private var profileStore = ProfileStore() // 头像 + 顶栏标题
     @StateObject private var proactiveStore = ProactiveSettingsStore() // 主动消息设置（当前角色的）
+    @StateObject private var chatBGStore = ChatBackgroundStore()       // 聊天背景图+蒙版（U6，纯本机）
     @StateObject private var stickerStore = StickerStore() // 表情包库
     @StateObject private var charListStore = CharacterListStore() // 角色清单（会话列表数据源）
     @StateObject private var draftStore = DraftStore()     // 未发的草稿（文字+附件），一人一份
@@ -256,7 +257,7 @@ struct ContentView: View {
             // 归属是全机一份的资源分配，不分角色 → 不挂切人按钮
             OwnershipPage()
         case .settings:
-            charSwitchable(ProactiveSettingsView(store: proactiveStore))
+            charSwitchable(ProactiveSettingsView(store: proactiveStore, chatBG: chatBGStore))
         }
     }
 
@@ -347,7 +348,7 @@ struct ContentView: View {
             // 逐个手动清那 10 个 @State 是跟漏清赛跑，换 id 让 SwiftUI 整份重建才是根治。
             // nonce 让「点当前这一行」也能重建：显示错乱时那是唯一的手动复位口。
             .id("\(currentCharID)#\(chatViewNonce)")
-            .background(ChatPalette.current(colorScheme).bg)
+            .background { chatBackground }
             .safeAreaInset(edge: .bottom, spacing: 0) {
                 VStack(spacing: 0) {
                     if let pcard = permitCards.first {
@@ -602,6 +603,22 @@ struct ContentView: View {
         Task { await syncCodeMode() }
         // 草稿角标也是按角色算的，别让抽屉里挂着上一位的数字等下一拍轮询。
         Task { await refreshDraftCount() }
+    }
+
+    /// 聊天区背景（U6）：底色 + 可选背景图 + bg 色蒙版。图只在气泡缝隙里露；
+    /// 蒙版救的是直接坐在背景上的小字提醒/系统消息（§1.3），滑到 1＝纯色。
+    @ViewBuilder private var chatBackground: some View {
+        let pal = ChatPalette.current(colorScheme)
+        ZStack {
+            pal.bg
+            if let img = chatBGStore.image(for: colorScheme) {
+                Color.clear
+                    .overlay(Image(uiImage: img).resizable().scaledToFill())
+                    .clipped()
+                pal.bg.opacity(chatBGStore.dim)
+            }
+        }
+        .ignoresSafeArea()
     }
 
     // 顶部导航栏：左猫爪开抽屉，居中标题；右侧空占位配平保持标题居中

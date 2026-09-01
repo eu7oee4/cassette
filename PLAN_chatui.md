@@ -494,7 +494,12 @@ hold/grow/trace/I/webpage_write/code_start/task_run/game_start/mail_send。
    chatAreaHeight 量高、terminalExpanded 全摘；**sessionMode 和 /code/send
    消息改道没动**——那是 native §9 第二批的活，拆它要和 app 投递口同一批；
    模拟器编译过）
-7. **U6 · 背景图 + 蒙版**。完全独立，随时可插。
+7. **U6 · 背景图 + 蒙版**。完全独立，随时可插。✅ 09-01
+   （ChatBackgroundStore：浅深各一张落 Documents/ChatBackground、统一转 JPEG
+   缩到 2000pt；蒙版=bg 色盖层，滑到底纯色，**默认 0.4 是第一版**（§8.A 待定项
+   顺手拍了，看效果再调）；设置入口在「设置」页新「聊天背景」段（PhotosPicker
+   选图/换图/清除+浓度滑块）；渲染在 ContentView.chatBackground（色+图+蒙版，
+   只管聊天页）；纯本机偏好不进后端；模拟器编译过）
 8. **U7 · 文件卡文件名一行**、图片/表情圆角这些零碎。
 
 `U0` 之前不要动别的——所有后面几步都要用到 token，先散着改会改两遍。
