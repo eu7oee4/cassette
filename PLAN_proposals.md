@@ -565,6 +565,45 @@ beacon 回的是纯文本，两道结构判据一道都不命中。那一类的�
 
 ---
 
+### 7.2.2 A：自己家的插件改成结构化失败（09-01 12:5x 完工）
+
+复盘第 4 步扫的是**判据侧**，这一节扫的是**上游侧**：账判不出「没成」，另一半原因是
+**插件根本没说**。眠眠 12:44 拍板「先上电，然后做 A」。
+
+**分档的道理**：本地失败（连不上、超时、参数不对、没钥匙）是**我们控制得了的**，
+让它 `isError=True` 就完事，一行文本表都不用建；只有**别人家服务的业务拒绝**
+（Beacon 上游的配额）才需要认字，那是 B 那一档。**能改上游就别在下游猜。**
+
+**动手前的实测（`grep isError=True` 九个插件）**：
+
+| 插件 | 原来 | 处置 |
+|---|---|---|
+| beacon / browser / galatea | `_err()` 一律 `isError=True` | **已经对，没动** |
+| codemode | 返回 `{"ok": False, "error": …}` | **②本来就认，没动** |
+| **mail** | 全是纯文本 `error: …`，从不设 isError | 改：新增 `_err()`／`_ok()`，handler 返回 `CallToolResult`，四条失败路带 `isError=True` |
+| **webpage** | `return "error: …"` ×6（FastMCP str） | 改：`raise` → FastMCP 包成 ToolError → 下游 isError=True |
+| **jobhunt** | `_req` 返回 `{"error": …}`，无 ok 键 | 改：补 `"ok": False` |
+| **game-maayuan** | 同上 | 改：补 `"ok": False` |
+| **game-story**（笔记本/`game_start`） | `return f"error: …"` ×2 + `_req` 无 ok 键 | 改：raise + `_req` 补 `"ok": False` |
+| ~~game-story/`game_session_mcp.py`~~（12 处） | 同样是纯文本 | **评估后不改**，两条理由：①它是 `FastMCP("game")` → `mcp__game__` 命中内部判线，**两本账的摘要都不收它**（实测 `acts_worthy=False`、`external_tool=False`）；②它跑在游戏泵里，改成抛异常会动到读剧情流程看到的文本，风险和收益不对等 |
+
+**⚠️ mail 的白名单草稿那条没动，是有意的。** 插件自己的口径写着「白名单外落草稿
+**不是失败**」——它是**调用成功了但信没发出**，正好是 §3.3 那条分界。把它标成
+`isError` 会把「出错了」和「没发出」混成一件事，而且正文里明写着「别重发」。
+它归 B 的三态（成／没成／不知道），不归 A。代码里留了注释拦下一个人。
+
+**四条失败路真跑过一遍**（不是读代码推的）：
+
+```
+mail 未知工具      isError=True                    → ①命中
+webpage 空 html    ToolError（FastMCP 包的）        → 下游 isError=True → ①命中
+jobhunt 连不上     {"ok": false, "error": …}        → ②命中
+game-story 连不上  RuntimeError → ToolError         → ①命中
+```
+
+**上电边界**：插件是每条 session 起的子进程，**新会话才吃到新代码**；后端已于
+09-01 12:45 重启（`ret` 同时开始落账）。
+
 ⚠️ **`_fold_trace_lines` 那处渲染是有寿命的**——眠眠 09-01 11:50 说折叠段
 后面打算去掉、重铸要重新定义。`ret` 落在账里不受影响，**渲染点会跟着折叠段一起走**，
 到时候在新的重铸口径里给它重新找个出口（工具留痕过不过桥、以什么形状过，
