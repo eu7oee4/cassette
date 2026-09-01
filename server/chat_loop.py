@@ -258,6 +258,27 @@ def _permit_gate(handle: session_mgr.LoopHandle):
     「机主批不批」一件事。超时分轮来源（§1.3）。"""
     async def can_use(tool: str, tool_input: dict, ctx) -> "PermissionResultAllow | PermissionResultDeny":
         import permits
+        u2 = config.user_name()
+        if tool == "AskUserQuestion":
+            # 问答卡（PLAN_chatui §3.5/U4）：卡本体在 assistant 事件流过
+            # translate_events 时已推给 app（sse "question"），这儿只管挂起等答案，
+            # 答案用 updated_input 回填（机制 09-01 探针实证，见 questions.py 卷首）。
+            import questions
+            got = await questions.ask(
+                handle.char_id,
+                questions=(tool_input or {}).get("questions") or [],
+                question_id=getattr(ctx, "tool_use_id", None))
+            if got is None:
+                mins = max(1, questions.TIMEOUT_SEC // 60)
+                return PermissionResultDeny(
+                    message=f"问题递到{u2}手机上，等了约 {mins} 分钟没等到回答——"
+                            "先按你自己的判断来，TA 回头看到会说的。")
+            answers, note = got
+            if answers is None:
+                return PermissionResultDeny(
+                    message=f"{u2}这会儿没答" + (f"：{note}" if note else "。"))
+            return PermissionResultAllow(
+                updated_input={**(tool_input or {}), "answers": answers})
         turn = handle.meta.get("turn_kind") or "chat"
         timeout = permits.timeout_for(turn)
         verdict = await permits.ask(
@@ -407,6 +428,15 @@ def build_options(char_id: str, catalog: Optional[list] = None,
         if config.WRITE_TOOLS_ENABLED:
             system += _discipline_block(char_id)
 
+    if handle is not None and config.QUESTION_CARDS_ENABLED:
+        # 问答卡（PLAN_chatui §3.5/U4）：AskUserQuestion 挂载但不进 allowed_tools
+        # → 每次调用落 ask → can_use_tool 挂起，app 弹卡机主作答（updated_input
+        # 回填）。wake 轮被 PreToolUse 门挡着（不在 wake_tools），问不了。
+        tools = tools + ["AskUserQuestion"]
+        system += (f"\n\n【拿不准要{config.user_name()}拍板的事，可以用 "
+                   "AskUserQuestion 出一张选择卡：卡会弹到TA手机上，TA选完你"
+                   "同轮就拿到答案；等一阵没等到就先按自己的判断来。】")
+
     env = {}
     if tools and pipeline.tool_search_on("chat"):
         tools = tools + [pipeline.TOOL_SEARCH_TOOL]
@@ -425,11 +455,15 @@ def build_options(char_id: str, catalog: Optional[list] = None,
         mcp_servers=servers,
         strict_mcp_config=True,
         tools=tools,
-        # 写类四件不进直放面（PLAN_native §1.1）：挂载归 tools（schema 在），
-        # 放行走 ask → can_use_tool（一命令一卡，机主原地拍板）。
-        allowed_tools=[t for t in tools if t not in pipeline.WRITE_BUILTINS],
+        # 写类四件和 AskUserQuestion 不进直放面（PLAN_native §1.1 / chatui U4）：
+        # 挂载归 tools（schema 在），放行走 ask → can_use_tool（一命令一卡/
+        # 一问一卡，机主原地拍板）。
+        allowed_tools=[t for t in tools
+                       if t not in pipeline.WRITE_BUILTINS
+                       and t != "AskUserQuestion"],
         can_use_tool=(_permit_gate(handle)
-                      if handle is not None and config.WRITE_TOOLS_ENABLED
+                      if handle is not None and (config.WRITE_TOOLS_ENABLED
+                                                 or config.QUESTION_CARDS_ENABLED)
                       else None),
         env=env,
         include_partial_messages=True,   # 逐字增量：text 事件靠它
@@ -618,9 +652,10 @@ async def _turn_events(client, handle: session_mgr.LoopHandle,
                                          timeout=config.CLAUDE_TIMEOUT_SEC)
         except asyncio.TimeoutError:
             import permits
-            if permits.waiting(handle.char_id):
-                # 审批挂起不算空闲（PLAN_native §1.2）：卡在机主手上，流静着
-                # 是正常的。permits 自己有超时兜底，这儿等它的结果就好。
+            import questions
+            if permits.waiting(handle.char_id) or questions.waiting(handle.char_id):
+                # 审批/问答挂起不算空闲（PLAN_native §1.2）：卡在机主手上，
+                # 流静着是正常的。两边各自有超时兜底，这儿等结果就好。
                 continue
             flags["timeout"] = True
             print("[chat_loop] 轮内空闲超时（session 按死处理）", file=sys.stderr)

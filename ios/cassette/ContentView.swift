@@ -57,6 +57,9 @@ struct ContentView: View {
                                                   // 只看 isWaiting 会在正文开始流出后放开按钮，
                                                   // 再发一条就是两个 SSE 流并发互踩（气泡交错/记账混乱）
     @State private var errorText: String? = nil   // 发送失败提示
+    // 问答卡队列（PLAN_chatui §3.5/U4）：队头亮在输入栏上方，答完/跳过出队。
+    // SSE question 事件实时进（去重），回前台/轮询靠 syncQuestions 对齐。
+    @State private var questionCards: [QuestionCard] = []
 
     /// 一条等待补投的轮：断流时的半截气泡 ids + 登记时间 + 是否已放弃等待（放弃后仍留着兜迟到补投）。
     struct RescueWait {
@@ -208,6 +211,7 @@ struct ContentView: View {
             }
             await syncCodeMode()   // 他可能在断流/后台期间自己切进了 Code 模式 → 回前台对齐
             await syncPending()
+            await syncQuestions()
             await reconcileRescues()
             await refreshDraftCount()
             await refreshGameStatus()
@@ -216,6 +220,7 @@ struct ContentView: View {
                 // 会话模式（code/游戏）下他说的每句话都靠这条通道回来 → 提到 3s；平时 15s 省电。
                 try? await Task.sleep(for: .seconds(sessionMode ? 3 : 15))
                 await syncPending()
+                await syncQuestions()
                 await reconcileRescues()
                 await refreshDraftCount()
                 await refreshGameStatus()
@@ -377,6 +382,17 @@ struct ContentView: View {
             .animation(.easeOut(duration: 0.22), value: terminalRatio)
             .safeAreaInset(edge: .bottom, spacing: 0) {
                 VStack(spacing: 0) {
+                    if let card = questionCards.first {
+                        // 问答卡（U4）：钉在输入栏上方＝聊天最新位置，答案走 REST 回填
+                        QuestionCardView(card: card, charID: currentCharID,
+                                         onPick: questionPicked,
+                                         onFinish: { finishQuestion(card, answers: $0) },
+                                         onSkip: { skipQuestion(card) },
+                                         onClose: { removeQuestion(card.id) })
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 6)
+                            .transition(.move(edge: .bottom).combined(with: .opacity))
+                    }
                     if showStickers {
                         Divider()
                         StickerPanel(store: stickerStore, onPick: stageSticker)
@@ -413,6 +429,7 @@ struct ContentView: View {
                 .animation(.easeInOut(duration: 0.2), value: showStickers)
                 .animation(.easeInOut(duration: 0.2), value: pendingSticker)
                 .animation(.easeInOut(duration: 0.2), value: pendingImages.count)
+                .animation(.easeInOut(duration: 0.2), value: questionCards)
             }
             .alert("发送失败", isPresented: Binding(
                 get: { errorText != nil },
@@ -596,6 +613,9 @@ struct ContentView: View {
         // 老版本在这行调 profileStore.switchCharacter(id)，而它蹲在上面那道 guard 后面
         // ——guard 一提前 return，别人都换了人、头像还停在上一位身上（08-30 实锤）。
         sessionId = nil
+        // 问答卡是署名的：换人清队，syncQuestions 马上按新角色补齐
+        questionCards.removeAll()
+        Task { await syncQuestions() }
         Task { await proactiveStore.reloadForCurrentCharacter() }
         // 会话入口/归属说明是按角色变的，切完顺手对齐一次（路由本身不等它——
         // sessionMine 是派生的，currentCharID 一变就生效）。
@@ -1067,6 +1087,13 @@ struct ContentView: View {
                     } else if tool != "webpage" {
                         chatStore.appendMemoryNote(memoryNoteText(tool: tool))
                     }
+                case .question(let card):
+                    // 问答卡（U4）：随流实时到。SSE 的卡不带 char＝当前会话角色。
+                    var c = card
+                    c.char = currentCharID
+                    if !questionCards.contains(where: { $0.id == c.id }) {
+                        withAnimation { questionCards.append(c) }
+                    }
                 case .error(let msg):
                     errorText = msg
                 case .done(let resp):
@@ -1265,6 +1292,51 @@ struct ContentView: View {
     }
 
     // MARK: - 待送达同步（断连补投）
+
+    // MARK: - 问答卡（PLAN_chatui §3.5/U4）
+
+    /// 答完一个问题 → 小字提醒（§5.2：只留所选的前几个字），下一张卡内自己浮现。
+    private func questionPicked(_ question: String, _ answer: String) {
+        let brief = answer.count > 14 ? String(answer.prefix(14)) + "…" : answer
+        chatStore.appendMemoryNote("选了「\(brief)」")
+    }
+
+    /// 整卡答完：收卡 + 答案 POST 回填（TA 同轮拿到接着说）。
+    private func finishQuestion(_ card: QuestionCard, answers: [String: String]) {
+        removeQuestion(card.id)
+        Task {
+            do { try await chatService.decideQuestion(id: card.id, answers: answers) }
+            catch { errorText = "答案没送出去（可能已超时）：他会再问的" }
+        }
+    }
+
+    /// 先不答：收卡，TA 收到「这会儿没答」接着说话。
+    private func skipQuestion(_ card: QuestionCard) {
+        removeQuestion(card.id)
+        Task { try? await chatService.decideQuestion(id: card.id, answers: nil) }
+    }
+
+    private func removeQuestion(_ id: String) {
+        withAnimation { questionCards.removeAll { $0.id == id } }
+    }
+
+    /// 回前台/轮询对齐：流断期间（含游戏泵的轮）弹的卡靠这条补上；后端不认了的
+    /// 卡收走——刚超时的留着，卡自己置灰标「已超时」等机主收（§5.3）。
+    @MainActor
+    private func syncQuestions() async {
+        guard let cards = try? await chatService.pendingQuestions(char: currentCharID)
+        else { return }
+        let now = Int(Date().timeIntervalSince1970)
+        withAnimation {
+            for c in cards where !questionCards.contains(where: { $0.id == c.id }) {
+                questionCards.append(c)
+            }
+            questionCards.removeAll { qc in
+                !cards.contains(where: { $0.id == qc.id })
+                    && (qc.deadline.map { now < $0 } ?? true)
+            }
+        }
+    }
 
     /// 拉取后端积压的消息，并进本地聊天记录，再 ack（先存后 ack，防丢）。
     @MainActor

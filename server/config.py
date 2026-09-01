@@ -116,6 +116,11 @@ READONLY_TOOLS_ENABLED = os.environ.get("READONLY_TOOLS", "0") == "1"
 # 实测 schema token，稳了再拨这个（上电硬前置：iOS 权限卡先做出来，§6）。
 WRITE_TOOLS_ENABLED = os.environ.get("WRITE_TOOLS", "0") == "1"
 
+# 问答卡（PLAN_chatui §3.5/U4）：AskUserQuestion 挂进 sdk 聊天 session（不进
+# allowed_tools → 每问一卡，can_use_tool 挂起等机主作答，updated_input 回填）。
+# 默认关，上电硬前置：iOS 问答卡先做出来——卡没人答只会白等一阵超时拒。
+QUESTION_CARDS_ENABLED = os.environ.get("QUESTION_CARDS", "0") == "1"
+
 # 聊天引擎（PLAN_sdk S2/PR10）：按角色灰度。
 #   "p"（默认）=一次性 claude -p（今天的生产）；"sdk"=全角色走常驻 session；
 #   "sdk:<id1>,<id2>"=只这些角色走 sdk，其余 p——先切提信感的那个角色，

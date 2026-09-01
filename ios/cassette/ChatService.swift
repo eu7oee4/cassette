@@ -100,12 +100,33 @@ enum ChatServiceError: LocalizedError {
     }
 }
 
+/// 问答卡（PLAN_chatui §3.5/U4）：TA 用 AskUserQuestion 弹过来的选择题。
+/// SSE "question" 事件和 /questions/pending 共用这个形状；单号=那次调用的
+/// tool_use_id，答案 POST /questions/decide 原地回填、TA 同轮拿到。
+struct QuestionCard: Codable, Identifiable, Equatable {
+    struct Option: Codable, Equatable {
+        let label: String
+        let description: String?
+    }
+    struct Question: Codable, Equatable {
+        let question: String
+        let header: String?
+        let options: [Option]
+        let multiSelect: Bool?
+    }
+    let id: String
+    let questions: [Question]
+    let deadline: Int?                       // Unix 秒；到点整卡置灰标「已超时」
+    var char: String?                        // pending 拉回来的带；SSE 的不带（就是当前会话角色）
+}
+
 /// /chat/stream 的一条 SSE 事件（后端统一协议）。
 enum StreamEvent {
     case text(String)                        // 正文片段，追加进当前流式气泡
     case textBreak                           // 当前气泡定稿保留，下一段正文另起新气泡（工具调用切段）
     // 这轮的一次工具操作 → 内联灰字。ok=false 是「他想做但没做成」，照样要说（带原因）。
     case memory(tool: String, text: String, ok: Bool, error: String)
+    case question(QuestionCard)              // 问答卡：TA 想让机主拍板（U4）
     case error(String)                       // 出错提示
     case done(ChatResponse?)                 // 结束：附完整 ChatResponse（错误/空回复时为 nil）
 }
@@ -256,10 +277,37 @@ struct ChatService {
                                           text: obj["text"] as? String ?? "",
                                           ok: obj["ok"] as? Bool ?? true,
                                           error: obj["error"] as? String ?? "")
+        case "question":
+            guard let card = try? JSONDecoder().decode(QuestionCard.self, from: data)
+            else { return nil }
+            return .question(card)
         case "error":      return .error(obj["content"] as? String ?? "出错了")
         case "done":       return .done(try? JSONDecoder().decode(ChatResponse.self, from: data))
         default:           return nil
         }
+    }
+
+    // MARK: - 问答卡（U4）
+
+    /// 待答的卡（回前台对齐用；char 缺省＝全部角色）。
+    func pendingQuestions(char: String? = nil) async throws -> [QuestionCard] {
+        let data = try await perform(authedRequest("GET", "/questions/pending", char: char))
+        struct Resp: Decodable { let pending: [QuestionCard] }
+        do { return try JSONDecoder().decode(Resp.self, from: data).pending }
+        catch { throw ChatServiceError.badResponse }
+    }
+
+    /// 答一张卡：answers={问题原文: 答案}；nil＝不答（note 给 TA 一句原因）。
+    /// 单号对不上（已超时/后端重启作废）后端回 409，抛错由调用方提示。
+    func decideQuestion(id: String, answers: [String: String]?, note: String = "") async throws {
+        struct Body: Encodable {
+            let id: String
+            let answers: [String: String]?
+            let note: String
+        }
+        let body = try JSONEncoder().encode(Body(id: id, answers: answers, note: note))
+        _ = try await perform(authedRequest("POST", "/questions/decide", jsonBody: body,
+                                            timeout: 30))
     }
 
     // MARK: - 表情描述

@@ -1376,6 +1376,15 @@ class PermitDecideIn(BaseModel):
     reason: str = ""
 
 
+class QuestionDecideIn(BaseModel):
+    """问答卡作答（PLAN_chatui §3.5/U4）。id=卡号（sse question 事件里的，就是
+    那次 AskUserQuestion 的 tool_use_id）；answers={问题原文: 答案}（自定义答案
+    就是任意字符串）；answers 为 None＝不想答，note 给他一句原因（可空）。"""
+    id: str
+    answers: Optional[dict[str, str]] = None
+    note: str = ""
+
+
 class CodeAppendIn(BaseModel):
     """会话里的 hook 上报的一段正文（server/hooks/code_segments.py 发的）。"""
     role: str = "assistant"
@@ -1491,6 +1500,33 @@ def permits_decide(inp: PermitDecideIn, char: Optional[str] = None,
     r = permits.decide(inp.id, inp.allow, inp.reason)
     if not r.get("ok"):
         raise HTTPException(status_code=409, detail=r.get("error", "拍板失败"))
+    return r
+
+
+@app.get("/questions/pending")
+def questions_pending(char: Optional[str] = None,
+                      x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
+    """待答的问答卡（app 回前台对齐用）。形状对齐 /permits/pending：署名的卡、
+    超时自动收、只有这一个读面。"""
+    verify_auth(x_auth)
+    import characters
+    import questions
+    out = questions.pending(char or None)
+    for r in out:
+        r["char_name"] = characters.display_name(r["char"])
+    return {"pending": out}
+
+
+@app.post("/questions/decide")
+def questions_decide(inp: QuestionDecideIn, char: Optional[str] = None,
+                     x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
+    """机主答一张问答卡：答案原地回填进那次 AskUserQuestion，他同轮拿到接着说；
+    不答（answers=None）他收到 note 当理由。单号对不上 → 409 有声报。"""
+    verify_auth(x_auth)
+    import questions
+    r = questions.decide(inp.id, inp.answers, inp.note)
+    if not r.get("ok"):
+        raise HTTPException(status_code=409, detail=r.get("error", "作答失败"))
     return r
 
 

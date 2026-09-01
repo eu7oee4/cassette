@@ -14,6 +14,7 @@ text_break：工具调用会把正文切成多段，CLI 的 result 只含最后�
 """
 import asyncio
 import json
+import time
 
 import config
 import pipeline
@@ -85,6 +86,21 @@ async def read_stream_events(proc):
             continue
 
 
+def _question_events(ev: dict):
+    """AskUserQuestion 的 tool_use 一出现就把问答卡推给 app（PLAN_chatui U4）。
+    卡的单号=tool_use_id，跟 can_use_tool 那头 questions.ask 登记的一致（回调
+    在这个事件之后才 fire，app 拍板太快撞上「还没登记」会拿到 409，重按即可）。
+    deadline 是估的（now+超时）：真值在 questions._pending 里，差距毫秒级。
+    老 -p 路没挂这个工具，此函数天然空转。"""
+    for b in (ev.get("message", {}).get("content") or []):
+        if (isinstance(b, dict) and b.get("type") == "tool_use"
+                and b.get("name") == "AskUserQuestion"):
+            import questions
+            yield sse({"type": "question", "id": b.get("id", ""),
+                       "questions": (b.get("input") or {}).get("questions") or [],
+                       "deadline": int(time.time()) + questions.TIMEOUT_SEC})
+
+
 def _memory_events(item: dict):
     """一条定了案的 stored → 要发给 app 的 memory 事件（0 或 1 条）。
     codemode/gamemode 是借 stored 走的控制信号（TA 自切 code 模式/游戏会话），不是
@@ -141,6 +157,8 @@ async def translate_events(events, finalize):
             # 工具调用先登记（去重、抓产物），**灰字这时候还不发**——这里只知道他想干什么，
             # 干成没干成要等下面的 tool_result。先发的话失败的调用也会亮一条「记住了一件事」。
             collector.on_assistant(ev)
+            for chunk in _question_events(ev):
+                yield chunk
         elif t == "user":
             # 工具返回了 → 定案，成功/失败各自往下游发一条 memory 灰字。
             for item in collector.on_user(ev):

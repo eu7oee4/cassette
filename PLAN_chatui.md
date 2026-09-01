@@ -463,6 +463,22 @@ hold/grow/trace/I/webpage_write/code_start/task_run/game_start/mail_send。
    **前置：§7.2 那条口径先拍**（含聚合规则）。
 5. **U4 · 卡片**：先做问答卡（有 grill-me 这个现成场景可以自测），
    再做 permit 卡。**permit 卡是 PLAN_native 拨闸的硬前置**（那份 §7 N2）。
+   **问答卡半边 ✅ 09-01 全链路落码未上电**：
+   - 机制 09-01 探针实证：AskUserQuestion 挂载不进 allowed_tools → can_use_tool
+     挂起，`PermissionResultAllow(updated_input=原input+answers)` 回填，模型同轮
+     拿到 `"问题"="答案"` 的 tool_result；自定义答案=任意字符串当 label，CLI 不校验。
+   - 后端：`questions.py`（内存单，形状抄 permits）+ `_permit_gate` 问答分支 +
+     sse `question` 事件（assistant 事件里 tool_use 一现身就推卡，单号=tool_use_id）
+     + REST `/questions/pending`、`/questions/decide` + Bark + 轮内空闲豁免并入
+     （permits.waiting **or** questions.waiting）。12 条新测试，全套 481 绿。
+   - iOS：`QuestionCardView`（染色走 §1.2 用角色人物色；二选一横排/多项竖列；
+     multiSelect 勾选+「就这些」；自定义答案输入框；超时置灰+「已超时」角标+收起；
+     按钮圆角先按 12＝小一号，§8 待定）钉在输入栏上方；答完出小字
+     `选了「前14字…」`（机主名字没进 app 文案，要改再说）+ 队列自动浮现下一题；
+     回前台/轮询 syncQuestions 对齐（游戏泵轮里弹的卡靠这条补）；换角色清队重拉。
+   - **拨闸**：`.env` 加 `QUESTION_CARDS=1` + 重启后端（默认关；灰度独立于
+     WRITE_TOOLS，问答卡可以先上）。自测场景：让他用 AskUserQuestion 问任意选择题。
+   - 剩 permit 卡（=native N2）：复用这张卡的骨架（§6 那份说了同一张卡的形状）。
 6. **U5 · 摘掉终端面板**（§7.3）。前置只有 U4 的 permit 卡（code 那半边要有人接），
    game 那半边靠气泡流本来就够。
 7. **U6 · 背景图 + 蒙版**。完全独立，随时可插。
