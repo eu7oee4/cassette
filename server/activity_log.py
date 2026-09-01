@@ -214,9 +214,11 @@ def append_act(char_id: str, scene: str, tool: str, summary: str,
     """碰了外部世界的工具调用留痕（判线 §5.2：对外部对象的读写都留；纯内部
     记忆操作不留）。执行层确定性落账，不靠他自觉。
 
-    ⚠️ `ok` = **协议层没报错**，不是「事情办成了」——业务层的拒绝（配额用尽、
-    对象不存在）在 `is_error` 上跟成功同形。「成没成」看 `ret`：执行层从
-    `tool_result` 里抽的回执原话，不解读、不改判 `ok`。两列各答一个问题。"""
+    ⚠️ `ok` 吃的是**结构判据**（`pipeline.tool_result_error_structural`：MCP 的
+    `is_error` + 返回体 `{"ok": false}`），**不是「事情办成了」**——业务层的软
+    拒绝（配额用尽、对象不存在）两道都不命中，跟成功同形。**「成没成」最后只有
+    `ret` 答得了**：执行层从 `tool_result` 里抽的回执原话，不解读。
+    两列各答一个问题，别拿 `ok` 当事情办成的证据。"""
     rec = {"ts": int(time.time()), "scene": scene, "tool": tool,
            "ok": bool(ok), "text": (summary or "")[:200],
            "ret": (ret or "")[:200]}

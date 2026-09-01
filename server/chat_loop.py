@@ -555,17 +555,22 @@ class _ToolTrace:
             return
         import activity_log
         import pipeline
-        ok = not bool(is_error)
-        # ⚠️ `ok` 只是「协议层没报错」，**不等于事情办成了**。业务层的拒绝在
-        # `is_error` 上跟成功一模一样——09-01 11:10 实例：一封信被配额挡回来
-        # （回执写着「今天已经寄了 3 封了。明天再来。」），一个字没寄出去，
-        # 账上记的是 ok=true，而下一轮的他会把它当既成事实往下算。
-        # 所以**另存一列回执，不去猜、不改判 ok**：扫词判成败是启发式，把
-        # 启发式包装成证据正是这本账要防的事（§3.3「调用发生过 ≠ 事情发生了」）。
+        # 成败两道口径，别混（§7.2 / §7.2.1 复盘，眠眠 09-01 12:16 拍板）：
+        #
+        # `ok` 吃**结构判据**——①MCP 的 is_error ②返回体 {"ok": false}
+        # （codemode 那类插件的口径）。读的是专门表示成败的字段，不是猜。
+        # **③ 那道文本婉拒名单不吃**：它给的是「像失败」不是「是失败」，
+        # 账本认错会被下一轮当既成事实往下算，容错代价跟灰字提示差一个量级。
+        #
+        # `ret` 存回执原话——因为 ①② 也兜不住业务层的软拒绝：09-01 11:10
+        # 实例，一封信被配额挡回来（回执「今天已经寄了 3 封了。明天再来。」），
+        # is_error 是 false、返回体不是 json，两道结构判据一道都不命中，
+        # 账上照样 ok=true。**「成没成」最后只有原话答得了**，别指望 ok。
         # 只读工具不存 ret——它们的返回是内容不是回执（读类在折叠框里本来就
         # 聚合成「翻看过」一行），存了只占地方。
-        ret = ("" if name in pipeline.READONLY_BUILTINS
-               else _result_text(content)[:RET_CAP])
+        text = _result_text(content)
+        ok = not pipeline.tool_result_error_structural(bool(is_error), text)
+        ret = "" if name in pipeline.READONLY_BUILTINS else text[:RET_CAP]
         turn = self.handle.meta.get("turn_kind") or "chat"
         seg = ((self.handle.meta.get("game_pump") or {}).get("seg_id")
                or _code_seg(self.handle.char_id))

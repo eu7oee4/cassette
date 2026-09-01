@@ -1228,21 +1228,39 @@ def _short_reason(text: str) -> str:
     return line if len(line) <= 80 else line[:79] + "…"
 
 
+def tool_result_error_structural(is_error: bool, text: str) -> Optional[str]:
+    """①② 两道**结构**判据：MCP 的 `is_error` 位、返回体 `{"ok": false}`。
+    是则返回给人看的原因，否则 None。
+
+    读的是专门用来表示成败的字段——读到什么就是什么，不存在猜。**③ 那道
+    文本婉拒名单不在这儿**：它给的是「像失败」不是「是失败」，只认见过的说法
+    （09-01 实例：一封信被配额挡回来，回执「今天已经寄了 3 封了。明天再来。」，
+    表里四条一条不命中）。要不要吃 ③，由调用方按自己的容错代价决定——
+    灰字提示认错一次只值一句话，账本认错会被下一轮当既成事实往下算，
+    所以行为账/事件账只吃 ①②（眠眠 09-01 12:16 拍板）。"""
+    if is_error:
+        return _short_reason(text) or "工具报错了"
+    try:
+        obj = json.loads(text)
+    except Exception:
+        return None
+    if isinstance(obj, dict) and obj.get("ok") is False:
+        return _short_reason(str(obj.get("error") or "")) or "没成功"
+    return None
+
+
 def tool_result_error(block: dict) -> Optional[str]:
     """这条 tool_result 算失败吗？是则返回给人看的原因，否则 None。三道判据：
       ① is_error：MCP 标准错误（参数校验不过之类）；
       ② 返回体是 {"ok": false, "error": ...}：插件的口径（codemode 就这么回）；
       ③ 正文命中婉拒名单：Ombre 那种 isError:false 的软拒绝。
-    ①② 是结构判据、准；③ 是文本判据、只认见过的说法（见 _TOOL_REJECT_MARKS）。"""
+    ①② 是结构判据、准（抽在 tool_result_error_structural，留痕侧只吃这两道）；
+    ③ 是文本判据、只认见过的说法（见 _TOOL_REJECT_MARKS）。"""
     text = _tool_result_text(block).strip()
-    if block.get("is_error") or block.get("isError"):
-        return _short_reason(text) or "工具报错了"
-    try:
-        obj = json.loads(text)
-    except Exception:
-        obj = None
-    if isinstance(obj, dict) and obj.get("ok") is False:
-        return _short_reason(str(obj.get("error") or "")) or "没成功"
+    err = tool_result_error_structural(
+        bool(block.get("is_error") or block.get("isError")), text)
+    if err:
+        return err
     low = text.lower()
     if any(m in low for m in _TOOL_REJECT_MARKS) or low.startswith(_TOOL_REJECT_PREFIXES):
         return _short_reason(text)

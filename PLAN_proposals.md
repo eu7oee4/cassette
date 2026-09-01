@@ -455,10 +455,21 @@ WRITE_BUILTINS     = {Edit, Write, NotebookEdit, Bash} # 过 code_permits 门（
 - `_fold_trace_lines`：写类那行末尾补 ` → {ret[:40]}`。老账行缺 `ret` 键取空，
   那行与从前一字不差。
 
-**这里有条口径要守住：只加一列，不改判 `ok`。** `ok` 保持「协议层没报错」
-的原意（注释里写死了），回执原话另立一列，两列各答一个问题——「调没调」和
-「成没成」。**没有做**「扫『失败／配额／明天再来』这类词自动把 `ok` 判 False」：
-扫词是启发式，把启发式包装成证据正是这本账要防的事。
+**成败的口径分两层（眠眠 09-01 12:16 拍板，头一版的「不改判 ok」已作废）：**
+
+- `ok` 吃 **①② 两道结构判据**——`pipeline.tool_result_error_structural(is_error, text)`：
+  ①MCP 的 `is_error`，②返回体 `{"ok": false, "error": ...}`（codemode 那类插件的
+  口径）。读的是**专门用来表示成败的字段**，读到什么就是什么，不存在猜。
+  这两道 08-08 就写好在 `tool_result_error` 里了，本轮把它抽成独立函数、
+  老函数复用它 —— **同一件事只此一份判据，不再两处各判各的**（§6 那条纪律）。
+- **③ 那道文本婉拒名单不进这本账。** 它给的是「像失败」不是「是失败」，
+  只认见过的说法。容错代价差一个量级：灰字提示认错一次只值一句话，
+  账本认错会被下一轮当既成事实往下算。`tool_result_error` 那条线（stored 灰字）
+  照旧吃三道，行为不变。
+- **`ret` 才是最后那道保险。** ①② 也兜不住业务层的软拒绝——09-01 11:10 那封信
+  `is_error=false`、返回体不是 json，**两道结构判据一道都不命中，账上照样
+  `ok=true`**。所以这次的补丁**没有**修好那一类，只是把原话留了下来：
+  **「成没成」最后只有回执答得了，别拿 `ok` 当事情办成的证据。**
 
 回归样本按 11:10 那次真事造了两条对照（`test_business_refusal_keeps_ok_but_keeps_receipt`
 ／`test_real_send_receipt`）：同一个工具、同样 `ok=True`，回执一句是
@@ -528,17 +539,22 @@ WRITE_BUILTINS     = {Edit, Write, NotebookEdit, Bash} # 过 code_permits 门（
 > 08-08 在 stored 那条线上推翻过它，08-31 新建行为账时又原样带了回来。
 > **新造的账本没有继承已经付过学费的判据**——这是整份复盘里最值钱的一句。
 
-#### 待拍（没擅自动）
+#### 已拍：`ok` 要 ①②，不要 ③（眠眠 09-01 12:16）
 
-`_ToolTrace` 的 `ok` 要不要换成 `tool_result_error` 的 **①② 两道结构判据**
-（`is_error` + `{"ok": false}` 结构体，**不含 ③ 文本婉拒表**）？
+上面「捉虫」那格留的问题，当场拍了：`_ToolTrace` 的 `ok` 换成
+`tool_result_error_structural`（①`is_error` + ②`{"ok": false}`），
+**③ 文本婉拒表不进账本**。落点：
 
-- **该换的理由**：②是结构判据不是猜，仓里已经有权威实现；同一件事两处各判各的，
-  正是 §6 那条「一张表被当两张用」的反面。
-- **没直接换的理由**：它会**改变 `ok` 的语义**，连带影响折叠框的「（没成）」
-  和将来 proposals 的 `done` 判定——是有后果的语义变更，该机主拍。
-- ③ 文本婉拒表**我建议永远不进这本账**（规避规则 3）：灰字提示误判只值一句话，
-  账本误判会被下一轮当既成事实往下算，两边容错代价差一个量级。
+- `pipeline.tool_result_error_structural(is_error, text)` 新抽出来，
+  `tool_result_error` 复用它再补 ③ —— **判据只此一份**，stored 灰字那条线
+  行为一字不变。
+- `_ToolTrace.result` 里 `ok = not tool_result_error_structural(...)`。
+- 测试两条：`test_ok_eats_structural_refusal_not_wording`（②认、③不认、
+  软拒绝兜不住）、`test_structural_judgement_layering`（分层本身 + 老口径没退化）。
+
+⚠️ **别把这次改动当成 11:10 那类修好了。** 接的是 codemode 那种结构化返回体；
+beacon 回的是纯文本，两道结构判据一道都不命中。那一类的唯一出口还是 `ret` 里的
+原话——要机器判得了，得那一层先给结构化回执（规避规则 3 的正解方向）。
 
 #### 来源分级
 

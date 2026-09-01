@@ -983,6 +983,45 @@ class ToolTraceTest(_AlTmpBase):
         for c in calls:
             self.assertEqual(len(c.split(",")), 3, f"少传 content: {c!r}")
 
+    def test_ok_eats_structural_refusal_not_wording(self):
+        """`ok` 的口径（眠眠 09-01 12:16 拍板）：吃 ①② 结构判据，不吃 ③ 文本表。
+
+        ①`is_error` 和 ②`{"ok": false}` 是专门表示成败的字段，读到什么是什么；
+        ③ 婉拒名单给的是「像失败」不是「是失败」，进账本会被下一轮当既成事实。"""
+        handle = sm.LoopHandle(char_id="cass", scene="chat")
+        handle.meta["game_pump"] = {"seg_id": "cass-game-1000"}
+        tr = chat_loop._ToolTrace(handle)
+        # ②：协议层没报错，返回体自己说没成
+        tr.use("t1", "Bash", {"command": "x"})
+        tr.result("t1", False, '{"ok": false, "error": "沙盒里没这个命令"}')
+        # ③：命中婉拒名单，但账本不认（tool_result_error 那条线才认）
+        tr.use("t2", "Bash", {"command": "y"})
+        tr.result("t2", False, "错误：未找到记忆桶")
+        # 业务层软拒绝：两道结构判据都不命中，ok 照样 True，真相在 ret 里
+        tr.use("t3", "mcp__beacon__write_letter", {"subject": "补一封"})
+        tr.result("t3", False, "今天已经寄了 3 封了。明天再来。")
+        evs = self.al.read_events("cass-game-1000")
+        self.assertFalse(evs[0]["ok"])                      # ② 认
+        self.assertTrue(evs[1]["ok"])                       # ③ 不认
+        self.assertTrue(evs[2]["ok"])                       # 结构判据兜不住
+        self.assertEqual(evs[2]["ret"], "今天已经寄了 3 封了。明天再来。")
+
+    def test_structural_judgement_layering(self):
+        """①② 抽出来给留痕侧用，`tool_result_error` 复用它、外加 ③（行为不变）。"""
+        import pipeline
+        f = pipeline.tool_result_error_structural
+        self.assertTrue(f(True, "boom"))                    # ①
+        self.assertTrue(f(False, '{"ok": false, "error": "没成"}'))   # ②
+        self.assertIsNone(f(False, '{"ok": true}'))
+        self.assertIsNone(f(False, "错误：未找到记忆桶"))    # ③ 不在这一层
+        self.assertIsNone(f(False, "今天已经寄了 3 封了。明天再来。"))
+        # 老口径那条线三道都还在
+        self.assertTrue(pipeline.tool_result_error(
+            {"content": "错误：未找到记忆桶"}))
+        self.assertTrue(pipeline.tool_result_error(
+            {"content": '{"ok": false, "error": "没成"}'}))
+        self.assertIsNone(pipeline.tool_result_error({"content": "寄到了。"}))
+
     def test_receipt_capped(self):
         handle = sm.LoopHandle(char_id="cass", scene="chat")
         handle.meta["game_pump"] = {"seg_id": "cass-game-1000"}
