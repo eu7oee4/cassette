@@ -5,6 +5,7 @@
     .venv/bin/python -m unittest tests.test_chat_loop -v
 """
 import asyncio
+import os
 import sys
 import types
 import unittest
@@ -165,12 +166,10 @@ class ChatLoopTest(unittest.IsolatedAsyncioTestCase):
                                        f"sid-{len(self.forged)}")[1])
         chat_loop._note_usage = lambda *a: None
         chat_loop._persist_ledger = lambda *a: None
-        # 单测绝不读生产 wake_log/小屋/活动账/写批准、不探活 Ombre
+        # 单测绝不读生产 wake_log/小屋/活动账、不探活 Ombre
         # （tests-reading-prod-state 雷）
         chat_loop._seen_block = lambda cid, since: (None, since)
         chat_loop._ombre_on = lambda cid: False
-        self._cseg_orig = chat_loop._code_seg
-        chat_loop._code_seg = lambda cid: None
         self._frame_orig = chat_loop._frame_activities
         chat_loop._frame_activities = lambda h, cid: h
 
@@ -195,7 +194,6 @@ class ChatLoopTest(unittest.IsolatedAsyncioTestCase):
         chat_loop._ombre_on = self._ombre_orig
         chat_loop.CHAT_HARD_TOKENS = self._hard_orig
         chat_loop._frame_activities = self._frame_orig
-        chat_loop._code_seg = self._cseg_orig
         if not self.task.done():
             self.handle.stop_reason = "test-teardown"
             self.task.cancel()
@@ -791,25 +789,47 @@ class ChatEngineConfigTest(unittest.TestCase):
             config.CHAT_ENGINE = orig
 
 
-class CodeAddendumInjectTest(ChatLoopTest):
-    """PR14-d：写批准落地后的第一个轮注入干活纪律（文档侧、不换 client），
-    同一场不重注。"""
+class DisciplineBlockTest(unittest.TestCase):
+    """PLAN_native §3：干活纪律常驻系统提示（不再按场注入——场没了）。
+    capsule 收场约定是代码侧机制字段，机主文件缺席也在；占位走 persona 同款。"""
 
-    async def test_injected_once_per_seg(self):
-        chat_loop._code_seg = lambda cid: "cass-code-9"
-        hist = [_m("user", "早")]
-        t1 = self._turn(hist, "动手吧")
-        await self._play(t1, *_text_events("好"), _result("好"))
-        sent1 = self.clients[-1].queries[0][0]["message"]["content"][0]["text"]
-        self.assertIn("写权限批给你了", sent1)
-        self.assertNotIn("上机", sent1)                 # 措辞纪律：能力不是场所
-        self.assertNotIn("切过来", sent1)               # 老路场文本不许混进统一路
-        hist2 = [_m("user", "早"), _m("user", "动手吧", 2000),
-                 _m("assistant", "好", 2001)]
-        t2 = self._turn(hist2, "继续")
-        await self._play(t2, *_text_events("嗯"), _result("嗯"))
-        sent2 = self.clients[-1].queries[-1][0]["message"]["content"][0]["text"]
-        self.assertNotIn("写权限批给你了", sent2)
+    def test_capsule_contract_always_present(self):
+        import config
+        orig = os.environ.get("CODE_ADDENDUM_CHAT_FILE")
+        os.environ["CODE_ADDENDUM_CHAT_FILE"] = "no_such_file_xyz.md"
+        try:
+            blk = chat_loop._discipline_block("cass")
+            self.assertIn("◆", blk)
+            self.assertNotIn("上机", blk)               # 措辞纪律：能力不是场所
+            self.assertNotIn("切过来", blk)             # 老路场文本不许混进统一路
+        finally:
+            if orig is None:
+                os.environ.pop("CODE_ADDENDUM_CHAT_FILE", None)
+            else:
+                os.environ["CODE_ADDENDUM_CHAT_FILE"] = orig
+
+    def test_owner_file_rendered_with_placeholders(self):
+        import tempfile
+        import config
+        with tempfile.NamedTemporaryFile(
+                "w", suffix=".md", dir=config.BASE_DIR, delete=False,
+                encoding="utf-8") as f:
+            f.write("提交只 add 自己动过的文件。{{USER_NAME}}的仓别用 -A。")
+            name = Path(f.name).name
+        orig = os.environ.get("CODE_ADDENDUM_CHAT_FILE")
+        os.environ["CODE_ADDENDUM_CHAT_FILE"] = name
+        try:
+            blk = chat_loop._discipline_block("cass")
+            self.assertIn("动手改东西时的纪律", blk)
+            self.assertIn("只 add 自己动过的文件", blk)
+            self.assertNotIn("{{USER_NAME}}", blk)      # 占位渲染掉了
+            self.assertIn("◆", blk)                     # 机制字段仍在尾巴
+        finally:
+            (config.BASE_DIR / name).unlink(missing_ok=True)
+            if orig is None:
+                os.environ.pop("CODE_ADDENDUM_CHAT_FILE", None)
+            else:
+                os.environ["CODE_ADDENDUM_CHAT_FILE"] = orig
 
 
 class TraceVocabTest(unittest.TestCase):
@@ -1121,19 +1141,26 @@ class ActsFromExecutionTest(_AlTmpBase):
         self.assertEqual(act["text"], "https://x.dev")
         self.assertFalse(act["ok"])
 
-    def test_internal_and_file_tools_stay_out(self):
-        """判线 acts_worthy：Ombre/游戏点按=内部；本地文件工具归段账——
-        清单是 limit=10 的短表，被翻文件刷掉就废了。"""
+    def test_internal_and_readonly_stay_out_writes_land(self):
+        """判线 acts_worthy（PLAN_native §4）：Ombre/游戏点按=内部不落、只读
+        不落（翻文件是看不是做）；写类每条都是账上一行——一行自带机主批准
+        这个事实（没批的根本执行不到）。"""
         tr = self._trace()
         for i, (name, inp) in enumerate([
                 ("mcp__ombre-brain__hold", {"title": "一条记忆"}),
                 ("mcp__game__game_tap", {"x": 1}),
                 ("mcp__skills__skill_read", {"name": "jobhunt"}),
-                ("Read", {"file_path": "server/app.py"}),
-                ("Bash", {"command": "pytest"})]):
+                ("Read", {"file_path": "server/app.py"})]):
             tr.use(f"t{i}", name, inp)
             tr.result(f"t{i}", False)
         self.assertEqual(self.al.recent_acts("cass"), [])
+        tr.use("w1", "Bash", {"command": "pytest"})
+        tr.result("w1", False)
+        tr.use("w2", "Edit", {"file_path": "server/x.py"})
+        tr.result("w2", False)
+        acts = self.al.recent_acts("cass")
+        self.assertEqual([a["tool"] for a in acts], ["Bash", "Edit"])
+        self.assertEqual(acts[0]["text"], "pytest")
 
     def test_wake_turn_same_ledger(self):
         """两种轮一个口径（醒来轮也走常驻 session，不再靠 wake_sdk 镜像）。"""

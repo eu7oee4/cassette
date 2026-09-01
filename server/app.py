@@ -1369,10 +1369,11 @@ class CodeKeysIn(BaseModel):
 
 
 class PermitDecideIn(BaseModel):
-    """写权限拍板（PLAN_sdk §5.3 PR14-c 带外门：批准走这儿落后端状态，
-    门查记录不查对话）。id=待批单号（/code/permit 里看）。"""
+    """权限卡拍板（PLAN_native §6）。id=待批单号（/permits/pending 里看，
+    就是那次调用的 tool_use_id）；reason=拒绝时给他的一句理由（可空）。"""
     id: str
     allow: bool
+    reason: str = ""
 
 
 class CodeAppendIn(BaseModel):
@@ -1465,41 +1466,32 @@ def code_status(busy: int = 0, x_auth: Optional[str] = Header(default=None, alia
             "session_char": code_bridge.session_char()}
 
 
-@app.get("/code/permit")
-def code_permit_status(char: Optional[str] = None,
-                       x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
-    """写权限现状（PR14-c）：app 权限卡/弹窗的数据源。pending=待批单（含 id），
-    granted=这一场已批的。不挂 _require_code——带外门服务的是统一 session，
-    与 tmux 那套 code 模式开不开无关。"""
+@app.get("/permits/pending")
+def permits_pending(char: Optional[str] = None,
+                    x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
+    """待批的写类调用（PLAN_native §6）：app 回前台对齐用。卡是署名的，默认
+    给全部角色的（批谁、先批谁在机主）；带 ?char= 只看一个人的。挂起是分钟级
+    的、超时自动拒——没有「悬着的单」要收拾，所以只有这一个读面。"""
     verify_auth(x_auth)
-    import code_permits
-    cid = _resolve_char(char)
-    return {"char": cid, **code_permits.status(cid)}
+    import characters
+    import permits
+    out = permits.pending(char or None)
+    for r in out:
+        r["char_name"] = characters.display_name(r["char"])
+    return {"pending": out}
 
 
-@app.post("/code/permit/decide")
-def code_permit_decide(inp: PermitDecideIn, char: Optional[str] = None,
-                       x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
-    """TA 拍板一张待批单。单号对不上（多半已超时自动拒）→ 409 有声报。"""
+@app.post("/permits/decide")
+def permits_decide(inp: PermitDecideIn, char: Optional[str] = None,
+                   x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
+    """机主拍板一张权限卡：批了那次调用原地执行，拒了他收到理由接着说话。
+    单号对不上（已超时/后端重启作废）→ 409 有声报。"""
     verify_auth(x_auth)
-    import code_permits
-    cid = _resolve_char(char)
-    r = code_permits.decide(cid, inp.id, inp.allow)
+    import permits
+    r = permits.decide(inp.id, inp.allow, inp.reason)
     if not r.get("ok"):
         raise HTTPException(status_code=409, detail=r.get("error", "拍板失败"))
     return r
-
-
-@app.post("/code/permit/revoke")
-def code_permit_revoke(char: Optional[str] = None,
-                       x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
-    """TA 收摊（PR14-d）：撤写批准+关这一场的段账（一场一批、收摊即失效）。
-    幂等——没批准也回 ok，app 的收摊按钮不用先问状态。"""
-    verify_auth(x_auth)
-    import code_permits
-    cid = _resolve_char(char)
-    code_permits.revoke(cid, "app-revoke")
-    return {"ok": True}
 
 
 @app.post("/code/start")

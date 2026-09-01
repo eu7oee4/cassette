@@ -179,17 +179,47 @@ hook deny 的调用到不了审批；hook 放过的写类（返回 `{}`）落进
 
 ## 7. 施工顺序与拨闸
 
-- **N0 · 纪律进系统提示**（§3）：独立可先行，只动 `build_options` 拼串。
+- **N0 · 纪律进系统提示**（§3）：独立可先行，只动 `build_options` 拼串。✅ 09-01
 - **N1 · 后端审批通路**（§1）：`allowed_tools` 摘掉写类四件；`can_use_tool` 回调
   + 内存待批单 + 超时；REST 两个端点 + Bark。拨闸复用 `WRITE_TOOLS_ENABLED`
   （语义不变：拨开=写类 schema 挂载 + 审批通路生效）。**先写测试**：挂起 / 批准 /
-  拒绝 / 超时 / 后端重启作废，五条都要有。
+  拒绝 / 超时 / 后端重启作废，五条都要有。✅ 09-01
 - **N2 · iOS 权限卡**（§6）：拨闸的硬前置。
 - **N3 · 拆迁**（§9）：分两批。第一批（门侧，随 N1 同一个 PR）：`code_permits`
-  整件、互斥检查、每轮 addendum 注入。第二批（code_bridge 的 code 半边）：
+  整件、互斥检查、每轮 addendum 注入。✅ 09-01 第二批（code_bridge 的 code 半边）：
   **先核 game 线的依赖**（§9 两处 ⚠️）再动。
 - **N4 · 重铸新口径**（§5）：forge 改造 + 四保险，与 N1–N3 无依赖可并行。
 - **真机验收清单**：§10 待验五条。
+
+### 7.1 施工记录（09-01，N0+N1+N3 第一批落码，469 测试全绿，未上电）
+
+新件：`server/permits.py`（内存待批单）+ `tests/test_permits.py`（五条主线+门
+集成+回调两形+capsule）。REST=`/permits/pending` GET + `/permits/decide` POST
+（`reason` 随拒绝进 Deny 的 message）。现场决定四条，都是正文没写死、施工撞上的：
+
+1. **capsule 的家=行为账**（§4 的「事件账」落不下了）：事件账要段地址，code
+   无场之后没有段——「◆ 结论 ← 出处」由 `_capture_capsules` 落进按角色一本的
+   行为账（`acts-<cid>.jsonl`，tool="capsule"，wake 轮带 scene=wake）。同理
+   **`acts_worthy` 收写类进行为账**（旧口径写类归段账故意不落）——「每条写类
+   调用就是账上一行」由此成立。行为账行文本帽 200 字符，capsule 超长会截。
+2. **审批挂起 ≠ 轮内空闲**：`_turn_events` 的 `CLAUDE_TIMEOUT_SEC`（15 分钟）
+   会把挂着等批的静流当 session 死。豁免判据=`permits.waiting(char)`，且豁免面
+   有界（卡过 deadline+5s 或 future 已死就不算在等——防泄漏的卡把空闲超时
+   永远钉死，[[cassette-wake-gate-bug-class]] 的近亲）。
+3. **超时默认值**（待拍①还没拍）：聊天轮 600s / wake 轮 120s，
+   env=`PERMIT_TIMEOUT_CHAT_SEC` / `PERMIT_TIMEOUT_WAKE_SEC`，拍了改 env。
+4. **SDK 的 `CanUseToolShadowedWarning` 静掉**（chat_loop 模块级 filter）：
+   allowed_tools+can_use_tool 组合是本设计故意的（§8），那条提醒对这套形状是误报。
+
+纪律文件基建：`code_addendum_chat.example.md` 入库、正式文件进 .gitignore
+（照 code_addendum.md 现状）；capsule 收场约定是代码侧机制字段（常驻
+`_discipline_block` 尾巴），机主文件里不用重复写。**机主还没写正式文件**——
+起步内容照 §3（只 add 自己动过的、commit≠push）。
+
+「先放着」的（第二批/N4 的活，这次没动）：`_fold_trace_lines`、
+`_frame_activities` 的 code 折叠框半边（历史 code 区间还要靠它渲染，随 N4 拆）、
+`hooks/code_segments.py`、`wake.code_session_owner/block`、`code_bridge` 全件、
+`owner_of("tmux")` 各兜底（game 归属锚还在用）。
 
 ---
 

@@ -29,6 +29,7 @@ server/characters/
 # 宠物注册表同构（PLAN_pet）：团团的 persona/接线/美术是 mianmian 私产，不入开源仓
 server/pets/
 code_addendum.md
+code_addendum_chat.md
 playroom/
 
 # ===== 求职相关 =====

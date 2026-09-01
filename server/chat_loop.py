@@ -29,14 +29,23 @@ from typing import AsyncIterator, Callable, Optional
 
 from claude_agent_sdk import (
     AssistantMessage,
+    CanUseToolShadowedWarning,
     ClaudeAgentOptions,
     ClaudeSDKClient,
     HookMatcher,
+    PermissionResultAllow,
+    PermissionResultDeny,
     ResultMessage,
     TextBlock,
     ToolUseBlock,
 )
 from claude_agent_sdk.types import StreamEvent, ToolResultBlock, UserMessage
+
+# allowed_tools（只读直放面）和 can_use_tool（写类审批面）组合用是故意的
+# （PLAN_native §1）：遮蔽只影响**进了**白名单的工具，写类四件不进名单，
+# 落 ask 路由到回调。SDK 的提醒对这套形状是误报，静掉。
+import warnings
+warnings.filterwarnings("ignore", category=CanUseToolShadowedWarning)
 
 import config
 import forge
@@ -197,15 +206,16 @@ def _wake_contract() -> str:
 
 
 def _wake_gate(handle: session_mgr.LoopHandle):
-    """PreToolUse 门：三种轮来源 × 泵状态 × 挂载的查表（PLAN_sdk 设计稿三）。
-    走 hook 不走 can_use_tool——allowed_tools 的整工具条目会在回调之前自动放行
-    （SDK 实证：_warn_if_can_use_tool_shadowed），hook 在权限判定之前跑，拦得住。
+    """PreToolUse 门：与审批无关的三件事（PLAN_native §1.4）。hook 先于权限
+    判定跑；hook 放过（{}）的写类因为不进 allowed_tools 会落 CLI 的 ask，
+    路由到 can_use_tool（_permit_gate）弹卡——两层是组合，不是二选一。
 
-    - game_* 操作类：放行条件=**泵开着**（锁在手），三种轮一致；泵没开一律拒
-      ——任务引擎互斥由此顺带成立（拿不到锁就开不了泵）。
-    - 醒来禁用面照 PR12：turn_kind=wake 查 wake_tools（tick 轮同 kind 同查表，
-      泵开着时 game_* 由上一条放行=允许集 ∪ game_*）。
-    - 聊天轮/巩固轮 → 其余全放行，行为与没挂 hook 一字不差。"""
+    1. 路径闸：Read/Grep/Glob 和 Edit/Write 都过（限仓根+黑名单）。Bash 没有
+       路径参数，闸对它放空——机主看得到命令原文，拍板本身就是闸。
+    2. wake 禁用面照 PR12：turn_kind=wake 查 wake_tools。
+    3. game 泵门：mcp__game__* 只在泵开着时放行；泵没开一律拒——任务引擎
+       互斥由此顺带成立（拿不到锁就开不了泵）。
+    聊天轮/巩固轮 → 其余全放行，行为与没挂 hook 一字不差。"""
     import pipeline
 
     def _deny(reason: str) -> dict:
@@ -223,34 +233,10 @@ def _wake_gate(handle: session_mgr.LoopHandle):
             why = pipeline.readonly_path_guard(tool_input, handle.char_id)
             return {} if why is None else _deny(why)
         if tool in pipeline.WRITE_BUILTINS:
-            # 写类轮级门（PR14-c）：查后端带外批准记录，**不查对话**——批准只能
-            # 从 TA 手上来（app 弹窗/权限卡），邮件/网页里的注入文本够不到。
-            # 批了也照过路径闸：写更不能出仓/碰黑名单（Bash 没路径参数，闸对它
-            # 放空——granted 即 TA 拍板过的信任面，命令级细分真机见刚需再补）。
-            # computer 互斥（PR14-d，与 game 泵拿模拟器锁同构）：电脑这样独占
-            # 资源归 tmux 归属角色，别人连申请都不递（递了 TA 批了也是串台面）。
-            import plugins
-            try:
-                owner = plugins.owner_of("tmux")
-            except Exception:
-                owner = handle.char_id
-            if owner != handle.char_id:
-                import characters
-                return _deny(f"电脑现在归「{characters.display_name(owner)}」——"
-                             "这台机器一次只归一个人用，想动手得先让"
-                             f"{config.user_name()}在插件商店把「电脑上的会话」"
-                             "转过来。")
-            import code_permits
-            if code_permits.active(handle.char_id):
-                why = pipeline.readonly_path_guard(tool_input, handle.char_id)
-                return {} if why is None else _deny(why)
-            r = code_permits.request(handle.char_id,
-                                     reason=_tool_summary(tool, tool_input)[:80])
-            note = ("刚替你把申请递上去了" if r.get("renewed")
-                    else "申请已经递过了、还在等批")
-            return _deny(f"动手改东西要{config.user_name()}先批一份写权限——{note}"
-                         "（TA 在 app/Bark 能看到，15 分钟内有效）。批下来之前，"
-                         "看和查随时可以（Read/Grep/Glob）。")
+            # 写类（§1.4）：hook 只过路径闸，别的判断一概不做——放过就落 ask
+            # → can_use_tool 弹卡原地挂起，批不批在机主指头上（§1.2）。
+            why = pipeline.readonly_path_guard(tool_input, handle.char_id)
+            return {} if why is None else _deny(why)
         if tool.startswith("mcp__game__"):
             if handle.meta.get("game_pump"):
                 return {}
@@ -262,6 +248,36 @@ def _wake_gate(handle: session_mgr.LoopHandle):
         return _deny("这会儿是你自己醒着的时间，这个工具不在手边（醒来那条路不挂它）"
                      "——想用的话留到聊天或上机的时候。")
     return gate
+
+
+def _permit_gate(handle: session_mgr.LoopHandle):
+    """can_use_tool（PLAN_native §1.2）：写类四件不进 allowed_tools，CLI 判
+    ask 路由到这儿——那次调用原地挂起，permits 弹卡给机主。批了返回 Allow，
+    工具原地执行、同一轮继续；拒了/超时返回 Deny(理由)，模型接着说话。
+    安全面（路径闸/wake 面/泵门）在 PreToolUse 门里，先于这儿跑；这儿只管
+    「机主批不批」一件事。超时分轮来源（§1.3）。"""
+    async def can_use(tool: str, tool_input: dict, ctx) -> "PermissionResultAllow | PermissionResultDeny":
+        import permits
+        turn = handle.meta.get("turn_kind") or "chat"
+        timeout = permits.timeout_for(turn)
+        verdict = await permits.ask(
+            handle.char_id, tool=tool,
+            summary=_tool_summary(tool, tool_input or {}),
+            title=(getattr(ctx, "title", None) or ""),
+            permit_id=getattr(ctx, "tool_use_id", None),
+            timeout=timeout)
+        u = config.user_name()
+        if verdict is None:
+            mins = max(1, int(timeout) // 60)
+            return PermissionResultDeny(
+                message=f"卡递到{u}手机上，等了约 {mins} 分钟没等到拍板——"
+                        "这一下先没做。想做的话过阵子再试就好。")
+        allow, reason = verdict
+        if allow:
+            return PermissionResultAllow()
+        return PermissionResultDeny(
+            message=f"{u}没批这一下" + (f"：{reason}" if reason else "。"))
+    return can_use
 
 
 # 游戏节奏骨架（设计稿三：TICK_SYSTEM 的条件式变体，常驻聊天系统提示——没有
@@ -367,10 +383,11 @@ def build_options(char_id: str, catalog: Optional[list] = None,
 
     if handle is not None and (config.READONLY_TOOLS_ENABLED
                                or config.WRITE_TOOLS_ENABLED):
-        # 文件工具挂载（PR14-b/d，§5.3）：只读常驻所有轮次（核一句话时来源也
-        # 过得去）；写类 schema 同样常驻（挂载=session 级），放不放行在轮级
-        # 带外门（code_permits）。安全面都在 PreToolUse 闸里，handle=None
-        # （没门）就一概不挂。两个闸分开拨：schema token 成本逐段实测。
+        # 文件工具挂载（PLAN_native §1）：只读直放（进 allowed_tools，常驻所有
+        # 轮次）；写类四件 schema 也挂、但**不进 allowed_tools**——每次调用被
+        # CLI 判 ask，路由到 can_use_tool 弹卡原地挂起。安全面在 PreToolUse
+        # 闸里，handle=None（没门）就一概不挂。两个闸分开拨：schema token
+        # 成本逐段实测。
         segs: list[str] = []
         if config.READONLY_TOOLS_ENABLED:
             tools += sorted(pipeline.READONLY_BUILTINS)
@@ -380,13 +397,15 @@ def build_options(char_id: str, catalog: Optional[list] = None,
                         "房间不在范围里。")
         if config.WRITE_TOOLS_ENABLED:
             tools += sorted(pipeline.WRITE_BUILTINS)
-            segs.append(f"改东西的工具（Edit/Write/Bash）也在，但动手前要"
-                        f"{config.user_name()}批一份写权限——没批就用会被门拦下、"
-                        "同时替你把申请递过去；批下来的权限干完这阵活就会收回，"
-                        "下次动手再申请就好。")
+            segs.append(f"改东西的工具（Edit/Write/Bash）也在手边。每次动手，"
+                        f"那一下会先弹到{config.user_name()}手机上等TA批：批了"
+                        "就原地继续做；拒了或没等到，你会收到一句原因，接着"
+                        "说你的就好。")
         else:
             segs.append("改文件的工具这会儿不在手边。")
         system += "\n\n【" + "".join(segs) + "】"
+        if config.WRITE_TOOLS_ENABLED:
+            system += _discipline_block(char_id)
 
     env = {}
     if tools and pipeline.tool_search_on("chat"):
@@ -400,7 +419,12 @@ def build_options(char_id: str, catalog: Optional[list] = None,
         mcp_servers=servers,
         strict_mcp_config=True,
         tools=tools,
-        allowed_tools=list(tools),
+        # 写类四件不进直放面（PLAN_native §1.1）：挂载归 tools（schema 在），
+        # 放行走 ask → can_use_tool（一命令一卡，机主原地拍板）。
+        allowed_tools=[t for t in tools if t not in pipeline.WRITE_BUILTINS],
+        can_use_tool=(_permit_gate(handle)
+                      if handle is not None and config.WRITE_TOOLS_ENABLED
+                      else None),
         env=env,
         include_partial_messages=True,   # 逐字增量：text 事件靠它
         # max_turns 不设：-p 路从来没限过，聊天轮的工具链长度由模型自己收
@@ -457,28 +481,19 @@ def _user_dict(msg: UserMessage) -> dict:
     return {"type": "user", "message": {"content": blocks}}
 
 
-def _code_seg(char_id: str) -> Optional[str]:
-    """开着的 code 场（写批准在身上时 code_permits 带的段账地址；没批=None）。"""
-    try:
-        import code_permits
-        return code_permits.active_seg(char_id)
-    except Exception:
-        return None
-
-
-def _capture_capsules(char_id: str, text: str) -> None:
-    """收场白 capsule（§5.3 第二类留痕：结论带指针）。code 场开着时，他气泡里
-    「◆ 结论 ← 出处」打头的行落进段事件账——气泡会随折叠整段消失，账本才是
-    它过桥的家。checked_at=事件 ts（机械补），proof_pointer=他写的出处。"""
-    seg = _code_seg(char_id)
-    if not seg or "◆" not in (text or ""):
+def _capture_capsules(char_id: str, text: str, turn: str = "chat") -> None:
+    """收场白 capsule（PLAN_native §4：结论跨重铸过桥的唯一结构化通道）。
+    他气泡里「◆ 结论 ← 出处」打头的行落进**行为账**——证据原文在账里永存，
+    事后查证走账，不注回上下文。（旧家是 code 段的事件账；code 无场之后
+    事件账没有段地址，按角色一本的行为账就是它的家——PLAN_native §4 记档。）"""
+    if "◆" not in (text or ""):
         return
     import activity_log
     for line in text.splitlines():
         line = line.strip()
         if line.startswith("◆"):
-            activity_log.append_event(seg, "capsule",
-                                      text=line.lstrip("◆").strip())
+            activity_log.append_act(char_id, turn, "capsule",
+                                    line.lstrip("◆").strip())
 
 
 # ---------- 执行层 tool 落账（S3 补线②：§5.3 四类表一、三类的确定性载体） ----------
@@ -535,7 +550,8 @@ class _ToolTrace:
     物理无法复原（forge 断言拒 tool 块），这两本账是干活留痕唯一的家。
     轮死在半路、配不上对的不落（账丢一条不影响轮）。每轮一个实例，不跨轮攒状态。
 
-    - **事件账**（折叠段）：要有地址，没开段就不落——段只在 game/code 场开。
+    - **事件账**（折叠段）：要有地址，没开段就不落——段只在 game 场开
+      （code 无场，PLAN_native：写类留痕走行为账）。
     - **行为账**（按角色一本）：每轮都落，判线 pipeline.acts_worthy。
       08-31 事故修：聊天轮从来不开段，而「说寄了信、其实一次工具都没调」那类
       失约恰恰全发生在聊天轮（那天 21:24/21:26 连编两轮）。原来行为账唯一的
@@ -572,8 +588,7 @@ class _ToolTrace:
         ok = not pipeline.tool_result_error_structural(bool(is_error), text)
         ret = "" if name in pipeline.READONLY_BUILTINS else text[:RET_CAP]
         turn = self.handle.meta.get("turn_kind") or "chat"
-        seg = ((self.handle.meta.get("game_pump") or {}).get("seg_id")
-               or _code_seg(self.handle.char_id))
+        seg = (self.handle.meta.get("game_pump") or {}).get("seg_id")
         if seg:
             activity_log.append_event(
                 seg, "tool", name=name, text=summary, ok=ok, ret=ret,
@@ -596,6 +611,11 @@ async def _turn_events(client, handle: session_mgr.LoopHandle,
             msg = await asyncio.wait_for(agen.__anext__(),
                                          timeout=config.CLAUDE_TIMEOUT_SEC)
         except asyncio.TimeoutError:
+            import permits
+            if permits.waiting(handle.char_id):
+                # 审批挂起不算空闲（PLAN_native §1.2）：卡在机主手上，流静着
+                # 是正常的。permits 自己有超时兜底，这儿等它的结果就好。
+                continue
             flags["timeout"] = True
             print("[chat_loop] 轮内空闲超时（session 按死处理）", file=sys.stderr)
             yield {"type": "__idle_timeout__"}
@@ -846,28 +866,30 @@ def _seen_block(char_id: str, since_ts: int) -> tuple[Optional[str], int]:
 # 事后查证和出口判脏都吃它；真要再推给他看，先过上面注入处那条纪律。
 
 
-def _code_addendum_block() -> str:
-    """写批准下来那一轮注入的干活纪律（§5.3：文档侧按需注入，不换 client——
-    旧版靠起点重铸挂 addendum 的唯一职责由这行字接管）。正文=code_addendum_chat.md
-    （**不复用老路的 code_addendum.md**：那篇通篇是「这个会话/切过来的编码会话」
-    的场文本，注进统一路等于把切场感造回来——这儿不是场，只是工具批下来了；
-    机主没写这份文件就只注 capsule 约定）。尾巴=capsule 收场约定（§5.3 第二类
-    留痕：他自己写，但格式强制带指针）。"""
+def _discipline_block(char_id: str) -> str:
+    """干活纪律常驻系统提示（PLAN_native §3）：机主手写的 code_addendum_chat.md
+    渲染进来，紧挨工具可用性那段；两个角色共用同一份——纪律是工地规矩不是
+    人格，占位（{{AGENT_NAME}}/{{USER_NAME}}）照 persona 的渲染路。进前缀缓存，
+    一条 session 付一次；改文件=系统提示变=判脏触发重铸。capsule 收场约定是
+    代码侧的机制字段（_capture_capsules 认「◆」），常驻在尾巴上，文件里不用
+    重复写。（不复用老路的 code_addendum.md：那篇通篇是场文本。）"""
     body = ""
     try:
         p = config.BASE_DIR / os.environ.get("CODE_ADDENDUM_CHAT_FILE",
                                              "code_addendum_chat.md")
         if p.exists():
-            body = p.read_text("utf-8").strip()
+            import characters
+            body = (p.read_text("utf-8").strip()
+                    .replace("{{AGENT_NAME}}", characters.display_name(char_id))
+                    .replace("{{USER_NAME}}", config.user_name()))
     except Exception:
         pass
-    cap = (f"【{config.user_name()}把写权限批给你了，改东西的工具现在能用了。"
-           "干完一件事收尾的时候，把结论逐条写成「◆ 结论 ← 出处（文件:行）」的"
-           "样子说出来——◆ 打头、一行一条、出处指到能复核的地方。这些结论会"
-           "留在记录里，过程细节以后想不起来是正常的。】")
+    cap = ("干完一件事收尾的时候，把结论逐条写成「◆ 结论 ← 出处（文件:行）」"
+           "的样子说出来——◆ 打头、一行一条、出处指到能复核的地方。结论会留"
+           "在记录里，过程细节以后想不起来是正常的。")
     if body:
-        return "【动手改东西时的纪律】\n" + body + "\n\n" + cap
-    return cap
+        return "\n\n【动手改东西时的纪律】\n" + body + "\n" + cap
+    return "\n\n【" + cap + "】"
 
 
 def _stale_depth(handle: session_mgr.LoopHandle) -> Optional[int]:
@@ -1318,13 +1340,6 @@ async def run(handle: session_mgr.LoopHandle, *,
                 if seen:
                     parts.append(seen)
                     handle.meta["seen_cursor"] = cur
-                # code addendum 按需注入（PR14-d）：批准落地后的第一个轮带干活
-                # 纪律，一场注一次（段 id 变了才再注）。文档块不进账，重铸时
-                # 自然脱落——场都收了，纪律没必要跟着历史走。
-                cseg = _code_seg(handle.char_id)
-                if cseg and handle.meta.get("code_addendum_seg") != cseg:
-                    parts.append(_code_addendum_block())
-                    handle.meta["code_addendum_seg"] = cseg
                 injection = ("\n\n".join(parts + [turn.injection])
                              if parts else turn.injection)
                 content: list[dict] = [{"type": "text", "text": injection}]
@@ -1366,7 +1381,7 @@ async def run(handle: session_mgr.LoopHandle, *,
                             ledger.append({"r": "assistant", "h": _h(delivered),
                                            "ts": int(time.time())})
                             _persist_ledger(handle.char_id, sid, ledger)
-                            _capture_capsules(handle.char_id, delivered)
+                            _capture_capsules(handle.char_id, delivered, "wake")
                         ok = True
                 elif captured.get("reply"):
                     ledger.append({"r": "user", "h": _h(turn.new_msg["text"]),
@@ -1438,12 +1453,6 @@ async def run(handle: session_mgr.LoopHandle, *,
             await _pump_close(f"loop-exit: {why}")   # 拿着游戏时 loop 死了：锁/账别悬着
         except Exception as e:
             print(f"[chat_loop] 退出时放下游戏失败: {e}", file=sys.stderr)
-        try:
-            # 一场一批、收摊即失效（PR14-c）：loop 退出=这一场完了，写批准别悬着。
-            import code_permits
-            code_permits.revoke(handle.char_id, f"loop-exit: {why}")
-        except Exception as e:
-            print(f"[chat_loop] 退出时撤写批准失败: {e}", file=sys.stderr)
         await _safe_disconnect(client)
 
 

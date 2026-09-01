@@ -109,10 +109,11 @@ STORY_ENGINE = (os.environ.get("STORY_ENGINE", "sdk").strip() or "sdk")
 # 成本必须真机实测（PLAN_cache：上下文最大稀释源是工具 schema）再拨闸。
 READONLY_TOOLS_ENABLED = os.environ.get("READONLY_TOOLS", "0") == "1"
 
-# 写类工具挂载闸（PLAN_sdk S3 PR14-d）：Edit/Write/NotebookEdit/Bash 的 schema
-# 常驻进 sdk 聊天 session。挂载=session 级、放行=轮级带外门（code_permits），
-# 两件事拆开是 08-31 改判的核心。默认关，两段拨闸：先 READONLY_TOOLS 实测
-# schema token，稳了再拨这个。
+# 写类工具挂载闸（PLAN_native §1）：Edit/Write/NotebookEdit/Bash 的 schema
+# 常驻进 sdk 聊天 session，但不进 allowed_tools——每次调用被 CLI 判 ask，
+# 路由到 can_use_tool 弹卡原地挂起（permits.py），机主批的就是那次调用本身。
+# 拨开=写类 schema 挂载+审批通路生效。默认关，两段拨闸：先 READONLY_TOOLS
+# 实测 schema token，稳了再拨这个（上电硬前置：iOS 权限卡先做出来，§6）。
 WRITE_TOOLS_ENABLED = os.environ.get("WRITE_TOOLS", "0") == "1"
 
 # 聊天引擎（PLAN_sdk S2/PR10）：按角色灰度。

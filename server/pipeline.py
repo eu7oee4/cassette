@@ -1132,18 +1132,19 @@ def external_tool(name: str) -> bool:
 # （四类表第三类）、写类逐条留原文（第一类））。
 READONLY_BUILTINS = {"Read", "Grep", "Glob"}
 
-# 写类内置工具（§5.3：走轮级带外批准门，code_permits/PR14-c）。Bash 整个算写类
-# ——命令级读写分类是走不稳的路（真机撞见「只读 Bash」的刚需再从执行层补），
-# 看东西有 Read/Grep/Glob。
+# 写类内置工具（PLAN_native §1：不进 allowed_tools，CLI 判 ask → can_use_tool
+# 弹卡原地挂起，机主批的就是那条调用原文本身）。Bash 整个算写类——不需要
+# 命令级读写细分，看东西有 Read/Grep/Glob。
 WRITE_BUILTINS = {"Edit", "Write", "NotebookEdit", "Bash"}
 
 
 def acts_worthy(name: str) -> bool:
-    """行为账判线（执行层落账用，08-31 事故修）：碰了外部世界、且不是本地文件
-    工具。本地读写归折叠段的事件账（那儿有 ro 读写分界、有 capsule 收场白），
-    行为清单是开局机械推送的 limit=10 短表——被「翻了 30 个文件」刷掉就废了。"""
-    return (external_tool(name)
-            and name not in READONLY_BUILTINS and name not in WRITE_BUILTINS)
+    """行为账判线（执行层落账用，08-31 事故修）：碰了外部世界的、和每一次
+    写类——写类一行自带机主批准这个事实（PLAN_native §4：每条写类调用就是
+    账上一行；code 无场之后行为账是写类留痕唯一的家）。只读不落：翻文件是
+    看不是做，账会被刷成流水。"""
+    return (name in WRITE_BUILTINS
+            or (external_tool(name) and name not in READONLY_BUILTINS))
 
 
 # 只读常驻的安全面（§5.3 机主 08-31 拍板：限根目录+黑名单，不做全盘放行）。
