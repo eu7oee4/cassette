@@ -681,22 +681,30 @@ private struct MessageRow: View {
     }
 
     /// 流式增长中的气泡：纯 Text（不解析 markdown/不上代码高亮），逐片更新才丝滑。
-    /// 定稿（isStreaming=false）后由 textBody 走完整 markdown 渲染。
-    /// 尾部呼吸点：生成中常亮，定稿即消——不然正文一开始冒（"正在输入"收起后）就没任何"还在写"的指示。
+    /// 空行换气泡（U2 路 C）：前面的段定型不再动，新气泡从下面长出来；围栏内不切，
+    /// 定稿（isStreaming=false）后由 textBody 走块级解析纠正——流式切错不落盘。
+    /// 尾部呼吸点：只挂最后一段，生成中常亮，定稿即消。
     private func streamingBubble(_ raw: String) -> some View {
-        HStack(alignment: .bottom, spacing: 6) {
-            Text(raw)
-            StreamingPulseDot()
-                .padding(.bottom, 5)
+        let segs = streamingSegments(raw)
+        return VStack(alignment: isMe ? .trailing : .leading, spacing: 5) {
+            ForEach(Array(segs.enumerated()), id: \.offset) { i, seg in
+                HStack(alignment: .bottom, spacing: 6) {
+                    Text(seg)
+                    if i == segs.count - 1 {
+                        StreamingPulseDot()
+                            .padding(.bottom, 5)
+                    }
+                }
+                .foregroundStyle(bubbleText ?? .primary)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 10)
+                .background(
+                    RoundedRectangle(cornerRadius: 18, style: .continuous)
+                        .fill(bubbleFill)
+                )
+                .frame(maxWidth: bubbleMaxWidth, alignment: isMe ? .trailing : .leading)
+            }
         }
-            .foregroundStyle(bubbleText ?? .primary)
-            .padding(.horizontal, 14)
-            .padding(.vertical, 10)
-            .background(
-                RoundedRectangle(cornerRadius: 18, style: .continuous)
-                    .fill(bubbleFill)
-            )
-            .frame(maxWidth: bubbleMaxWidth, alignment: isMe ? .trailing : .leading)
     }
 
     @ViewBuilder private func segmentView(_ seg: MessageSegment) -> some View {
