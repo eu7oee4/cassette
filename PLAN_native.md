@@ -49,6 +49,10 @@ CLI 权限规则判成 `ask`，路由到下面的回调（`types.py:2113`）。
 
 - **被批的就是挂起的那次调用本身。** 参数在 `input` 里原样摆着，机主看到的
   就是要跑的那条东西。批准即执行，不存在「批完再重发」这个环节。
+- **只读 Bash 命令 CLI 自己放行，不进回调**（09-01 实证，CLI 2.1.252）：
+  `pwd` 这类只读命令没弹卡直接跑了，`touch` 才进回调。所以「Bash 每次必弹卡」
+  要念成「**真动东西的 Bash 必弹卡**」——方向与只读直放的设计一致，但这类
+  调用不会出现在 permits 里，行为账想收它们得另想（§7.2）。
 - `ctx` 自带 `title` / `display_name` / `description`（SDK 生成的整句提示文案，
   `types.py:225-233`）——卡片文案直接用它当底稿；`tool_use_id` 当单号。
 - 待批单是**内存态**。后端重启即作废（回调随进程一起消失），模型下次要做再调一次
@@ -221,6 +225,29 @@ hook deny 的调用到不了审批；hook 放过的写类（返回 `{}`）落进
 `hooks/code_segments.py`、`wake.code_session_owner/block`、`code_bridge` 全件、
 `owner_of("tmux")` 各兜底（game 归属锚还在用）。
 
+### 7.2 验证记录（09-01 晚，待验①③离线实证，独立 SDK 探针不碰生产）
+
+探针：scratchpad `permit_probe.py`（形状对齐 `build_options`：写类不进
+`allowed_tools`、`can_use_tool` 挂着、订阅路无 API key）。CLI 2.1.252 / SDK 0.2.148。
+
+1. **待验① 无隐藏超时**：回调挂 720s 再 Allow——CLI 不断连，工具原地执行。
+   模型第一次写错路径（`/probe_hang.txt`），放行后工具报错、它自己 `pwd` 纠正
+   重试，又挂了第二个 720s，照样走通。**一轮连续两次分钟级挂起、总时长 24 分钟，
+   收尾正常**——比设计要的还多验了一层。
+2. **待验③ 遮蔽坐实（两半）**：
+   - 机制半：settings 文件里 `allow: ["Write"]` → Write 直接执行，回调一声不响；
+   - 用户层半：只在机主 `~/.claude/settings.json` `enabledPlugins` 里启用的
+     swift-lsp 出现在子进程 init 里 → **`setting_sources` 默认 None = 全加载**
+     （`types.py:2225`，文档与实测一致）。今天没事只因机主 settings 恰好没有
+     `permissions.allow`；TA 手机上那张卡会被机主自己某次「always allow」静默绕过。
+   - **修法已落码并实证**：`build_options` 加 `setting_sources=[]` → init 里
+     swift-lsp 消失、plugins=[]、回调照常拦截。顺带把机主个人的插件 / skills /
+     Stop hook 全挡在 TA 会话外（全是想要的）。469 测试绿。
+3. **计划外发现（已写进 §1.2）**：CLI 对只读 Bash 命令（`pwd`）有内建自动放行面，
+   不进回调。真动东西的（`touch`）必进回调、Deny 生效。含义两条：这类调用
+   permits 里不会有记录；行为账 `acts_worthy` 若把 Bash 一律当写类收，
+   会把 `pwd` 这类也记上——要不要按命令区分，随 N2 拨闸前顺手看一眼。
+
 ---
 
 ## 8. 改判登记（本 plan 推翻/顶替了哪些旧定稿）
@@ -280,12 +307,14 @@ hook deny 的调用到不了审批；hook 放过的写类（返回 `{}`）落进
 
 **真机验（拨闸前）**：
 
-1. CLI 侧等 `can_use_tool` 裁决有没有隐藏超时（SDK 侧无；`query.py` 里 60s 那个
-   是反方向的初始化请求）。它和 Claude Code 终端等按键是同一条管线，预期无限等，未实证。
+1. ~~CLI 侧等 `can_use_tool` 裁决有没有隐藏超时~~ ✅ **09-01 离线实证无超时**
+   （独立 SDK 探针，CLI 2.1.252）：一轮里连续两次挂 720s（> 聊天轮 600s 上限）
+   再 Allow，工具都原地执行、24 分钟的轮正常收尾。细节见 §7.2。
 2. 挂起期间该 session 的流式 / 插话表现（轮开着，新消息排队多久算可接受）。
-3. `~/.claude/settings.json` 的 allow 规则会不会遮蔽回调（`types.py:1861` 明说
-   settings 文件的 allow 也遮蔽）——chat session 子进程吃不吃用户全局 settings 要实测，
-   必要时给空 `--settings` 隔离。
+3. ~~settings 的 allow 规则会不会遮蔽回调~~ ✅ **09-01 离线实证：会，且子进程
+   默认吃用户全局 settings**（两半都坐实，细节见 §7.2）。修法已落码：
+   `build_options` 加 `setting_sources=[]`（注意**不是**空 `--settings`——
+   那只是加一层 flag settings，挡不住用户层加载）。
 4. 写类四件的 schema token 实测（拨闸顺序照旧：只读已拨且已实测，写类实测完再拨）。
 5. 并发写实测一次：两角色各批一条对同文件的 Edit，确认响亮失败路真响亮。
 

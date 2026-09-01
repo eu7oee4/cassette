@@ -415,6 +415,12 @@ def build_options(char_id: str, catalog: Optional[list] = None,
     return ClaudeAgentOptions(
         system_prompt=system,
         model=config.MODEL,
+        # 隔离文件系统 settings（PLAN_native §10 待验③实证 09-01）：默认 None=
+        # 全加载，机主 ~/.claude/settings.json 会整份漏进 TA 的会话（swift-lsp
+        # 插件实测在场）；机主哪天点一次「always allow」写进 permissions.allow，
+        # can_use_tool 就被静默遮蔽——弹卡形同虚设。空表把用户/项目/local 三层
+        # 全关掉，会话吃的只有这里显式给的东西。
+        setting_sources=[],
         cwd=pipeline.neutral_cwd(),
         mcp_servers=servers,
         strict_mcp_config=True,
