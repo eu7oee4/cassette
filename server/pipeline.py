@@ -220,8 +220,52 @@ def sticker_block(catalog, allow_desc: bool = True) -> str:
         lines.append(f"{_sticker_handle(i, s)}：{desc}")
     lines.append("想发就在回复里写 [[sticker:s1]]，可以和文字一起（这个标记会被替换成表情图，对方只看到图）。")
     if allow_desc:
-        lines.append("如果你觉得某张的描述不准，可以顺手改：[[sticker_desc:s1=新的描述]]。")
+        # 例子用不存在的序号（sN 不在 handle_to_id 里 → 复述也改不动）：这条会**改盘**
+        # （写 catalog 描述）且静默。发表情那条留真值 s1——后果只是多发一张表情，
+        # 聊天里看得见、也就撤得掉。判据见 PLAN_native §14.0 规避规则 3。
+        lines.append("如果你觉得某张的描述不准，可以顺手改：[[sticker_desc:sN=新的描述]]。")
     return "\n".join(lines)
+
+
+# ---------- 引用逃逸（2026-09-02 事故，复盘全文 PLAN_native §14.0）----------
+# 「**提及即使用**」：模型在正文里**复述**一段带标记的文本（贴注入原文、解释用法、
+# 跟机主讨论这个机制），解析器分不出「他在下指令」和「他在引用」，照样执行。
+# 09-02 22:46 实锤：机主问小卡「你现在看到的首轮长什么样」，她用 ``` 围栏把注入
+# 原样贴出来，里面 one_turn_hint 的例子 [[next_wake:1小时|…]] 被 parse_chat_next
+# 执行、顶掉了她自己 00:50 的钟；strip_markers 又把它剥掉，机主手机上只看到一段
+# 带窟窿的话——窟窿本身不解释自己，没人当场发现。
+#
+# 所有 [[…]] 解析共用这一份：落在代码块/行内 code 里的标记**既不执行、也不剥**。
+# ⚠️ 不剥是要点，不是顺手：剥了就又是「带窟窿的正文」，而那正是这次没被发现的原因。
+_FENCE_RE = re.compile(r"```.*?(?:```|\Z)", re.S)
+_INLINE_CODE_RE = re.compile(r"`[^`\n]*`")
+
+
+def quoted_spans(text: str) -> list[tuple[int, int]]:
+    """正文里「引用区」的字符区间：``` 围栏（没闭合就吃到结尾）+ 行内 code。
+    围栏先算，行内 code 只在围栏外找——围栏里的单个反引号不该切出区间。"""
+    spans = [m.span() for m in _FENCE_RE.finditer(text)]
+    for m in _INLINE_CODE_RE.finditer(text):
+        if not any(a <= m.start() < b for a, b in spans):
+            spans.append(m.span())
+    return spans
+
+
+def sub_outside_quotes(rx: "re.Pattern", repl, text: str) -> str:
+    """`rx.sub(repl, text)`，但跳过引用区里的匹配（原样留着）。
+    副作用都写在 repl 里，所以「不调 repl」＝「不执行」，两件事同一个开关。"""
+    if not text or "[[" not in text:
+        return text
+    spans = quoted_spans(text)
+    if not spans:
+        return rx.sub(repl, text)
+
+    def _guard(m):
+        if any(a <= m.start() < b for a, b in spans):
+            return m.group(0)
+        return repl(m)
+
+    return rx.sub(_guard, text)
 
 
 # 标记统一用英文 token（模型更不易写歪）；解析端兼容旧中文写法 + 全角冒号 + 空格做容错。
@@ -247,8 +291,8 @@ def parse_sticker_markers(reply: str, handle_to_id: dict) -> tuple[str, list, li
             sends.append(handle_to_id[h])
         return ""
 
-    reply = _STICKER_DESC_RE.sub(on_desc, reply)
-    reply = _STICKER_SEND_RE.sub(on_send, reply)
+    reply = sub_outside_quotes(_STICKER_DESC_RE, on_desc, reply)
+    reply = sub_outside_quotes(_STICKER_SEND_RE, on_send, reply)
     return reply.strip(), sends, updates
 
 
@@ -318,8 +362,8 @@ def _chat_next_hint() -> str:
     # 口径必须和 one_turn_hint('chat') 对得上：那条规矩的②就是靠这个标记落地的，
     # 两处说法不一样，模型会照着更近的那条写。
     return (f"【可选：如果{config.user_name()}提到要离开/回来/睡觉之类，你可以顺手安排下次主动醒来——"
-            "在回复里写 [[next_wake:3小时]]（范围 5 分钟~12 小时，会被剥掉、对方看不到）；"
-            "要给下一轮留活就写 [[next_wake:3小时|下一轮要做什么]]。没必要就别写。】")
+            "在回复里写 [[next_wake:多久后]]（范围 5 分钟~12 小时，会被剥掉、对方看不到）；"
+            "要给下一轮留活就写 [[next_wake:多久后|下一轮要做什么]]。没必要就别写。】")
 
 
 def parse_next_minutes(section: str) -> Optional[int]:
@@ -355,7 +399,7 @@ def parse_chat_next(reply: str) -> tuple[str, Optional[int], Optional[str], str]
             found.append((mins, head, todo))
         return ""
 
-    reply = _CHAT_NEXT_RE.sub(on_match, reply)
+    reply = sub_outside_quotes(_CHAT_NEXT_RE, on_match, reply)
     if found:
         mins, head, todo = found[-1]
         return reply.strip(), mins, head, todo
@@ -384,17 +428,19 @@ def one_turn_hint(kind: str = "chat") -> str:
     只写机制）。kind='chat'/'wake' → ①先做后说 ②钉下一轮 两条，定点写法分叉
     （marker vs NEXT 段）；'chat_session' → SDK 常驻路（PLAN_sdk PR10），
     只留 next_wake 用法一句。"""
+    # ⚠️ 例子一律写成**解析不出来**的占位形式（「多久后」不含数字 → parse_next_minutes
+    # 返 None → 整条作废），别写真值。2026-09-02 实锤：这里原来的「例：[[next_wake:1小时|
+    # 给安瞬回信，回完更新名册]]」被复述了一次，当场改掉了她自己的钟。写在 prompt 里的
+    # 可执行例子＝埋在文档里的地雷，引用逃逸只是第二道闸。全文 PLAN_native §14.0。
     if kind == "wake":
         how = ("在 NEXT 那段写成「时间 | 下一轮要做什么」，例：\n"
-               "   NEXT: 1小时 | 给安瞬回信，回完更新名册")
+               "   NEXT: 多久后 | 到时候要做什么")
     else:
-        how = ("在回复里写 [[next_wake:时间|下一轮要做什么]]（会被剥掉、对方看不到），例：\n"
-               "   [[next_wake:1小时|给安瞬回信，回完更新名册]]")
+        how = ("在回复里写 [[next_wake:多久后|下一轮要做什么]]（会被剥掉、对方看不到）")
     if kind == "chat_session":
         # 机主拍板（08-30）：session 路把「这轮那轮」的解释整段删掉，只留用法——
         # 存在感的事不解释，工具的事才写字。
-        return ("【想留到之后做的事，写 [[next_wake:时间|要做什么]]（会被剥掉、对方看不到），"
-                "例：[[next_wake:1小时|给安瞬回信，回完更新名册]]。"
+        return ("【想留到之后做的事，写 [[next_wake:多久后|要做什么]]（会被剥掉、对方看不到）。"
                 "竖线后那句会原样存下来，到点递回给你——写清楚做什么，别写「继续」；"
                 "不带时间就没有钉子。】")
     # 机主拍板（08-30）：「你只有这一轮/进程结束」的存在论开场白全线删掉，
@@ -459,7 +505,7 @@ def parse_chat_move(reply: str) -> tuple[str, Optional[str]]:
         found.append(m.group(1).strip())
         return ""
 
-    reply = _CHAT_MOVE_RE.sub(on_match, reply)
+    reply = sub_outside_quotes(_CHAT_MOVE_RE, on_match, reply)
     return reply.strip(), (found[-1] if found else None)
 
 
@@ -1503,7 +1549,9 @@ _MARKER_RE = re.compile(r"\[\[.*?\]\]", re.S)
 
 
 def strip_markers(text: str) -> str:
-    return _MARKER_RE.sub("", text)
+    # 引用区里的标记不剥（口径同 sub_outside_quotes）：那是他在引用，不是在下指令，
+    # 剥了就成了「带窟窿的正文」——PLAN_native §14.0 那次没被当场发现，靠的就是窟窿。
+    return sub_outside_quotes(_MARKER_RE, lambda m: "", text)
 
 
 # ---------- 浏览器去留标记（幽灵会话，见 browser_keeper.py）----------
@@ -1524,4 +1572,4 @@ def parse_browser_markers(text: str) -> tuple[str, Optional[str]]:
         choice = "keep" if m.group(1).lower() in ("keep", "保留") else "close"
         return ""
 
-    return _BROWSER_CHOICE_RE.sub(_on, text), choice
+    return sub_outside_quotes(_BROWSER_CHOICE_RE, _on, text), choice

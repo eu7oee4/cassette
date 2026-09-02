@@ -29,16 +29,30 @@ def sse(obj: dict) -> bytes:
 
 class MarkerStreamFilter:
     """把逐字增量里的内联标记 [[...]] 挡在气泡外。标记可能被拆到两段增量，
-    未闭合就扣住等下一段。权威回复由 done 时 finalize 兜底剥，这里只求别露给用户。"""
+    未闭合就扣住等下一段。权威回复由 done 时 finalize 兜底剥，这里只求别露给用户。
+
+    ``` 围栏里的标记原样上屏（口径同 pipeline.sub_outside_quotes）：那是他在**引用**，
+    不是在下指令，finalize 那边也不再剥它——两边不一致的话，贴出来的注入原文会在
+    气泡里带一串窟窿（PLAN_native §14.0 那次机主看到的就是这个）。
+    ⚠️ 流式只认围栏，不认行内 code：行内 code 里的标记这边仍会被吞一次，而 done 的
+    权威正文里留着。方向安全（少显示，不多执行），修的时候连 `` 一起处理。"""
     def __init__(self):
         self.buf = ""
+        self.seen = ""      # 已喂进来的全文——判 ``` 奇偶用（围栏本身可能被拆成两段）
 
     def feed(self, text: str) -> str:
         """喂一段增量，返回可安全上屏的文字。"""
+        self.seen += text
         self.buf += text
         out: list[str] = []
         while True:
+            start = len(self.seen) - len(self.buf)   # buf 在全文里的起点
             idx = self.buf.find("[[")
+            if idx != -1 and self.seen.count("```", 0, start + idx) % 2 == 1:
+                # 围栏里：连 "[[" 一起原样放行，接着往后找
+                out.append(self.buf[:idx + 2])
+                self.buf = self.buf[idx + 2:]
+                continue
             if idx == -1:
                 if self.buf.endswith("["):     # 留住可能拼成 "[[" 的单个 "["
                     out.append(self.buf[:-1]); self.buf = "["
