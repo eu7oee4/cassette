@@ -31,11 +31,11 @@ class QueueBase(CohabitBase):
         super().setUp()
         self._enabled_orig = config.COHABIT_ENABLED
         config.COHABIT_ENABLED = True
-        # 「电脑前没人」要钉在 cohabit.coding_char 上：队列的避让judge走的是
-        # cq._code_owner → cohabit.coding_char，钉 wake 那边的探针是个空动作
+        # 「电脑前没人」要钉在 cohabit.game_char 上：队列的避让judge走的是
+        # cq._code_owner → cohabit.game_char，钉 wake 那边的探针是个空动作
         # （钉完照样去探真 tmux——开发机上开着 code 会话时测试就会跟着飘）。
-        self._coding_orig = cohabit.coding_char
-        cohabit.coding_char = lambda: None
+        self._coding_orig = cohabit.game_char
+        cohabit.game_char = lambda: None
         cq._code_cache.update(ts=0.0, owner=None)   # 探测缓存 5 秒，不清会带着上条用例的答案跑
         self._random_orig = cq.random
         # 概率必中 + 洗牌不动（判定可复现；shuffle 置空保持注册序，专门的顺序测试自己控）
@@ -49,7 +49,7 @@ class QueueBase(CohabitBase):
         cq.uninstall()
         self._reset_queue()
         config.COHABIT_ENABLED = self._enabled_orig
-        cohabit.coding_char = self._coding_orig
+        cohabit.game_char = self._coding_orig
         cq.random = self._random_orig
         super().tearDown()
 
@@ -405,7 +405,7 @@ class TestSolo(QueueBase):
 
     def test_code_session_defers_owner_only(self):
         # 归属角色在电脑前：他的自主醒跳过，别的角色照常（M2 后不再全体避让）
-        cohabit.coding_char = lambda: (self.cid, "code")
+        cohabit.game_char = lambda: (self.cid, "code")
         cq._code_cache["ts"] = 0.0              # 探测缓存作废，立刻认新桩
         cq._solo_tick(time.time())
         self.assertNotIn(self.cid, cq._pending)
@@ -418,11 +418,11 @@ class TestCodeSessionDefer(QueueBase):
     收工那一刻整批补醒；在场者的注入里能看到他「正在敲代码，先别打扰」。"""
 
     def _busy(self, cid, prof="code"):
-        cohabit.coding_char = lambda: (cid, prof)
+        cohabit.game_char = lambda: (cid, prof)
         cq._code_cache["ts"] = 0.0              # 缓存作废：测试里换桩要立刻生效
 
     def _idle(self):
-        cohabit.coding_char = lambda: None
+        cohabit.game_char = lambda: None
         cq._code_cache["ts"] = 0.0
 
     def test_event_wake_deferred_until_close(self):

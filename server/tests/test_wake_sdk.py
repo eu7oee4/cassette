@@ -310,7 +310,7 @@ class MaybeWakeRoutingTest(unittest.IsolatedAsyncioTestCase, WakeStateBase):
         self.auto: list[str] = []
         self.old_path: list[str] = []
         self._route_orig = (wake_sdk.enqueue_wake, wake_sdk.maybe_auto,
-                            wake.code_session_owner, wake._mail_wake_note,
+                            wake.game_session_owner, wake._mail_wake_note,
                             config.CHAT_ENGINE, wake.do_wake_sync_locked)
         # 老路本体必须打桩：不打的话走到老路的用例会在线程池里起**真的 claude -p**
         # （首版实踩：test_sdk_off 一条用例跑了 40 秒、烧了一次真调用）。
@@ -322,7 +322,7 @@ class MaybeWakeRoutingTest(unittest.IsolatedAsyncioTestCase, WakeStateBase):
         wake_sdk.enqueue_wake = (lambda cid, trigger, note="", force=False:
                                  self.enq.append((cid, trigger, force)) or True)
         wake_sdk.maybe_auto = lambda cid, now=None: self.auto.append(cid) or False
-        wake.code_session_owner = lambda: None
+        wake.game_session_owner = lambda: None
         wake._mail_wake_note = lambda cid: ""
         config.CHAT_ENGINE = "sdk"
         chat_loop.SDK_CHAT_OFF.clear()
@@ -330,7 +330,7 @@ class MaybeWakeRoutingTest(unittest.IsolatedAsyncioTestCase, WakeStateBase):
     def tearDown(self):
         import world
         (wake_sdk.enqueue_wake, wake_sdk.maybe_auto,
-         wake.code_session_owner, wake._mail_wake_note,
+         wake.game_session_owner, wake._mail_wake_note,
          config.CHAT_ENGINE, wake.do_wake_sync_locked) = self._route_orig
         world.house_active = self._house_orig
         chat_loop.SDK_CHAT_OFF.clear()
@@ -353,17 +353,17 @@ class MaybeWakeRoutingTest(unittest.IsolatedAsyncioTestCase, WakeStateBase):
 
     async def test_sdk_defers_when_his_session_open(self):
         """他自己的 code/game 会话开着 → 攒着（段中插入归 PR13）。"""
-        wake.code_session_owner = lambda: self.cid
+        wake.game_session_owner = lambda: self.cid
         state_store.write_schedule({"next_wake_at": int(time.time()) - 5}, self.cid)
         await wake.maybe_wake(self.cid)
         self.assertEqual(self.enq, [])
-        wake._code_avoid.pop(self.cid, None)
+        wake._game_avoid.pop(self.cid, None)
 
     async def test_sdk_scheduled_fires_mid_pump(self):
         """PR13 泵中插入：占用=骑在他自己聊天上的 game 泵 → NEXT 定时醒照入队
         （队列串行，下个短轮到）；自发抽签醒仍不掷（他醒着在玩）。"""
         import session_mgr as sm
-        wake.code_session_owner = lambda: self.cid
+        wake.game_session_owner = lambda: self.cid
         ch = sm.LoopHandle(char_id=self.cid, scene="chat")
         ch.meta["game_pump"] = {"seg_id": "s", "start_ts": 1.0}
         sm._registry[(self.cid, "chat")] = ch
@@ -380,12 +380,12 @@ class MaybeWakeRoutingTest(unittest.IsolatedAsyncioTestCase, WakeStateBase):
             self.assertEqual(self.auto, [])
         finally:
             sm._registry.pop((self.cid, "chat"), None)
-            wake._code_avoid.pop(self.cid, None)
+            wake._game_avoid.pop(self.cid, None)
 
     async def test_sdk_defers_when_other_chars_pump(self):
         """占用是**别人**的泵/会话 → 照旧避让（别往不在场的人聊天里塞醒来）。"""
         import session_mgr as sm
-        wake.code_session_owner = lambda: self.cid   # 探出归属=他（资源语义）
+        wake.game_session_owner = lambda: self.cid   # 探出归属=他（资源语义）
         ch = sm.LoopHandle(char_id="cass", scene="chat")   # 但泵骑在别人 chat 上
         ch.meta["game_pump"] = {"seg_id": "s", "start_ts": 1.0}
         sm._registry[("cass", "chat")] = ch
@@ -396,7 +396,7 @@ class MaybeWakeRoutingTest(unittest.IsolatedAsyncioTestCase, WakeStateBase):
             self.assertEqual(self.enq, [])
         finally:
             sm._registry.pop(("cass", "chat"), None)
-            wake._code_avoid.pop(self.cid, None)
+            wake._game_avoid.pop(self.cid, None)
 
     async def test_sdk_ignores_chat_turn_active(self):
         """撞轮=队列天然串行：chat 轮进行中照样入队（老路才避让）。"""
@@ -523,7 +523,10 @@ class WakeTurnPumpTest(ChatLoopTest):
         await self._play(turn, *_text_events("〔醒了〕想你了"),
                          _result("〔醒了〕想你了"))
         # 镜像开的 session：铸的是 recent_window
-        self.assertEqual([m["text"] for m in self.forged[0]], ["早", "早，小狗"])
+        self.assertEqual([m["text"] for m in self.forged[0]],
+                         [chat_loop._stamp_times([{"role": "user", "text": "早",
+                                                   "ts": 1000}])[0]["text"],
+                          "早，小狗"])   # TA 的话带时间锚，他自己的不带
         # 注入=执行时组装的感知白描
         sent = self.clients[0].queries[0][0]["message"]["content"][0]["text"]
         self.assertIn("〔现在是深夜两点〕", sent)

@@ -98,7 +98,7 @@ def _code_owner():
     now = time.time()
     if now - _code_cache["ts"] > _CODE_PROBE_SEC:
         _code_cache["ts"] = now
-        cc = cohabit.coding_char()
+        cc = cohabit.game_char()
         _code_cache["owner"] = cc[0] if cc else None
     return _code_cache["owner"]
 

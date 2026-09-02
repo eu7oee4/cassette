@@ -5,6 +5,7 @@
     .venv/bin/python -m unittest tests.test_chat_loop -v
 """
 import asyncio
+import json
 import os
 import sys
 import types
@@ -21,6 +22,12 @@ from claude_agent_sdk.types import StreamEvent
 
 def _m(role, text, ts=1000):
     return {"role": role, "text": text, "ts": ts}
+
+
+def _stamp(text, ts=1000):
+    """_stamp_times 打完戳的样子（渲染层给 TA 的每句话加时间锚——历史无时间戳
+    曾让模型把 3 分钟前说的话说成「昨天」，2026-09-02）。"""
+    return chat_loop._stamp_times([{"role": "user", "text": text, "ts": ts}])[0]["text"]
 
 
 def _led(*pairs):
@@ -57,6 +64,58 @@ class DivergenceTest(unittest.TestCase):
         hist = [_m("user", "a"), _m("assistant", "改了"), _m("user", "c"),
                 _m("assistant", "d")]
         self.assertEqual(chat_loop.divergence(led, hist), "dirty")
+
+    def test_image_placeholder_tail_absorbed_not_dirty(self):
+        """图+文一起发：app 长两条气泡，账只记一条 new_msg → 窗口比账长 → 从前
+        每次必判脏必全量重铸（2026-09-02）。占位符的真内容随 req.images 已经到他
+        眼前了，账补记一笔就行。"""
+        led = _led(("user", "a"), ("assistant", "b"))
+        hist = [_m("user", "a"), _m("assistant", "b"),
+                _m("user", "[图片]", 2000)]
+        self.assertEqual(chat_loop.divergence(led, hist), "dirty")   # 旧行为仍是脏
+        tail = chat_loop.absorbable_tail(led, hist)
+        self.assertEqual([m["text"] for m in tail], ["[图片]"])
+        core = hist[:len(hist) - len(tail)]
+        self.assertIsNone(chat_loop.divergence(led, core))           # 摘掉就干净
+        # 三张图一次发（09-01 20:52 的真实形状）
+        hist3 = hist + [_m("user", "[图片]", 2000), _m("user", "[图片]", 2000)]
+        self.assertEqual(len(chat_loop.absorbable_tail(led, hist3)), 3)
+
+    def test_absorb_only_swallows_placeholders(self):
+        """分寸：只吸收占位符。别的多出来的消息=有话他没见过，那种必须重铸——
+        不能为了省一次重铸把「账上有、他没见过」做成常态。"""
+        led = _led(("user", "a"), ("assistant", "b"))
+        # 真的一句话，不吸收
+        self.assertEqual(chat_loop.absorbable_tail(
+            led, [_m("user", "a"), _m("assistant", "b"),
+                  _m("user", "还有个事", 2000)]), [])
+        # 他自己的话不吸收（assistant 一定是随轮进账的）
+        self.assertEqual(chat_loop.absorbable_tail(
+            led, [_m("user", "a"), _m("assistant", "b"),
+                  _m("assistant", "多的", 2000)]), [])
+        # ts 没往前走 = 编辑不是追加
+        self.assertEqual(chat_loop.absorbable_tail(
+            led, [_m("user", "a"), _m("assistant", "b"),
+                  _m("user", "[图片]", 1000)]), [])
+        # 账空 / 窗空
+        self.assertEqual(chat_loop.absorbable_tail([], [_m("user", "[图片]")]), [])
+
+    def test_dirty_reason_names_the_cause(self):
+        """重铸是最重的动作（换 client、缓存作废、注入全蒸发），日志不能只说
+        「判脏」不说宾语（2026-09-02 查了半小时才定位到是一张图）。"""
+        led = _led(("user", "a"), ("assistant", "b"))
+        # 图+文：一次发送落成两条气泡，账只记了一条 new_msg → 窗口比账长
+        longer = [_m("user", "a"), _m("assistant", "b"), _m("user", "[图片]")]
+        self.assertEqual(chat_loop.divergence(led, longer), "dirty")
+        self.assertIn("比账", chat_loop.dirty_reason(led, longer))
+        self.assertIn("图+文", chat_loop.dirty_reason(led, longer))
+        # TA 编辑历史 → 点名第几条
+        edited = [_m("user", "a"), _m("assistant", "改过的话")]
+        self.assertIn("第 1 条对不上", chat_loop.dirty_reason(led, edited))
+        self.assertIn("改过的话", chat_loop.dirty_reason(led, edited))
+        # 账空 / 窗口空
+        self.assertIn("账是空的", chat_loop.dirty_reason([], longer))
+        self.assertIn("app 清了历史", chat_loop.dirty_reason(led, []))
 
     def test_delete_middle_dirty(self):
         led = _led(("user", "a"), ("assistant", "b"), ("user", "c"),
@@ -158,7 +217,6 @@ class ChatLoopTest(unittest.IsolatedAsyncioTestCase):
         self._forge_orig = chat_loop.forge
         self._usage_orig = chat_loop._note_usage
         self._persist_orig = chat_loop._persist_ledger
-        self._seen_orig = chat_loop._seen_block
         self._ombre_orig = chat_loop._ombre_on
         self._hard_orig = chat_loop.CHAT_HARD_TOKENS
         chat_loop.forge = types.SimpleNamespace(
@@ -166,9 +224,7 @@ class ChatLoopTest(unittest.IsolatedAsyncioTestCase):
                                        f"sid-{len(self.forged)}")[1])
         chat_loop._note_usage = lambda *a: None
         chat_loop._persist_ledger = lambda *a: None
-        # 单测绝不读生产 wake_log/小屋/活动账、不探活 Ombre
-        # （tests-reading-prod-state 雷）
-        chat_loop._seen_block = lambda cid, since: (None, since)
+        # 单测绝不读生产活动账、不探活 Ombre（tests-reading-prod-state 雷）
         chat_loop._ombre_on = lambda cid: False
         self._frame_orig = chat_loop._frame_activities
         chat_loop._frame_activities = lambda h, cid: h
@@ -190,7 +246,6 @@ class ChatLoopTest(unittest.IsolatedAsyncioTestCase):
         chat_loop.forge = self._forge_orig
         chat_loop._note_usage = self._usage_orig
         chat_loop._persist_ledger = self._persist_orig
-        chat_loop._seen_block = self._seen_orig
         chat_loop._ombre_on = self._ombre_orig
         chat_loop.CHAT_HARD_TOKENS = self._hard_orig
         chat_loop._frame_activities = self._frame_orig
@@ -234,7 +289,8 @@ class ChatLoopTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn(b'"type": "done"', blob)
         # 进场铸造：铸的是权威窗口（不含新消息），resume 挂上了 sid
         self.assertEqual(len(self.forged), 1)
-        self.assertEqual([m["text"] for m in self.forged[0]], ["早", "早，小狗"])
+        self.assertEqual([m["text"] for m in self.forged[0]],
+                         [_stamp("早"), "早，小狗"])   # TA 的话带时间锚，他自己的不带
         self.assertEqual(self.clients[0].options.resume, "sid-1")
         # 入账：窗口 2 条 + 本轮一来一回
         led = self.handle.meta["ledger"]
@@ -266,7 +322,7 @@ class ChatLoopTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(self.clients[0].disconnected)
         self.assertEqual(len(self.forged), 2)
         self.assertEqual([m["text"] for m in self.forged[1]],
-                         ["早", "改过的话", "在吗", "在。"])
+                         [_stamp("早"), "改过的话", _stamp("在吗", 2000), "在。"])
 
     async def test_stale_assistant_tail_no_reforge(self):
         """请求发出时上轮回复还没进 app 历史（连发竞态）→ 不重铸。"""
@@ -351,28 +407,24 @@ class ChatLoopTest(unittest.IsolatedAsyncioTestCase):
 
 
 class ChatLoopReforgeTest(ChatLoopTest):
-    """10c：开局引子/见闻增量/硬阈强铸+巩固钩子。"""
+    """10c：开局引子/硬阈强铸+巩固钩子。（见闻快照 09-02 删了：注入块只剩
+    breath 引子；seen 相关断言随之退役。）"""
 
-    async def test_opening_nudge_and_seen_snapshot(self):
+    async def test_opening_nudge(self):
         chat_loop._ombre_on = lambda cid: True
-        chat_loop._seen_block = lambda cid, since: (
-            ("【这期间的见闻】\n[某时] 〔你醒来〕你想：想他了", 3000)
-            if since == 0 else (None, since))
         hist = [_m("user", "早"), _m("assistant", "早，小狗")]
         await self._play(self._turn(hist, "在吗"),
                          *_text_events("在。"), _result("在。"))
         sent = self.clients[0].queries[0]          # 这一轮的 user 消息
         text = sent[0]["message"]["content"][0]["text"]
         self.assertIn(chat_loop.OPENING_NUDGE, text)
-        self.assertIn("这期间的见闻", text)
         self.assertIn("眠眠：在吗", text)
-        # 游标推进后第二轮不再重复注入
+        # 开局旗消耗后第二轮不再重复注入
         hist2 = hist + [_m("user", "在吗", 2000), _m("assistant", "在。", 2001)]
         await self._play(self._turn(hist2, "陪我"),
                          *_text_events("嗯。"), _result("嗯。"))
         text2 = self.clients[0].queries[1][0]["message"]["content"][0]["text"]
         self.assertNotIn(chat_loop.OPENING_NUDGE, text2)
-        self.assertNotIn("这期间的见闻", text2)
 
     async def test_hard_threshold_consolidates_and_reforges(self):
         chat_loop.CHAT_HARD_TOKENS = 1             # 一轮就过硬阈
@@ -395,11 +447,96 @@ class ChatLoopReforgeTest(ChatLoopTest):
             # 铸了第二次：材料=镜像（含刚聊完的一来一回），新 client resume 新 sid
             self.assertEqual(len(self.clients), 2)
             self.assertEqual([m["text"] for m in self.forged[1]],
-                             ["早", "早，小狗", "在吗", "在。"])
+                             [_stamp("早"), "早，小狗", _stamp("在吗", 2000), "在。"])
             self.assertEqual(self.clients[1].options.resume, "sid-2")
             self.assertTrue(self.handle.meta.get("needs_opening"))
         finally:
             state_store.read_recent_window = rw_orig
+
+
+
+class ChatImageMergeTest(unittest.TestCase):
+    """并图（2026-09-02）：TA 发的图从前只活到下一次重铸——历史里只剩 `[图片]`
+    三个字（-p 时期遗留：那会儿历史是扁平文本，图只能当占位符）。留底 + 渲染层
+    并图之后，重铸出来是一条 user 槽 = 那句话 + 真图块。"""
+
+    def setUp(self):
+        import base64
+        import state_store
+        import tempfile
+        self.b64 = base64.b64encode(b"JPEGBYTES").decode()
+        self.ss = state_store
+        self._root_orig = state_store.CHAR_STATE_ROOT
+        self.dir = Path(tempfile.mkdtemp())
+        state_store.CHAR_STATE_ROOT = self.dir      # 别写进真 state
+        self.cwd = str(self.dir / "cwd")
+        self.proj = self.dir / "proj"
+
+    def tearDown(self):
+        import shutil
+        self.ss.CHAR_STATE_ROOT = self._root_orig
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def test_merge_puts_real_pictures_back(self):
+        self.ss.save_chat_images(
+            [{"data": self.b64, "media_type": "image/jpeg"}], 1000, "cass")
+        hist = [_m("user", "[图片]", 1000), _m("user", "看这个", 1001),
+                _m("assistant", "看到了", 1005)]
+        out = chat_loop._merge_images(hist, "cass")
+        self.assertEqual([m["text"] for m in out], ["看这个", "看到了"])
+        self.assertEqual(len(out[0]["images"]), 1)
+        self.assertNotIn("images", out[1])
+        # 铸出来：一条 user 槽 = text + image
+        import forge
+        sid = forge.render(chat_loop._stamp_times(out), cwd=self.cwd,
+                           projects_root=self.proj)
+        evs = [json.loads(x) for x in forge.transcript_path(
+            self.cwd, sid, self.proj).read_text("utf-8").splitlines()]
+        self.assertEqual([b["type"] for b in evs[0]["message"]["content"]],
+                         ["text", "image"])
+        head = evs[0]["message"]["content"][0]["text"]
+        self.assertTrue(head.startswith("【"))     # 戳落在合成后那条上
+        self.assertIn("看这个", head)
+
+    def test_three_images_one_caption(self):
+        """09-01 20:52 的真实形状：三张图同一秒 + 一句话。ts 认不出是哪张，
+        所以索引按 (ts, seq) 认领。"""
+        self.ss.save_chat_images(
+            [{"data": self.b64, "media_type": "image/jpeg"}] * 3, 1000, "cass")
+        out = chat_loop._merge_images(
+            [_m("user", "[图片]", 1000), _m("user", "[图片]", 1000),
+             _m("user", "[图片]", 1000), _m("user", "daddydaddy 看这个", 1000)],
+            "cass")
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0]["text"], "daddydaddy 看这个")
+        self.assertEqual(len(out[0]["images"]), 3)
+
+    def test_keeps_placeholder_when_bytes_missing(self):
+        """留底之前的老消息取不到字节 → 原样留占位符，不假装有图。"""
+        self.ss.save_chat_images(
+            [{"data": self.b64, "media_type": "image/jpeg"}], 1000, "cass")
+        hist = [_m("user", "[图片]", 777), _m("user", "看这个", 778)]
+        self.assertEqual(chat_loop._merge_images(hist, "cass"), hist)
+
+    def test_lone_image_keeps_its_own_slot(self):
+        """没配文字的图：自己一条，不去并后面隔了很久的那句话。"""
+        self.ss.save_chat_images(
+            [{"data": self.b64, "media_type": "image/jpeg"}], 1000, "cass")
+        out = chat_loop._merge_images(
+            [_m("user", "[图片]", 1000), _m("user", "过了半天才说的", 9999)], "cass")
+        self.assertEqual(len(out), 2)
+        self.assertEqual(len(out[0]["images"]), 1)
+        self.assertNotIn("images", out[1])
+
+    def test_save_is_idempotent(self):
+        img = [{"data": self.b64, "media_type": "image/jpeg"}]
+        self.ss.save_chat_images(img, 1000, "cass")
+        self.ss.save_chat_images(img, 1000, "cass")     # 重试/补投不长第二笔账
+        self.assertEqual(len(self.ss.read_chat_image_index("cass")), 1)
+
+    def test_sha_path_traversal_rejected(self):
+        self.assertIsNone(self.ss.read_chat_image("../../../etc/passwd", "cass"))
+        self.assertIsNone(self.ss.read_chat_image("nothex", "cass"))
 
 
 class ActivityFrameTest(unittest.TestCase):
@@ -445,6 +582,74 @@ class ActivityFrameTest(unittest.TestCase):
         self.assertEqual(texts[6], "读完啦？")
         # 确定性：同输入同字节
         self.assertEqual(framed, chat_loop._frame_activities(hist, "cass"))
+
+    def test_stamp_user_turns(self):
+        """TA 的话逐条带时间锚——历史无时间戳曾让模型把 3 分钟前说的话说成
+        「昨天」（2026-09-02）。他自己的话不加框（信感）。"""
+        hist = [_m("user", "早", 1000), _m("assistant", "早，小狗", 1100)]
+        out = chat_loop._stamp_times(hist)
+        self.assertEqual(len(out), 2)
+        self.assertTrue(out[0]["text"].startswith("【01-01 周四 08:16】\n眠眠：早"))
+        self.assertEqual(out[1]["text"], "早，小狗")        # assistant 原样
+        self.assertEqual(hist[0]["text"], "早")             # 输入不被改写
+        self.assertEqual(out, chat_loop._stamp_times(hist))  # 确定性
+
+    def test_self_open_anchor_between_far_apart_assistants(self):
+        """连着几次醒来 → 镜像里是连续 assistant，注入蒸发了。隔得够久就补一行
+        时间锚回去，顺带把 forge 的「连续同角色合并」在这儿切开。"""
+        gap = chat_loop.SELF_OPEN_GAP_SEC
+        hist = [_m("user", "睡了", 1000),
+                _m("assistant", "晚安", 1010),          # 回 TA 的话，紧跟着
+                _m("assistant", "一点二十。你没声音了", 1010 + gap),   # 醒来
+                _m("assistant", "（同一次开口的第二条）", 1010 + gap + 5),
+                _m("assistant", "醒了没", 1010 + 3 * gap)]            # 又一次醒来
+        out = chat_loop._stamp_times(hist)
+        roles = [m["role"] for m in out]
+        # 补了两行：两次"自己开的口"各一行；连发那条（+5 秒）不补
+        self.assertEqual(roles, ["user", "assistant", "user", "assistant",
+                                 "assistant", "user", "assistant"])
+        self.assertRegex(out[2]["text"], r"^【\d\d-\d\d 周. \d\d:\d\d】$")
+        self.assertEqual(out[2]["ts"], 1010 + gap)
+        self.assertEqual(out[4]["text"], "（同一次开口的第二条）")  # 连发不切
+        self.assertEqual(out, chat_loop._stamp_times(hist))          # 确定性
+
+    def test_self_open_anchor_wake_wording(self):
+        """锚点 ts 精确对上 wake_log（action=message）→ 还原活抬头同一句
+        （wake_headline），**无条件**——短间隔（<600s）、前一条是 user 都补
+        （确证醒来不吃连发启发式：最小醒来间隔 180s，10min 内完全可能）；
+        对不上的槽（游戏 tick / 老存货）照旧只在隔够久时补光秃戳。"""
+        import state_store
+        gap = chat_loop.SELF_OPEN_GAP_SEC
+        wts = 1010 + gap
+        wts2 = wts + 300                # 第二次醒来：只隔 5 分钟（< 600s）
+        orig = state_store.read_wake_log
+        state_store.read_wake_log = lambda limit=None, char_id=None: [
+            {"ts": wts, "action": "message", "trigger": "scheduled"},
+            {"ts": wts2, "action": "message", "trigger": "mail"},
+            {"ts": 999, "action": "none", "trigger": "auto"}]   # 安静醒着不参与
+        try:
+            hist = [_m("user", "睡了", 1000),
+                    _m("assistant", "晚安", 1010),
+                    _m("assistant", "到点了。", wts),                  # 定点醒来
+                    _m("assistant", "有信。", wts2),                   # 10min 内硬触发
+                    _m("assistant", "醒了没", wts2 + 3 * gap)]         # tick/存货
+            out = chat_loop._stamp_times(hist, "cass")
+            self.assertIn("这个点是你自己钉下要醒的", out[2]["text"])
+            self.assertIn("外面有动静", out[4]["text"])               # 短间隔也补
+            self.assertRegex(out[6]["text"], r"^【[^】]+】$")          # 光秃戳
+            self.assertEqual(out, chat_loop._stamp_times(hist, "cass"))  # 确定性
+            # 不传 char_id（单测纪律：不读生产 wake_log）＝全走光秃戳路
+            bare = chat_loop._stamp_times(hist)
+            self.assertRegex(bare[2]["text"], r"^【[^】]+】$")
+        finally:
+            state_store.read_wake_log = orig
+
+    def test_self_open_not_added_after_user(self):
+        """前一条是 TA 说的话 → 再慢也是"在回她"，不能标成"自己开的口"。"""
+        hist = [_m("user", "在吗", 1000),
+                _m("assistant", "在", 1000 + 5 * chat_loop.SELF_OPEN_GAP_SEC)]
+        out = chat_loop._stamp_times(hist)
+        self.assertEqual([m["role"] for m in out], ["user", "assistant"])
 
     def test_no_interval_no_change(self):
         hist = [_m("user", "a", 1000), _m("assistant", "b", 1100)]
@@ -600,6 +805,22 @@ class GamePumpLoopTest(ChatLoopTest):
                 return True
         return False
 
+    async def test_tick_reports_the_clock_every_n(self):
+        """「·」不带时间，一场几十上百轮下来他手上唯一的钟停在开场那句。每 N 轮
+        报一次时（2026-09-02）——其余轮照旧光秃秃一个点，别浪费。"""
+        orig = chat_loop.GAME_TICK_STAMP_EVERY
+        chat_loop.GAME_TICK_STAMP_EVERY = 1      # 每轮都报，第一口就能看见
+        try:
+            self.assertTrue(await self._wait(
+                lambda: self.clients and any(q.startswith("·\n【")
+                                             for q in self.clients[-1].queries)))
+            q = next(q for q in self.clients[-1].queries if q.startswith("·"))
+            self.assertTrue(q.rstrip().endswith("】"))
+            self.assertIn("周", q)               # 统一格式：MM-dd 周X HH:mm
+        finally:
+            chat_loop.GAME_TICK_STAMP_EVERY = orig
+        # 默认档（10）下第一口是光秃秃的点：见 test_tick_reopens_delivers_and_ledgers
+
     async def test_tick_reopens_delivers_and_ledgers(self):
         """队列空 → 补「·」；session 没开先从镜像重起；点评 scrub 后投递+入账+
         事件账；tick 注入不进账不进铸造材料。"""
@@ -608,7 +829,7 @@ class GamePumpLoopTest(ChatLoopTest):
         c = self.clients[-1]
         # 镜像铸造：材料只有权威两条，没有「·」
         self.assertEqual([m["text"] for m in self.forged[0]],
-                         ["去读两章", "好，我去拿游戏"])
+                         [_stamp("去读两章"), "好，我去拿游戏"])
         c.feed(self._Asst(content=[self._Text(text="这句妙 user·")], model="t"),
                _result("x"))
         self.assertTrue(await self._wait(lambda: self.delivered))
@@ -1264,20 +1485,17 @@ class FoldTraceTest(_AlTmpBase):
         self.assertIn("读了一场", folded)
         self.assertNotIn("亲手", folded)
 
-    def test_code_scene_folds_with_capsules(self):
-        """PR14-d：code 折叠框措辞按场景走；capsule（第二类留痕）排最前。"""
-        self.al.append_interval("cass", "code", 1500, 1800, note="写代码")
-        self.al.append_interval("cass", "game", 3000, 3500, note="《如鸢》剧情")
-        seg = self.al.interval_seg_id("cass", "code", 1500)
+    def test_capsule_sorts_before_actions(self):
+        """PR14-d：capsule（第二类留痕）排在动作清单最前——结论先于动作。
+        （原来这条同时钉 code 场的折叠措辞；code 起止 2026-09-02 退役，
+        只剩 game 一种场，措辞那半跟着删了。）"""
+        self._two_intervals()
+        seg = self.al.interval_seg_id("cass", "game", 1500)
         self.al.append_event(seg, "capsule", text="工具不过桥 ← forge.py:241")
         self.al.append_event(seg, "tool", name="Edit", text="server/x.py",
                              ok=True, ext=True, ro=False, turn="chat")
         out = chat_loop._frame_activities(self.HIST, "cass")
         folded = out[1]["text"]
-        self.assertIn("拿着写权限动手干了些活", folded)
-        self.assertNotIn("章节志", folded)              # game 的话术不串场
-        self.assertNotIn("上机", folded)                # 措辞纪律：能力不是场所
-        self.assertNotIn("会话", folded)
         self.assertIn("◆ 工具不过桥 ← forge.py:241", folded)
         self.assertIn("Edit：server/x.py", folded)
         idx_cap = folded.index("◆ 工具不过桥")

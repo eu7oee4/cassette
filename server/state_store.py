@@ -6,8 +6,11 @@ wake_log / recent_window / schedule / browse_log / settings(角色部分) / pers
 所有相关函数加了缺省 char_id=None（→ 默认角色 "default"），老调用点一行不改语义不变。
 outbox / sticker_catalog 保持全局一份（outbox 条目自带 char_id 字段由写入方填；
 贴纸库一期各角色共用）。旧的扁平布局在 import 时一次性迁入默认角色目录（幂等）。"""
+import base64
+import hashlib
 import json
 import os
+import re
 import threading
 import time
 import uuid
@@ -299,3 +302,87 @@ def outbox_ack(ids: list[str]) -> None:
         items = [x for x in items
                  if not x.get("delivered") or now - int(x.get("ts", 0)) < 7 * 86400]
         write_outbox(items)
+
+
+# ---------- 聊天图片留底（重铸带图；per 角色）----------
+# app 侧 ChatMessage.image 的 plainText（Models.swift）。两边改要一起改。
+IMAGE_PLACEHOLDER = "[图片]"
+
+# 2026-09-02：TA 发的图**只活到下一次重铸**。req.images 只带"最新这条"的字节，
+# 历史里那条图气泡在 app 侧是 `[图片]` 三个字的占位符——-p 时期的遗留（那会儿历史
+# 是一段扁平文本，图只能是占位符）。SDK 路的 forge.render 早就支持 user 槽带图块
+# （PR13 图块腿真机验通），缺的只是**字节留底**：不存下来，重铸时无从取。
+# 存法：内容寻址（sha1），同一张图重发不重复占地方；索引 append-only，按 (ts, seq)
+# 认领——同一秒发三张图是常事（09-01 20:52 就是），只有 ts 认不出是哪张。
+
+def chat_images_dir(char_id: Optional[str] = None, make: bool = False) -> Path:
+    """make=False：只算路径，不建目录——读路径每轮都会走一遍（渲染层并图），
+    建目录是写操作，别让读的一侧留下副作用。"""
+    d = CHAR_STATE_ROOT / (char_id or DEFAULT_CHAR_ID) / "chat_images"
+    if make:
+        d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _chat_image_index(char_id: Optional[str] = None, make: bool = False) -> Path:
+    return chat_images_dir(char_id, make) / "index.jsonl"
+
+
+_IMG_LOCK = threading.Lock()
+
+
+def save_chat_images(items: list[dict], ts: int,
+                     char_id: Optional[str] = None) -> list[dict]:
+    """存一次发送里的图，返回 [{"ts","seq","sha","mt"}]。
+    items=[{"data": base64, "media_type": str}]，顺序即气泡顺序。
+    (ts, seq) 已存在就不重复落索引（同一轮重试/补投不该长出第二份账）。"""
+    if not items:
+        return []
+    out: list[dict] = []
+    with _IMG_LOCK:
+        have = {(int(r.get("ts", 0)), int(r.get("seq", 0)))
+                for r in read_chat_image_index(char_id)}
+        lines = []
+        for seq, it in enumerate(items):
+            raw = base64.b64decode(it.get("data") or "")
+            if not raw:
+                continue
+            sha = hashlib.sha1(raw).hexdigest()
+            mt = it.get("media_type") or "image/jpeg"
+            blob = chat_images_dir(char_id, make=True) / sha
+            if not blob.exists():
+                tmp = blob.with_name(f".{sha}.{os.getpid()}.tmp")
+                tmp.write_bytes(raw)
+                os.chmod(tmp, 0o600)
+                tmp.replace(blob)
+            rec = {"ts": int(ts), "seq": seq, "sha": sha, "mt": mt}
+            out.append(rec)
+            if (int(ts), seq) not in have:
+                lines.append(json.dumps(rec, ensure_ascii=False))
+        if lines:
+            with _chat_image_index(char_id, make=True).open("a", encoding="utf-8") as f:
+                f.write("\n".join(lines) + "\n")
+    return out
+
+
+def read_chat_image_index(char_id: Optional[str] = None) -> list[dict]:
+    try:
+        with _chat_image_index(char_id).open(encoding="utf-8") as f:
+            rows = [json.loads(line) for line in f if line.strip()]
+    except FileNotFoundError:
+        return []
+    except Exception:
+        return []
+    rows.sort(key=lambda r: (int(r.get("ts", 0)), int(r.get("seq", 0))))
+    return rows
+
+
+def read_chat_image(sha: str, char_id: Optional[str] = None) -> Optional[bytes]:
+    """按 sha 取字节。sha 只能是 40 位 hex——它进过路径，不校验就是目录穿越。"""
+    if not re.fullmatch(r"[0-9a-f]{40}", sha or ""):
+        return None
+    p = chat_images_dir(char_id) / sha
+    try:
+        return p.read_bytes()
+    except OSError:
+        return None

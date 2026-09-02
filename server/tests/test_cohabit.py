@@ -52,11 +52,11 @@ class CohabitBase(unittest.TestCase):
         state_store.OUTBOX_PATH = self.tmp / "outbox.json"
         # 桩：Bark / 工具菜单 / code 会话探测（都碰真环境：推真通知、探真 Ombre、探真 tmux）
         self._bark_orig, self._menu_orig = wake.bark_push, pipeline.tool_menu_block
-        self._coding_orig = cohabit.coding_char
+        self._coding_orig = cohabit.game_char
         self.barks: list[str] = []
         wake.bark_push = lambda text, **kw: (self.barks.append(text), True)[1]
         pipeline.tool_menu_block = lambda *a, **kw: ""
-        cohabit.coding_char = lambda: None
+        cohabit.game_char = lambda: None
         # 模型替身：按序回放 self.replies，录下每轮 prompt
         self._run_orig = cohabit._run
         self.prompts: list[str] = []
@@ -85,7 +85,7 @@ class CohabitBase(unittest.TestCase):
          world.HOUSE_SETTINGS_PATH) = self._world_orig
         state_store.CHAR_STATE_ROOT, state_store.OUTBOX_PATH = self._ss_orig
         wake.bark_push, pipeline.tool_menu_block = self._bark_orig, self._menu_orig
-        cohabit.coding_char = self._coding_orig
+        cohabit.game_char = self._coding_orig
         cohabit._run = self._run_orig
         offers._enqueue = self._offers_enqueue_orig
         offers._offer = None

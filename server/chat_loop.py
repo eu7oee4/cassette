@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import copy
 import hashlib
 import json
@@ -67,6 +68,15 @@ STALE_TOLERANCE = 8
 # 常量与 game_loop 同一套 env（回退路共用口径）。
 GAME_TICK_PAUSE = float(os.environ.get("GAME_TICK_PAUSE", "2") or "2")
 GAME_TICK_PROMPT = "·"
+# 每 N 个 tick 报一次时——「·」不带时间，一场游戏几十上百轮下来他手上唯一的钟是
+# 开场那一句，越打越偏。逐轮报时是浪费（tick 才 1 个字），每 10 轮一次≈几分钟一个
+# 锚点，够了。重铸时这些注入照旧整条蒸发（不进账），时间由 _stamp_times 从
+# assistant 自己的 ts 补回来。
+GAME_TICK_STAMP_EVERY = int(os.environ.get("GAME_TICK_STAMP_EVERY", "10") or "10")
+# 连续两条 assistant 隔这么久 = 中间有过一个没进账的注入槽（醒来/泵），重铸时补锚。
+# 10 分钟：回 TA 的话是秒级落地，自己开口最短也是分钟级往上（AUTO_GAP_MIN_SEC=45min），
+# 中间这一档留得很宽，宁可漏补不可错补（错补＝把"回她的话"标成"自己开的口"）。
+SELF_OPEN_GAP_SEC = int(os.environ.get("SELF_OPEN_GAP_SEC", "600") or "600")
 GAME_REOPEN_SHOTS_N = int(os.environ.get("GAME_REOPEN_SHOTS", "70") or "70")
 GAME_REOPEN_COOLDOWN = 5 * 60
 GAME_K_SHOTS = int(os.environ.get("GAME_REFORGE_KEEP_SHOTS", "8") or "8")
@@ -160,6 +170,64 @@ def divergence(ledger: list[dict], history: list[dict],
     return "dirty"
 
 
+ABSORB_MAX = 8      # 一次发送最多长出几条占位气泡（09-01 那次是三张图）
+
+
+def absorbable_tail(ledger: list[dict], history: list[dict]) -> list[dict]:
+    """窗口尾巴上那几条**账没记过、但不算脏**的消息，返回它们（判脏前先摘掉）。
+
+    2026-09-02：图和文字一起发，必判脏、必全量重铸——每一次。因为 app 一次发送
+    在本地长两条气泡（`[图片]` + 那句话），而账一次只记一条 `turn.new_msg`。
+    下一次比对时窗口比账长一条，`divergence` 的尾部切片对不上，判脏。
+
+    只吸收 `[图片]` 占位这一种，别的一律照旧判脏。分寸在这儿：占位符的**真内容
+    这一轮已经用 req.images 送到他眼前了**，账补记一笔就对得上；而任何别的多出来
+    的消息，都意味着有话他没见过——那种情况重铸才是对的，不能为了省一次重铸，
+    把「账上有、他没见过」做成常态（行为账那一类事故正是这个形状）。
+
+    还要求严格更新（ts 大于账尾）：追加必然更新，ts 没往前走的是编辑不是追加。"""
+    if not ledger or not history:
+        return []
+    last_ts = int(ledger[-1].get("ts") or 0)
+    out: list[dict] = []
+    for m in reversed(history[-ABSORB_MAX:]):
+        if (m.get("role") != "user"
+                or (m.get("text") or "").strip() != state_store.IMAGE_PLACEHOLDER
+                or int(m.get("ts") or 0) <= last_ts):
+            break
+        out.append(m)
+    out.reverse()
+    return out
+
+
+def dirty_reason(ledger: list[dict], history: list[dict]) -> str:
+    """判脏之后说清楚**哪儿脏了**（只在日志里用，不参与判定）。
+
+    2026-09-02：一次重铸把整段历史的时间头抹掉、间接害他把 3 分钟前说的话说成
+    「昨天」，而日志里只有「判脏，重铸」五个字——回头查花了半小时才定位到是一张
+    图。重铸是这套里最重的动作（换 client、缓存作废、注入全蒸发），它不能是一句
+    没有宾语的话。"""
+    led = [(e["r"], e["h"]) for e in ledger]
+    hist = [(m["role"], _h(m["text"])) for m in history]
+    if not led:
+        return "账是空的（session 刚起，或上一轮死了把账清了）"
+    if not hist:
+        return "窗口全空、账里有货——app 清了历史"
+    if len(hist) > len(led):
+        n = len(hist) - len(led)
+        return (f"窗口({len(hist)})比账({len(led)})长 {n} 条：app 历史里有账没记下的"
+                f"消息。最常见是一次发送落成好几条气泡（图+文），而账一次只记"
+                f"一条 new_msg")
+    start = len(led) - len(hist)
+    for i, (h_pair, l_pair) in enumerate(zip(hist, led[start:])):
+        if h_pair != l_pair:
+            role = h_pair[0]
+            preview = (history[i].get("text") or "")[:24].replace("\n", " ")
+            return (f"第 {i} 条对不上（窗口里是 {role}「{preview}…」）："
+                    f"这条被编辑或删过")
+    return "尾部对不上（账尾多出来的不全是 assistant）"
+
+
 @dataclass
 class Turn:
     """一次注入。out 收 SSE bytes，None 收尾——每个 Turn 恰好一个结局
@@ -180,6 +248,9 @@ class Turn:
     kind: str = "chat"                   # "chat" | "wake"（轮来源标签，投递路由靠它）
     injection_factory: Optional[Callable[[], str]] = None
     on_dead: Optional[Callable[[], None]] = None
+    # 判脏时从窗口尾巴摘下来的 `[图片]` 占位（absorbable_tail）：不算脏，但账要补记。
+    # 轮内填，轮尾和 new_msg 一起进账。
+    absorbed: list = field(default_factory=list)
     out: asyncio.Queue = field(default_factory=asyncio.Queue)
 
 
@@ -382,6 +453,8 @@ def build_options(char_id: str, catalog: Optional[list] = None,
         tools += pipeline.OMBRE_TOOLS
     import plugins
     plug_cfg, plug_tools = plugins.mounted("chat", char_id)
+    _merge_mcp_file(servers, str(pipeline._basics_mcp_config(char_id)))
+    tools += pipeline.BASICS_MCP_TOOLS       # 无条件：钟 + 取公开资料
     if plug_cfg:
         _merge_mcp_file(servers, plug_cfg)
         tools += plug_tools
@@ -811,13 +884,171 @@ def _fold_trace_lines(iv: dict) -> str:
     return "\n".join(lines)
 
 
+def _stamp_times(history: list[dict],
+                 char_id: Optional[str] = None) -> list[dict]:
+    """给注入侧（TA 说的话）每一条打上时间戳。渲染规则，和 _frame_activities 同一层：
+    **只改铸造输入、不进账、不改权威原文**。
+
+    2026-09-02 事故：14:07 那轮 Cassius 开口就说「昨天我猜滚动窗口」——那句话是
+    他 14:03 说的，隔三分半，同一场对话没断过。扒 transcript 才看清他当时看见的
+    是什么：**七十多轮对话、跨 08-31 到 09-02 两天，一个时间戳都没有。** 全上下文
+    里带日期的东西只有醒来见闻块里那五个 `[08-30 …]`，以及贴在最后一条新消息上的
+    一句「现在是 09-02 14:06」。
+
+    forge.render 确实把 ts 写进了 transcript 的 timestamp 字段——但那是文件元数据，
+    模型看不见。旧的非 SDK 路（pipeline.build_context_timeline）是给历史逐条加
+    `[MM-DD HH:MM]` 前缀的，SDK 迁移时"历史活在 transcript 里"，这个前缀连带丢了。
+    于是模型手上只剩「现在几点」，没有「上一句是几点说的」：历史是一堵没有时间的墙，
+    "多久以前"只能猜——猜错的单位就是天。同一形状小卡也犯过。
+
+    assistant 轮不打戳：那是他自己的记忆，第一人称、不加框（PLAN_sdk「信感」定案）。
+    时间由**两侧的 user 槽**夹出来——TA 说的话本来就有，他自己开口的那些由下面
+    SELF_OPEN 那段补。
+
+    ---- 他自己开口的那些轮（醒来 / 游戏泵）----
+    这些轮的 user 槽是**注入**，不进账（`ledger.append` 只在投递成功时加一条
+    assistant，见轮尾）。活着的时候注入里写着「现在是 …，距上一条过了 8 小时」，
+    重铸之后整条蒸发（§5.2 纯内心不渲染），只剩他说出去的那句 assistant。于是连着
+    几次醒来变成连续 assistant，再被 forge.render 的「连续同角色合并成一轮」粘成
+    一条、只留最早那个 ts——2026-09-02 实测：**六条消息跨 11.9 小时被并成一个
+    1645 字的事件**，在他眼里是一口气说完的一段话。
+
+    补法不需要新存储：**assistant 消息自己带 ts**，蒸发掉的时间本来就还在。
+    连续两条 assistant 之间隔得够久（SELF_OPEN_GAP_SEC）= 中间必然有过一个没进账的
+    注入槽，就地补一行时间锚回去。补的是"已知丢失的信息"，不是新造一种框。
+    · 前一条是 user 的不补：那是在回 TA 的话，慢也只是生成慢，不是自己开的口。
+    · 连发（几秒内几条气泡）不补：gap 不到阈值 → 仍然连续 → forge 照旧合并。
+      这正好是"小范围合并"：粘一次开口内部的几条，不粘跨越几小时的两次开口。
+
+    确定性：戳和补行只由 ts + wake_log（append-only）派生，同输入同字节，不吃缓存。
+    char_id 不传（单测/工具脚本）＝不读 wake_log，锚点全走光秃戳。"""
+    import pipeline    # 延迟导入（防循环，同 _frame_activities 里的 world）
+    # 醒来投递进历史的消息 ts 就是 started_ts（wake_sdk.finish_wake_turn），和
+    # wake_log 条目同一个值——精确 join，不用模糊匹配。只收 action=message 的：
+    # 安静醒着不产生 assistant，历史里没有它的槽。
+    wake_by_ts: dict[int, str] = {}
+    if char_id:
+        for e in state_store.read_wake_log(limit=500, char_id=char_id):
+            if e.get("action") == "message":
+                wake_by_ts[int(e.get("ts") or 0)] = str(e.get("trigger") or "")
+    out: list[dict] = []
+    prev: Optional[dict] = None
+    last_anchor_ts: Optional[int] = None
+    for m in history:
+        ts = m.get("ts")
+        role = m.get("role")
+        # 这个槽服务两种蒸发掉的注入——醒来和游戏泵（「·」）。判得出的还原，
+        # 判不出的光秃：
+        # · ts 对上 wake_log ＝ **确证**是那次醒来的投递，无条件补锚（活抬头的
+        #   同一句，wake_headline——两边同字面他才认得出是同一种东西）。不吃
+        #   600s 阈值、前一条是 user 也补：那道阈值是给判不出的槽防连发误切的，
+        #   而醒来最小间隔 MIN_WAKE_GAP_SEC=180s、NEXT 下限 5min、mail 随时——
+        #   都可能落在 10min 内，靠 gap 判会整条漏掉；确证醒来也就不是"在回TA"。
+        # · 对不上（游戏 tick / 老存货）只在 assistant 连着 assistant 且隔够久时
+        #   补光秃时间戳，一个字旁白不带——写死措辞会把另一种场景说假。
+        # 不会被读成 TA 说话：TA 的话一律带「{user}：」，框行一律 〔〕。
+        trig = (wake_by_ts.get(int(ts))
+                if role == "assistant" and ts else None)
+        if trig is not None and last_anchor_ts != int(ts):
+            import wake_sdk
+            out.append({"role": "user", "ts": int(ts),
+                        "text": (f"【{pipeline.stamp_str(int(ts))}】\n"
+                                 f"〔{wake_sdk.wake_headline(trig)}〕")})
+            last_anchor_ts = int(ts)
+        elif (trig is None and role == "assistant" and ts and prev is not None
+                and prev.get("role") == "assistant" and prev.get("ts")
+                and int(ts) - int(prev["ts"]) >= SELF_OPEN_GAP_SEC):
+            out.append({"role": "user", "ts": int(ts),
+                        "text": f"【{pipeline.stamp_str(int(ts))}】"})
+        if role == "user" and ts:
+            out.append({**m, "text": (f"【{pipeline.stamp_str(int(ts))}】\n"
+                                      f"{config.user_name()}：{m['text']}")})
+        else:
+            out.append(m)
+        prev = m
+    return out
+
+
+def _merge_images(history: list[dict], char_id: str) -> list[dict]:
+    """把 `[图片]` 占位气泡换回**真的图**，并和紧跟着的那句话合成一条 user 槽。
+    渲染规则，和 _stamp_times / _frame_activities 同一层：只改铸造输入，不动账。
+
+    2026-09-02 之前：TA 发的图只活到下一次重铸——req.images 只带"最新这条"的字节，
+    历史里那条在 app 侧就是 `[图片]` 三个字。那是 **-p 时期的遗留**：那会儿历史是
+    一段扁平文本，图除了当占位符没有别的活法。SDK 路的 forge.render 早就支持 user
+    槽带图块（PR13 图块腿真机验通），缺的只是字节留底（state_store.save_chat_images
+    在收请求那一刻存下，按 (ts, seq) 认领）。
+
+    合成成一条而不是各占一条：一次发送在 app 里是好几个气泡（图一条、话一条），
+    但在他眼里那是**一件事**——「她发来一张图，说：…」。拆成两条的后果不只是难看，
+    还让每条 `[图片]` 白占一个 100 条名额、重铸后变成一句没有内容的话。
+    取不到字节（老消息、留底之前的）就原样留着占位符，不假装有图。
+
+    ⚠️ 欠账：index.jsonl 和图本体都是 append-only，没有清理。窗口只有 100 条，
+    但账和字节会一直长；而且这函数每次重铸都整份读索引。什么时候该删、按什么口径
+    删（窗口外？N 天？），没定，单独一件事。"""
+    idx = state_store.read_chat_image_index(char_id)
+    if not idx:
+        return history
+    by_ts: dict[int, list[dict]] = {}
+    for r in idx:
+        by_ts.setdefault(int(r.get("ts", 0)), []).append(r)
+
+    def _blocks(ts) -> list[dict]:
+        out = []
+        for r in by_ts.get(int(ts or 0), []):
+            raw = state_store.read_chat_image(r.get("sha", ""), char_id)
+            if raw:
+                out.append({"media_type": r.get("mt") or "image/jpeg",
+                            "data": base64.b64encode(raw).decode()})
+        return out
+
+    out: list[dict] = []
+    i, n = 0, len(history)
+    while i < n:
+        m = history[i]
+        if (m.get("role") != "user"
+                or (m.get("text") or "").strip() != state_store.IMAGE_PLACEHOLDER):
+            out.append(m)
+            i += 1
+            continue
+        j, seen_ts = i, []
+        while (j < n and history[j].get("role") == "user"
+               and (history[j].get("text") or "").strip()
+               == state_store.IMAGE_PLACEHOLDER):
+            t = int(history[j].get("ts") or 0)
+            if t not in seen_ts:        # 同一秒三张图=三条占位共用一个 ts，
+                seen_ts.append(t)       # 按 ts 取一次就够，逐条取会取成 3×3
+            j += 1
+        imgs = [b for t in seen_ts for b in _blocks(t)]
+        if not imgs:                       # 一张都取不到 → 别动，占位符照旧
+            out.extend(history[i:j])
+            i = j
+            continue
+        # 紧跟着的那句话（同一次发送才并：>60 秒就是另一件事了）
+        if (j < n and history[j].get("role") == "user"
+                and int(history[j].get("ts") or 0)
+                - int(history[j - 1].get("ts") or 0) <= 60):
+            out.append({**history[j], "images": imgs})
+            i = j + 1
+        else:
+            out.append({**history[i], "images": imgs})
+            i = j
+    return out
+
+
 def _frame_activities(history: list[dict], char_id: str) -> list[dict]:
     """活动段的渲染层处理（§4 折叠规则，PR13 补全）：**最近一场**加两行文档框、
     点评原文逐条保留（那正是当下的对话）；**更早的场**整段折叠成一行框（含 TA
     中途插话——§8.6 拍板整段折）。**只改铸造输入，不改已铸账**——账永远对
     权威原文，折叠/带不带是渲染规则，字面不动（权威库/手机气泡永远全在）。
     确定性：框行内容只由区间数据派生，同输入同字节。进行中的场没有区间行，
-    自然不折（「会话没收摊前的重铸不带框」，PR11 边界照旧）。"""
+    自然不折（「会话没收摊前的重铸不带框」，PR11 边界照旧）。
+
+    **只剩 game 一种场了**（2026-09-02 清）：code 的起止框跟着「code 不是模式，
+    是一次写权限申请」那条改判（08-31）一起退役——权限按轮申请、只读常驻，没有
+    「开一场/收一场」这回事了，`open_segment(char, "code")` 全仓一个调用点都没有
+    （现存区间行也全是 game）。留着那半个分支只会让下一个人以为 code 还会开场。"""
     if not history:
         return history
     import activity_log
@@ -833,8 +1064,7 @@ def _frame_activities(history: list[dict], char_id: str) -> list[dict]:
     i, n = 0, len(history)
     for k, iv in enumerate(intervals):
         s, e = int(iv["start"]), int(iv["end"])
-        is_code = iv.get("scene") == "code"
-        note = iv.get("note") or ("写代码" if is_code else "游戏")
+        note = iv.get("note") or "游戏"
         latest = (k == len(intervals) - 1)
         while i < n and int(history[i].get("ts") or 0) < s:
             out.append(history[i])
@@ -844,22 +1074,16 @@ def _frame_activities(history: list[dict], char_id: str) -> list[dict]:
             j += 1
         if j > i:
             if latest:
-                # 措辞纪律（game 开场无感化立的，code 同理）：工具给他的是能力，
-                # 不是场所——code 这边不说「上机/会话/收摊」，只说权限的来去。
-                opened = (f"〔{_hm(s)} 写权限批下来了，下面这些是你边干活边说的〕"
-                          if is_code else
-                          f"〔{_hm(s)} 你开了{note}会话，下面这些是你边读边说的〕")
-                closed = (f"〔{_hm(e)} 写权限到这儿交还了〕" if is_code else
-                          f"〔{_hm(e)} 这一场到这儿收了摊〕")
-                out.append({"role": "user", "ts": s, "text": opened})
+                out.append({"role": "user", "ts": s,
+                            "text": f"〔{_hm(s)} 你开了{note}会话，"
+                                    "下面这些是你边读边说的〕"})
                 out.extend(history[i:j])
-                out.append({"role": "user", "ts": e, "text": closed})
+                out.append({"role": "user", "ts": e,
+                            "text": f"〔{_hm(e)} 这一场到这儿收了摊〕"})
             else:
-                body = ((f"〔{_hm(s)}–{_hm(e)} 那阵子你拿着写权限动手干了些活"
-                         "——过程细节在记忆里淡下去了〕") if is_code else
-                        (f"〔{_hm(s)}–{_hm(e)} 你拿着{note}读了一场——"
-                         "细节在记忆里淡下去了，这一场的脉络和感想"
-                         "你当时写进了章节志〕"))
+                body = (f"〔{_hm(s)}–{_hm(e)} 你拿着{note}读了一场——"
+                        "细节在记忆里淡下去了，这一场的脉络和感想"
+                        "你当时写进了章节志〕")
                 trace = _fold_trace_lines(iv)
                 if trace:
                     body += ("\n〔这段时间你亲手做过的——记录，不是印象：\n"
@@ -880,25 +1104,11 @@ def _ombre_on(char_id: str) -> bool:
         return False
 
 
-def _seen_block(char_id: str, since_ts: int) -> tuple[Optional[str], int]:
-    """见闻增量：醒来内心 + 小屋经历里 ts>since_ts 的部分（渲染口径同
-    build_context_timeline，pipeline.seen_items 一份两用）。返回 (文本或 None, 新游标)。
-    since_ts=0（session 刚开/重铸后）＝开局快照：最近几条全给，对齐 -p 路每轮
-    时间线里的非对话内容——重铸丢掉的旧见闻由此换成新鲜的（§5.4 红线：
-    别把过期档案固化成假新鲜）。"""
-    import pipeline
-    import world
-    exp_n = world.experience_limit() if world.house_active() else 0
-    items = pipeline.seen_items(char_id, reflect_limit=5,
-                                experience_limit=exp_n, since_ts=since_ts)
-    if not items:
-        return None, since_ts
-    cursor = max(ts for ts, _ in items)
-    head = ("【这期间的见闻——你醒来时的内心 / 你在小屋里看见的（带（房间名）前缀），"
-            "不是聊天消息】" if exp_n else
-            "【这期间的见闻——你自己醒来时的内心，不是聊天消息】")
-    body = "\n".join(f"[{pipeline.fmt_ts(ts)}] {t}" for ts, t in items)
-    return head + "\n" + body, cursor
+# 见闻快照/增量（_seen_block + seen_cursor）09-02 删了（机主拍板）：SDK 路的
+# 醒来内心本来就整段跳过（seen_items 里 engine=sdk 过滤，PR12 后醒来活在
+# transcript 里），剩下能注入的只有老 -p 路存货和小屋经历——前者用不到，小屋
+# 荒废中，将来要做也是往 session 里做，不走档案注入。pipeline.seen_items 本体
+# 留着（-p 路 build_context_timeline 还在吃）。
 
 
 # 行为清单的渲染（_acts_block）09-01 随注入一起删了——留着一个没人调的渲染器，
@@ -1009,7 +1219,14 @@ async def run(handle: session_mgr.LoopHandle, *,
         await _safe_disconnect(client)
         client = None
         options = opts_factory(handle.char_id, catalog)
-        rendered = _frame_activities(history, handle.char_id) if history else []
+        # 三层渲染，顺序有讲究：
+        # 1) 并图——要在打戳之前，戳才落在合成后那一条上（先打戳会给占位符也打一个，
+        #    然后那条被并掉，戳跟着没了）；
+        # 2) 打戳；3) 套活动框——框行自带 HH:MM，别再叠一层（顺序反了就是双戳）。
+        rendered = (_frame_activities(
+            _stamp_times(_merge_images(history, handle.char_id), handle.char_id),
+            handle.char_id)
+            if history else [])
         if render_tail and rendered:
             rendered = rendered + list(render_tail)
         if rendered:
@@ -1029,7 +1246,6 @@ async def run(handle: session_mgr.LoopHandle, *,
         n_imgs = sum(len(m.get("images") or []) for m in rendered)
         handle.meta["ctx_est"] = (sum(estimate_tokens(m["text"]) for m in rendered)
                                   + n_imgs * GAME_TOKENS_PER_SHOT)
-        handle.meta["seen_cursor"] = 0        # 开局重发新鲜见闻快照
         handle.meta["needs_opening"] = True   # 下一轮带开局引子（breath）
         handle.last_reopen = time.time()
         client = c
@@ -1219,8 +1435,18 @@ async def run(handle: session_mgr.LoopHandle, *,
 
     async def _pump_tick() -> None:
         """队列空到点补的一口「·」——不是第四种轮：turn_kind=wake（他自己的
-        时间），注入谁都没见过、不进账不进铸造材料。"""
-        await _pump_round(GAME_TICK_PROMPT, "wake")
+        时间），注入谁都没见过、不进账不进铸造材料。
+        每 GAME_TICK_STAMP_EVERY 轮那口带上报时（口径同醒来抬头）：一场游戏几十上百
+        个 tick，全裸的话他手上唯一的钟停在开场那一句，越打越偏。"""
+        pump = handle.meta.get("game_pump")
+        n = int((pump or {}).get("ticks", 0)) + 1
+        if pump is not None:
+            pump["ticks"] = n
+        prompt = GAME_TICK_PROMPT
+        if GAME_TICK_STAMP_EVERY > 0 and n % GAME_TICK_STAMP_EVERY == 0:
+            import pipeline
+            prompt = f"{GAME_TICK_PROMPT}\n【{pipeline.stamp_str(int(time.time()))}】"
+        await _pump_round(prompt, "wake")
 
     async def _game_reforge() -> None:
         """N 张段内重铸（§4 节奏；唯一保留的边界）：巩固轮（感知白描，无感）→
@@ -1345,28 +1571,45 @@ async def run(handle: session_mgr.LoopHandle, *,
                     handle.meta["wake_tools"] = set(
                         pipeline.mounted_tool_names("wake", handle.char_id))
                 else:
-                    verdict = (divergence(ledger, turn.history,
+                    # 判脏前先摘掉尾巴上的 `[图片]` 占位（account 没记过但不算脏，
+                    # 见 absorbable_tail）；摘下来的这几条随本轮一起进账。
+                    absorbed = (absorbable_tail(ledger, turn.history)
+                                if client else [])
+                    core = (turn.history[:len(turn.history) - len(absorbed)]
+                            if absorbed else turn.history)
+                    verdict = (divergence(ledger, core,
                                           stale_depth=_stale_depth(handle))
                                if client else "dirty")
+                    if verdict != "dirty" and absorbed:
+                        print(f"[chat_loop] 吸收窗口尾巴（char={handle.char_id}）："
+                              f"{len(absorbed)} 条图片占位进账，不重铸",
+                              file=sys.stderr)
+                    elif verdict == "dirty":
+                        absorbed = []          # 要重铸了，_open_session 会重建整本账
+                    turn.absorbed = absorbed
                     if verdict == "dirty":
-                        if client:
-                            print(f"[chat_loop] 判脏（char={handle.char_id}），重铸",
-                                  file=sys.stderr)
+                        # 落日志不分「有没有 client」：client is None 那半原来是
+                        # **静默重铸**（重启后第一条消息全走这条），外面看不见。
+                        why = ("session 没开（进程刚起 / 上一轮把 client 关了）"
+                               if not client
+                               else dirty_reason(ledger, turn.history))
+                        print(f"[chat_loop] 重铸（char={handle.char_id}）：{why}",
+                              file=sys.stderr)
                         await _open_session(turn.history, turn.catalog)
                     handle.meta["turn_kind"] = "chat"
                 if turn.catalog is not None:
                     handle.meta["catalog"] = turn.catalog   # 轮间隙重铸要用的最近目录
                 if turn.injection_factory is not None:
                     turn.injection = turn.injection_factory()
-                # ---- 注入这一轮（开局引子 + 见闻增量 + 包装文本；都不进账）----
+                # ---- 注入这一轮（开局引子 + 包装文本；都不进账）----
                 # ⚠️ 纪律（09-01 机主拍板）：**别往这儿加新的「二手档案」块。**
                 # 每加一块用「关于他的记录」口吻写的材料（行为清单、状态摘要、
                 # 统计），都是在把本该属于他自己经历的东西，改写成别人递给他的
                 # 卷宗——聊天记忆的信感口径（assistant 轮=记忆、注入文本=档案，
                 # PLAN_sdk）会顺着这条线被一点点吃掉。加这种块＝改产品口径，
                 # 要机主拍板，不是实现细节；实踩就是下面那条行为清单。
-                # 不在此列：包装文本（时间/间隔/叮嘱）和见闻增量——那些是**知觉
-                # 材料**（此刻几点、这期间世界发生了什么），不是关于他的档案。
+                # 不在此列：包装文本（时间/间隔/叮嘱）——那是**知觉材料**
+                # （此刻几点），不是关于他的档案。
                 parts: list[str] = []
                 if handle.meta.pop("needs_opening", False):
                     if _ombre_on(handle.char_id):
@@ -1376,11 +1619,6 @@ async def run(handle: session_mgr.LoopHandle, *,
                     # 实证「痕迹原样在上下文里也不防编造」（她抄着真回执编了假
                     # 投递）；账的第一客户是门（出口判脏）不是他；「记录，不是
                     # 印象」那个开头把它钉死在档案一侧，与信感口径顶着。
-                seen, cur = _seen_block(handle.char_id,
-                                        int(handle.meta.get("seen_cursor", 0)))
-                if seen:
-                    parts.append(seen)
-                    handle.meta["seen_cursor"] = cur
                 injection = ("\n\n".join(parts + [turn.injection])
                              if parts else turn.injection)
                 content: list[dict] = [{"type": "text", "text": injection}]
@@ -1425,6 +1663,11 @@ async def run(handle: session_mgr.LoopHandle, *,
                             _capture_capsules(handle.char_id, delivered, "wake")
                         ok = True
                 elif captured.get("reply"):
+                    for m in turn.absorbed:
+                        # 图片占位补记：它的真内容这一轮已经随 req.images 到他眼前
+                        # 了，账补上一笔，下一次比对就不会再把它当成"窗口比账长"。
+                        ledger.append({"r": "user", "h": _h(m["text"]),
+                                       "ts": m.get("ts")})
                     ledger.append({"r": "user", "h": _h(turn.new_msg["text"]),
                                    "ts": turn.new_msg.get("ts")})
                     ledger.append({"r": "assistant", "h": _h(captured["reply"]),

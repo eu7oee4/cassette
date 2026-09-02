@@ -99,23 +99,22 @@ def _mcp_config_path(context: str, char_id=None):
 #            （launchd label 带角色名）。runtime（node 包+Chromium 二进制）仍全局一份
 #            ——那是设备不是身份。插件本体一行没改：壳本来就读 CASSETTE_BROWSER_MCP_URL，
 #            mounted() 按角色下发（PLUGIN_ENV）。
-#   tmux     code/game 会话。code_bridge.start() 起会话前杀光所有档案，同一时刻
-#            全机只有一个会话（当初为"意识体唯一连续"有意这么设计）。每人一台
-#            "自己的 MacBook"是能做的，留到三期工作群：会话名带角色、session.json
-#            per-char、/code/* 整排路由带角色。
+#   ~~tmux~~ ✅ 2026-09-02 清掉了，「电脑上的会话」不再是一样独占资源——code 不是
+#            模式、是一次写权限申请（08-31 改判），没有"一个会话占着整台电脑"这回事了。
+#            game-story 因此只剩**一个**归属条件：《如鸢》账号（本来就只有一个号，
+#            两个人同时上是打架，那才是真的独占）。codemode 只吃 tmux，一起从
+#            EXCLUSIVE 里出列。
 #
 # 缺省全归默认角色；不归属的角色即便拨开了启用开关也不挂载（见 mounted）。
 EXCLUSIVE: dict[str, list[str]] = {
     "game-maayuan": ["maayuan"],
-    "game-story":   ["maayuan", "tmux"],
-    "codemode":     ["tmux"],
+    "game-story":   ["maayuan"],
     "beacon":       ["beacon"],
 }
 
 # 资源的人话名（app 的归属选择器 / 报错文案用；后端下发，别让 app 猜）。
 RESOURCE_LABEL: dict[str, str] = {
     "maayuan": "《如鸢》游戏账号",
-    "tmux": "电脑上的会话",
     "beacon": "Beacon 卡",
 }
 
@@ -361,7 +360,8 @@ REGISTRY: dict[str, dict] = {
     #   硬禁，08-13 机主改成开关制（看守/急停/消耗护栏兜底齐了）。
     # 两个都吃同一个《如鸢》账号（EXCLUSIVE 的 maayuan 资源），所以归属绑在一起走：
     # 改一次账号归属，两个插件一起跟着走，不会出现两个角色同时上手同一个号。
-    # game-story 还额外吃 tmux 会话——两样都归你才挂得上。
+    # 2026-09-02 起 game-story 只剩这一个归属条件——原来还吃 tmux「电脑上的会话」，
+    # 那样资源随 code 模式退役一起清了（见上面 EXCLUSIVE 的沿革注释）。
     #
     # ⚠️ 两个都有**宿主侧前提**，装完不配好是跑不起来的（同 browser 要先起服务）：
     # MuMu 模拟器装好、游戏登录过、分辨率切 720×1280@320、`.env` 里 GAME_MODE_ENABLED=1

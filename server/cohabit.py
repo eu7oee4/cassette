@@ -26,7 +26,6 @@ import config
 import offers
 import pets
 import pipeline
-import plugins
 import state_store
 import wake
 import world
@@ -47,22 +46,22 @@ _WORLDVIEW = """【这个世界怎么运作——三条，都是机制，记住�
 3. 这里的其他住户是真的。他们和你一样会醒来、会移动、会自己决定说不说话。他们不是布景，也不归你演。"""
 
 
-# ---------- 电脑前状态（同居世界里 code/game 会话的物理语义）----------
-def coding_char():
-    """电脑前的那个人：code/game 会话活着 → (会话归属角色, "code"|"game")，没有 → None。
-    这是同居世界对「他在 code 会话里」的物理口径：人还在原房间，只是**在电脑前专注着**
+# ---------- 电脑前状态（同居世界里游戏会话的物理语义）----------
+def game_char():
+    """电脑前的那个人：游戏会话活着 → (会话归属角色, "game")，没有 → None。
+    这是同居世界对「他在玩游戏」的物理口径：人还在原房间，只是**在电脑前专注着**
     ——位置不变、状态可见。用途：①注入里给在场者标注（减少被打扰）；②队列对归属
     角色的醒来延后（cohabit_queue._pop_next）；③ /world 给 UI 出状态。
-    探测失败当没有（口径同 wake.code_session_owner：宁可醒、别静默困死）。"""
+    2026-09-02 收窄成只认游戏：code 不再是会话（见 wake.game_session_owner）。
+    探测失败当没有（口径同 wake.game_session_owner：宁可醒、别静默困死）。"""
     try:
-        if not code_bridge.session_alive():
+        h = code_bridge.sdk_loop_handle()
+        if h is None:
             return None
-        owner = code_bridge.session_char() or plugins.owner_of("tmux")
-        if not owner:
-            return None
-        return owner, ("game" if code_bridge.active_profile() == "game" else "code")
+        owner = (getattr(h, "char_id", "") or "").strip()
+        return (owner, "game") if owner else None
     except Exception as e:
-        logerr(f"cohabit 探 code 会话失败（当作没开）: {e}")
+        logerr(f"cohabit 探游戏会话失败（当作没开）: {e}")
         return None
 
 
@@ -91,7 +90,7 @@ def _where_block(cid: str, ev_limit: int = 80) -> str:
     if loc == world.AWAY:
         return "【你在哪】你出门在外，不在房子里。房子里的事你看不见；手机随时可用。"
     r = world.room(loc)
-    busy = coding_char()
+    busy = game_char()
     others = []
     for e in world.occupants(loc):
         if e == cid:
@@ -165,9 +164,9 @@ def cohabit_prompt(cid: str, reasons: list[dict], settings: dict) -> str:
 
     # 诚实兜底：归属角色的醒来正常被队列延后到收工（cohabit_queue._pop_next），
     # 这段按理永不出现。但判据写「会话开着就注入」不写「不可能」——万一哪条路绕过
-    # 避让，prompt 也不说谎（口径同 wake.code_session_block 的设计注释）。
+    # 避让，prompt 也不说谎（口径同 wake.game_session_block 的设计注释）。
     code_section = ""
-    busy = coding_char()
+    busy = game_char()
     if busy and busy[0] == cid:
         code_section = (f"\n【注意：你此刻还开着电脑上的会话在{_busy_label(busy[1])}——"
                         f"按避让规则这次醒来本该等你收工，出现这段说明有触发绕了过来。"

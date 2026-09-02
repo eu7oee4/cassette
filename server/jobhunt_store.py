@@ -425,14 +425,51 @@ def jd_save(source: str, company: str, title: str, text: str, char_id: str = "")
     return {"ok": True, "id": jid}
 
 
-def jd_list(status: Optional[str] = None, limit: int = 30) -> list[dict]:
-    rows = _read_jsonl(JDS_PATH)
+def jd_list(status: Optional[str] = None, limit: int = 30,
+            q: Optional[str] = None) -> dict:
+    """岗位库列表。**返回 dict 不是 list**——因为 limit 是会骗人的：
+
+    2026-09-02 事故：Cassius 用默认 limit=20 列了一次库（当时 33 条），返回体
+    是个光秃秃的数组，没有任何"还有 13 条没给你"的信号。他把返回的 20 条当成
+    全库，据此对机主宣布"1688 那个岗根本不存在，整条是我编的"——那岗在库里，
+    76 分，只是排在窗口外。**截断必须在返回体里说话，不能靠调用方自己记得。**
+
+    同一次事故的第二半：旧实现是 `rows[-limit:]`，按**追加顺序**取尾巴。而
+    jd_score 的 override 是原地改行 + 整表重写，不动位置——于是"昨晚刚重排过
+    的老岗"永远进不了"最新 N 条"这个窗口，恰恰是最该被看见的那一类。改成按
+    ts 排（新→旧），位置由时间决定，不由它当初写在文件第几行决定。
+
+    q：公司名/岗位名的子串筛（大小写不敏感）。想问"库里有没有这家"就用它，
+    别再翻页猜。
+    """
+    all_rows = _read_jsonl(JDS_PATH)
+    rows = all_rows
     if status:
         rows = [r for r in rows if r.get("status") == status]
-    rows = rows[-limit:][::-1]
-    return [{**{k: r.get(k) for k in ("id", "ts", "source", "company", "title",
-                                      "score", "status", "char_id")},
-             "text_head": (r.get("text") or "")[:120]} for r in rows]
+    if q and q.strip():
+        k = q.strip().lower()
+        rows = [r for r in rows
+                if k in ((r.get("company") or "") + " "
+                         + (r.get("title") or "")).lower()]
+    # ts 是 "YYYY-MM-DD HH:MM" 字符串，字典序即时序；缺 ts 的按原顺序垫底。
+    rows = [r for _, r in sorted(enumerate(rows),
+                                 key=lambda p: (str(p[1].get("ts") or ""), p[0]),
+                                 reverse=True)]
+    shown = rows[:max(0, limit)]
+    return {
+        "total": len(all_rows),
+        "matched": len(rows),
+        "shown": len(shown),
+        "truncated": len(shown) < len(rows),
+        "hint": (f"只给了最新 {len(shown)} 条，筛出来共 {len(rows)} 条"
+                 f"（全库 {len(all_rows)} 条）——**没列出来的不等于不存在**。"
+                 "要找具体某家就传 q=公司名，别拿这份列表当全库判'有没有'。"
+                 if len(shown) < len(rows) else ""),
+        "items": [{**{k: r.get(k) for k in ("id", "ts", "source", "company",
+                                            "title", "score", "status",
+                                            "char_id")},
+                   "text_head": (r.get("text") or "")[:120]} for r in shown],
+    }
 
 
 def companies() -> list[str]:

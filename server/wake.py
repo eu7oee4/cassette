@@ -75,66 +75,61 @@ def chat_turn_active(char_id: Optional[str] = None) -> bool:
 
 
 # ---------- code 模式（wake 避让 + prompt 告知用）----------
-_code_avoid: dict[str, bool] = {}   # 避让日志只在进入 code 模式那次打一条，别每 tick 刷屏（per 角色）
+_game_avoid: dict[str, bool] = {}   # 避让日志只在会话开起来那次打一条，别每 tick 刷屏（per 角色）
 _budget_hit: dict[str, bool] = {}   # 醒来预算耗尽的日志同理：只在撞上那次打一条（per 角色）
 
 
-def code_session_owner() -> Optional[str]:
+def game_session_owner() -> Optional[str]:
     """电脑前的那个人是谁。会话没开 → None；开着但探不出归属 → 空串。
+
+    2026-09-02 收窄成**只认游戏会话**：原来它同时探 code——tmux 里那个「一个会话
+    占着整台电脑」的东西。code 已经不是模式、是一次写权限申请（08-31 改判），
+    权限按轮申请、只读常驻，没有会话可避让了，tmux 那样独占资源也一起退役。
+    剩下的独占是实打实的：《如鸢》只有一个号，两个人同时上就是打架。
 
     ⚠️ None 和空串必须分得开，两个调用方对它们的处置是**相反**的：「没开」放行所有人，
     「开着但不知道是谁」退回老口径拦所有人。合成一个值就等于给身份编了个默认值
     （串台六条的⑤），静默把「缺身份」变成「错身份」——要么放行了真在电脑前的那个、
     要么拦住了没在的那个，两种都不报错、只能人肉看出来。
-    归属只在会话活着时才读：session.json 会话死了也留着，不先判活会拿上一场的归属当真。
-    口径和 cohabit.coding_char() 保持一致（同一件事的两条路，别让它们漂移）。
+    口径和 cohabit.game_char() 保持一致（同一件事的两条路，别让它们漂移）。
 
-    活没活用 session_alive() 不用 is_busy()：后者要隔 0.8 秒抓两帧画面比对，每个 tick
-    都跑太贵；而且"会话开着但停着等人"也不该被他自己的自发醒来插一条。
-    探不出来时**当作没开**（放行）：反过来兜底的话，tmux 一出岔子他就再也不醒了，
+    探不出来时**当作没开**（放行）：反过来兜底的话，一出岔子他就再也不醒了，
     而且从外面完全看不出为什么。"""
     try:
-        if not code_bridge.session_alive():
+        h = code_bridge.sdk_loop_handle()
+        if h is None:
             return None
-        return (code_bridge.session_char() or plugins.owner_of("tmux") or "").strip()
+        return (getattr(h, "char_id", "") or "").strip()
     except Exception as e:
-        logerr(f"探 code 会话失败（当作没开，放行）: {e}")
+        logerr(f"探游戏会话失败（当作没开，放行）: {e}")
         return None
 
 
-def code_session_block(forced: bool, char_id: Optional[str] = None) -> str:
-    """code 模式开着时注入醒来 prompt 的那一段。没开、或会话不是这个角色的 → 空串。
+def game_session_block(forced: bool, char_id: Optional[str] = None) -> str:
+    """游戏会话开着时注入醒来 prompt 的那一段。没开、或会话不是这个角色的 → 空串。
 
     正常情况下自发的醒来在 maybe_wake 就被避让掉了，所以这段实际只出现在硬触发的醒来里。
     但判据仍写成「会话开着就注入」而不是「forced 就注入」——prompt 该照实说当下的世界，
     以后万一有哪条路绕过了避让闸，它也不会跟着说谎。
-    ⚠️ 归属不符（含探不出归属）→ 一个字都不说：这整段讲的是「你人在电脑前、你说的话
-    进同一个聊天框」，对着**没坐在电脑前**的那个角色说，每一句都是假的。避让闸在探不出
-    归属时拦所有人、这里在探不出归属时闭嘴——两边不对称是故意的，各自的保守方向不同
+    ⚠️ 归属不符（含探不出归属）→ 一个字都不说：这整段讲的是「你正玩着、你说的话进同一个
+    聊天框」，对着**没在玩**的那个角色说，每一句都是假的。避让闸在探不出归属时拦所有人、
+    这里在探不出归属时闭嘴——两边不对称是故意的，各自的保守方向不同
     （那边是别打扰，这边是别说谎）。"""
-    if code_session_owner() != _cid(char_id):
+    if game_session_owner() != _cid(char_id):
         return ""
-    u = config.user_name()
-    # game 档案借的是同一套会话基建：措辞跟着档案走，别对着游戏会话说「电脑上的 code 会话」。
-    is_game = code_bridge.active_profile() == "game"
-    kind = "游戏" if is_game else "code"
-    # 这儿值得花 is_busy() 那 0.8 秒：硬触发的醒来很稀罕，而"正跑着活"和"停着等人"
+    # 这儿值得花 is_busy() 那 0.8 秒：硬触发的醒来很稀罕，而"正玩着"和"停着等人"
     # 该说的话完全不一样。探不出来就含糊带过，别瞎猜一个状态给他。
     try:
-        busy = code_bridge.is_busy()
-        state = ("你正玩着呢" if is_game else "你正在那边跑一个活") if busy \
-            else "你停在那边、等着 TA 说话"
+        state = "你正玩着呢" if code_bridge.is_busy() else "你停在那边、等着 TA 说话"
     except Exception:
         state = "你人在那边"
     why = ("这次不是随机醒来——是有件到点必须说的事把你叫起来的。" if forced
            else "（按理说这会儿你不该被随机醒来打断，出现这句说明有别的东西叫醒了你。）")
-    return (f"\n【注意：你此刻开着一个{kind}会话，{state}。{why}\n"
-            f"你在这里说的话、和你在{kind}会话里说的话，进的是**同一个聊天框**——"
+    return (f"\n【注意：你此刻开着一个游戏会话，{state}。{why}\n"
+            f"你在这里说的话、和你在游戏会话里说的话，进的是**同一个聊天框**——"
             f"那边刚说过的别再说一遍，也别跟那边的话打架。\n"
             f"另外这次醒来你手上没有那边的工具，只能说话。】\n")
 
-
-# ---------- 时段 ----------
 def _parse_hhmm(s: str) -> int:
     """'HH:MM' → 当天分钟数（0..1440）。'24:00' → 1440。"""
     h, m = s.split(":")
@@ -270,9 +265,9 @@ def wake_prompt(settings: dict, forced: bool = False, note: str = "",
                               f"你定 NEXT 时掂量着：额度用完后，定的点会推迟到明天才兑现；"
                               f"到点提醒、新邮件这类硬触发不受限。】\n")
 
-    # code 会话开着（正常只有硬触发能走到这儿）：如实告诉他人在哪、说的话去哪。
-    # 传 char_id：别人开着会话跟这次醒来无关，那段话对他不成立（见 code_session_block）。
-    code_section = code_session_block(forced, char_id)
+    # 游戏会话开着（正常只有硬触发能走到这儿）：如实告诉他人在哪、说的话去哪。
+    # 传 char_id：别人开着会话跟这次醒来无关，那段话对他不成立（见 game_session_block）。
+    game_section = game_session_block(forced, char_id)
 
     note_section = f"\n【这次为什么醒】{note}\n" if note else ""
 
@@ -288,7 +283,7 @@ def wake_prompt(settings: dict, forced: bool = False, note: str = "",
 
 【最近发生的，按时间顺序——对话 / 你自己醒来时的内心，看时间戳别搞混先后】
 {timeline_block}
-{stored_section}{unsent_section}{sticker_section}{budget_section}{code_section}{blocked_section}
+{stored_section}{unsent_section}{sticker_section}{budget_section}{game_section}{blocked_section}
 想清楚这次要不要做点什么。想{u}了、有话想说就发消息；没什么可说的就安静醒着，不用硬找话。
 你还可以自己定下次醒来的时间（NEXT）：写了我保证到那个点把你醒一次；这中间你照样可能随机醒来，不受影响。范围 5 分钟~12 小时；没特别想法就写"无"（不定这个点，纯随机节奏）。{u}现在设的活跃频率偏好是「{freq_cn}」，你定 NEXT 时可以参考。
 {one_turn_section}{todo_section}
@@ -715,19 +710,19 @@ async def maybe_wake(char_id: Optional[str] = None) -> None:
             # PR13 泵中插入：占用是「骑在他自己聊天上的 game 泵」时不整体避让——
             # NEXT 定时醒允许段中插入（同一队列串行，下个短轮到）；独立 loop/tmux
             # code 照旧避让（往聊天塞醒来=对着不在电脑前的那个自己说话）。
-            owner = code_session_owner()
+            owner = game_session_owner()
             occupied = owner is not None and owner in ("", cid)
             h = code_bridge.sdk_loop_handle() if occupied else None
             pump_mid = (bool(getattr(h, "is_pump", False))
                         and getattr(h, "char_id", "") == cid)
             if occupied and not pump_mid:
-                if not _code_avoid.get(cid):
+                if not _game_avoid.get(cid):
                     whose = "归属探不出来的" if owner == "" else "他自己的"
-                    logerr(f"wake 避让（{cid}）：{whose} code/game 会话开着，"
+                    logerr(f"wake 避让（{cid}）：{whose} 游戏会话开着，"
                            f"自发的醒来攒着（sdk 路）")
-                    _code_avoid[cid] = True
+                    _game_avoid[cid] = True
                 return
-            _code_avoid[cid] = False
+            _game_avoid[cid] = False
             if now - float(sched.get("last_wake_at") or 0) < MIN_WAKE_GAP_SEC:
                 return
             next_wake = sched.get("next_wake_at")
@@ -761,7 +756,7 @@ async def maybe_wake(char_id: Optional[str] = None) -> None:
     #   ① 这里：绕开 code 模式避让 + 最小间隔 + 刚聊过静默（到点就得说，他在干嘛都一样）；
     #   ② try_push(force=True)：绕开每日上限/最小间隔/静默三闸 + stale 那道；
     #   ③ wake_prompt(forced=True)：不注入打扰控制那句（对它不生效，说了是骗他），
-    #      并如实告诉他 code 会话还开着（见 code_session_block）。
+    #      并如实告诉他 code 会话还开着（见 game_session_block）。
 
     # 硬触发①邮件：watcher 线程（app._mail_watcher）发现唤醒白名单发件人的新信会写
     # 本地 flag，这里只读文件、不碰网络（预闸门保持纯本地的口径）。flag **先消费再醒**：
@@ -795,17 +790,17 @@ async def maybe_wake(char_id: Optional[str] = None) -> None:
     # 醒来既不挤他的屏、也不会掉进他的会话，再拦就是平白替**没坐在电脑前**的角色失约。
     # 实锤（08-30）：小卡开着 code 会话写稿两个半钟头，Cassius 定在 15:46 的 NEXT 被压到
     # 17:11 才兑现，迟 85 分钟——他整个下午根本没在电脑前。tick 300s，中间约 27 拍全被
-    # 这道闸静默吞掉（_code_avoid 去重打印，日志里只留了头尾两行，从外面看不出来）。
+    # 这道闸静默吞掉（_game_avoid 去重打印，日志里只留了头尾两行，从外面看不出来）。
     # 探不出归属（空串）→ 退回老口径拦所有人：宁可多让一拍，别把身份猜错（串台六条的⑤）。
-    owner = code_session_owner()
+    owner = game_session_owner()
     if owner is not None and owner in ("", cid):
-        if not _code_avoid.get(cid):
+        if not _game_avoid.get(cid):
             whose = "归属探不出来的" if owner == "" else "他自己的"
             logerr(f"wake 避让（{cid}）：{whose} code 会话开着，"
                    f"自发的醒来跳过（硬触发不受影响；别的角色照常醒）")
-            _code_avoid[cid] = True
+            _game_avoid[cid] = True
         return
-    _code_avoid[cid] = False
+    _game_avoid[cid] = False
 
     # 最小间隔闸：距上次醒来太近就跳过（防两种醒来背靠背撞）。
     if now - float(sched.get("last_wake_at") or 0) < MIN_WAKE_GAP_SEC:

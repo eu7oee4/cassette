@@ -435,8 +435,40 @@ def _snapshot_incoming_window(req: ChatRequest, char_id: Optional[str] = None) -
     这轮可能跑很久，中途 wake 醒来不该只看到上一轮的世界。收尾 finalize 用带回复的完整版覆盖。
     被护栏挡下时新消息由 finalize 的追加分支补进。"""
     _overwrite_window_from(req.messages, char_id)
+    _stash_incoming_images(req, char_id)
     # 上一轮的残留正文清掉：断连/异常那一支不走 finalize，不在这儿清就会漏进下一次自切。
     state_store.clear_live_reply()
+
+
+def _stash_incoming_images(req: ChatRequest, char_id: Optional[str] = None) -> None:
+    """把这一轮带来的图**存下来**，认领给历史里那几条 `[图片]` 占位气泡。
+
+    为什么要认领而不是「挂在最新这条上」：app 发一张带话的图，会先 append 一条
+    `.image` 气泡、再 append 文字气泡，然后把字节放在 req.images 里。所以
+    req.images 对应的是**末尾那串连续的 `[图片]` 占位**（顺序一一对应），不是
+    messages[-1]。同一秒发三张是常事（09-01 20:52 就是三张），所以按 (ts, seq)
+    认领，ts 单独认不出是哪张。
+    对不上（占位条数 ≠ 图片张数）就整批挂到最后一条上——宁可位置粗一点，
+    不能把 A 的图记成 B 的。"""
+    imgs = [{"data": i.data, "media_type": i.media_type} for i in (req.images or [])]
+    if not imgs:
+        return
+    try:
+        msgs = req.messages or []
+        run = []
+        for m in reversed(msgs):
+            if m.role == "user" and (m.text or "").strip() == state_store.IMAGE_PLACEHOLDER:
+                run.append(m)
+            elif run or m.role != "user":
+                break
+        run.reverse()
+        if len(run) == len(imgs):
+            for m, im in zip(run, imgs):
+                state_store.save_chat_images([im], int(m.ts or time.time()), char_id)
+        elif msgs:
+            state_store.save_chat_images(imgs, int(msgs[-1].ts or time.time()), char_id)
+    except Exception as e:
+        logerr(f"存聊天图片失败（不挡这一轮）: {e}")
 
 
 def finalize_chat_reply(reply: str, stored: list[dict], req: ChatRequest,
@@ -586,7 +618,7 @@ def characters_list(x_auth: Optional[str] = Header(default=None, alias="X-Auth")
     verify_auth(x_auth)
     busy = None
     if config.COHABIT_ENABLED:
-        busy = cohabit.coding_char()
+        busy = cohabit.game_char()
     return {"items": [{"id": cid, "display_name": characters.display_name(cid),
                        "status": (busy[1] if busy and busy[0] == cid else None)}
                       for cid in characters.ids()]}
@@ -1022,7 +1054,7 @@ def get_world(x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
     # 在场状态：code/game 会话开着的角色标出来（UI 显示「正在敲代码，先别打扰」）。
     busy = None
     if config.COHABIT_ENABLED:
-        busy = cohabit.coding_char()
+        busy = cohabit.game_char()
     return {"rooms": rooms,
             "entities": {e: {**v, "name": world.entity_name(e),
                              "status": (busy[1] if busy and busy[0] == e else None)}
@@ -2131,9 +2163,12 @@ def jobhunt_pdf(resume_id: str,
 
 @app.get("/jobhunt/jds")
 def jobhunt_jds(status: Optional[str] = None, limit: int = 30,
+                q: Optional[str] = None,
                 x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
     verify_auth(x_auth)
-    return {"items": jobhunt_store.jd_list(status=status, limit=limit)}
+    # jd_list 自带 total/matched/truncated（见那儿的注释：截断得在返回体里说话）。
+    # iOS 只解 items，多出来的键它不看。
+    return jobhunt_store.jd_list(status=status, limit=limit, q=q)
 
 
 @app.post("/jobhunt/jds")

@@ -168,10 +168,51 @@ class TestJdStateMachine(JobhuntBase):
         jid = self._new_jd()
         store.jd_save("测试", "厂2", "岗2", "x" * 500)
         store.jd_score(jid, 80, "对口")
-        news = store.jd_list(status="new")
+        news = store.jd_list(status="new")["items"]
         self.assertEqual([r["company"] for r in news], ["厂2"])
         self.assertEqual(len(news[0]["text_head"]), 120)
         self.assertNotIn("text", news[0])
+
+    def test_jd_list_says_it_truncated(self):
+        """截断必须在返回体里说话（2026-09-02 事故：把一页当全库，据此宣布某岗
+        不存在）。"""
+        for i in range(5):
+            store.jd_save("测试", f"厂{i}", f"岗{i}", "正文")
+        r = store.jd_list(limit=2)
+        self.assertEqual(r["total"], 5)
+        self.assertEqual(r["matched"], 5)
+        self.assertEqual(r["shown"], 2)
+        self.assertTrue(r["truncated"])
+        self.assertIn("不等于不存在", r["hint"])
+        # 没截断时不喊狼来了
+        full = store.jd_list(limit=99)
+        self.assertFalse(full["truncated"])
+        self.assertEqual(full["hint"], "")
+
+    def test_jd_list_sorts_by_time_not_file_order(self):
+        """老岗重排后仍留在文件原位（jd_score 原地改写）——按追加顺序取尾巴会
+        让"刚重排过的老岗"永远进不了窗口，恰恰是最该被看见的那一类。"""
+        old = store.jd_save("测试", "老厂", "老岗", "正文")["id"]
+        store.jd_save("测试", "新厂", "新岗", "正文")
+        rows = store._read_jsonl(store.JDS_PATH)
+        for r in rows:                       # 手工做出"老的时间戳更新"的局面
+            r["ts"] = "2026-09-02 20:00" if r["id"] == old else "2026-08-01 09:00"
+        store._write_jsonl(store.JDS_PATH, rows)
+        top = store.jd_list(limit=1)["items"]
+        self.assertEqual([r["id"] for r in top], [old])
+        self.assertEqual(rows[0]["id"], old)  # 文件里它还在第一行（没被搬动）
+
+    def test_jd_list_q_finds_what_the_page_hid(self):
+        """一次调用回答"库里有没有这家"，不用翻页猜。"""
+        store.jd_save("测试", "阿里巴巴集团 · 1688", "AI业务探索实习生", "第三方签约")
+        for i in range(30):
+            store.jd_save("测试", f"别厂{i}", f"别岗{i}", "正文")
+        self.assertEqual(store.jd_list(limit=20)["items"][-1]["company"], "别厂10")
+        hit = store.jd_list(q="1688")
+        self.assertEqual(hit["matched"], 1)
+        self.assertFalse(hit["truncated"])
+        self.assertEqual(hit["items"][0]["title"], "AI业务探索实习生")
+        self.assertEqual(store.jd_list(q="不存在的公司")["matched"], 0)
 
 
 class TestApplications(JobhuntBase):
@@ -354,7 +395,7 @@ class TestMailClassify(JobhuntBase):
         v, flag = self._classify(conn, 7, msg, {"n@zhipin.com"})
         self.assertEqual(v["kind"], "subscribe")
         self.assertIsNone(flag)                             # 入库，不惊动谁
-        jds = store.jd_list(status="new")
+        jds = store.jd_list(status="new")["items"]
         self.assertEqual(len(jds), 1)
         self.assertIn("邮件订阅", jds[0]["source"])
         self.assertLessEqual(len(store.jd_read(jds[0]["id"])["text"]), 3000)
@@ -404,7 +445,7 @@ class TestMailClassify(JobhuntBase):
         msg = self._msg({"From": "帆软 <s@nowcoder.com>", "Subject": "邀请你参加在线笔试"})
         v, _ = self._classify(conn, 12, msg, {"s@nowcoder.com"})
         self.assertEqual(v["kind"], "lead")
-        self.assertEqual([j for j in store.jd_list(status="new")
+        self.assertEqual([j for j in store.jd_list(status="new")["items"]
                           if "邮件订阅" in (j["source"] or "")], [])
 
     def test_marketing_mail_not_a_lead(self):

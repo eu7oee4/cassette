@@ -66,6 +66,19 @@ def fmt_ts(ts: int) -> str:
     return datetime.fromtimestamp(int(ts), config.APP_TZ).strftime("%m-%d %H:%M")
 
 
+def stamp_str(ts: int) -> str:
+    """epoch → 'MM-dd 周X HH:mm'——**上下文里每条消息的时间锚**，全场一个格式。
+
+    三处共用（2026-09-02 定的口径）：铸造侧给 TA 的话打戳（chat_loop._stamp_times）、
+    醒来注入的抬头（wake_sdk.wake_injection）、游戏泵每 N 轮的报时。长得一样才认得出
+    是同一种东西——重铸之后醒来那条注入只剩这个戳，它得跟活着时候的抬头对得上。
+
+    比 now_str() 短：年份逐条重复零信息，时段词从 24 小时制直接读得出。星期留着——
+    模型从日期反推星期不可靠，而"周末还是工作日"是他判断该不该打扰 TA 的依据。"""
+    d = datetime.fromtimestamp(int(ts), config.APP_TZ)
+    return f"{d.month:02d}-{d.day:02d} 周{_WEEKDAYS_CN[d.weekday()]} {d.hour:02d}:{d.minute:02d}"
+
+
 def fmt_gap(seconds: int) -> str:
     """秒差转人话：不到1分钟 / N分钟 / N小时 / N天。"""
     if seconds < 60:
@@ -661,6 +674,26 @@ def _pet_mcp_config(char_id: Optional[str] = None) -> Path:
     return path
 
 
+BASICS_MCP_TOOLS = ["mcp__basics__now", "mcp__basics__fetch"]
+
+
+def _basics_mcp_config(char_id: Optional[str] = None) -> Path:
+    """渲染基础工具 MCP 的 mcp-config（口径同 _pet_mcp_config）。
+    **无条件挂、无开关**：now 是钟、fetch 是取一份公开资料，三个场景都该够得着
+    （2026-09-02 定：他一轮跑到中途没有任何办法知道几点，那是核实纪律的地基漏了）。"""
+    me = (char_id or state_store.DEFAULT_CHAR_ID)
+    path = state_store.char_state_dir(char_id) / "basics.mcp.json"
+    payload = json.dumps({"mcpServers": {"basics": {
+        "type": "stdio", "command": sys.executable,
+        "args": [str(config.BASE_DIR / "basics_mcp.py")],
+        "env": {"CASSETTE_CHAR_ID": me}}}})
+    if not path.exists() or path.read_text("utf-8") != payload:
+        tmp = path.with_name(f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+        tmp.write_text(payload, "utf-8")
+        tmp.replace(path)
+    return path
+
+
 # skill 库（PLAN_skills S0）：方法层文件树的渐进披露。内置不走插件商店（同宠物 MCP），
 # 挂载条件是「这个场景有可见的 skill」——library 空着整个不挂，工具不出现、索引不渲染。
 # 按 context 过滤和菜单块同判据：都问 skills.list_skills(context)，不会出现「工具挂了
@@ -757,7 +790,7 @@ def mounted_tool_names(context: str = "chat", char_id: Optional[str] = None) -> 
     口径必须和 base_claude_args 一致——菜单按它过滤，对不上就会跟 TA 提不在场的能力。
     不复用 base_claude_args 的返回值是因为那边还要拼参数、且引擎不对时会抛。"""
     import plugins
-    names: list[str] = []
+    names: list[str] = list(BASICS_MCP_TOOLS)   # 无条件挂（钟 + 取公开资料）
     if ombre_alive(char_id):
         names += OMBRE_TOOLS
     _, plug_tools = plugins.mounted(context, char_id)
@@ -924,8 +957,8 @@ def base_claude_args(persona_file: Optional[Path] = None,
         "--model", config.MODEL,
         "--system-prompt-file", str(persona_file or rendered_persona(char_id)),
     ]
-    mcp_configs: list[str] = []
-    tools: list[str] = []
+    mcp_configs: list[str] = [str(_basics_mcp_config(char_id))]
+    tools: list[str] = list(BASICS_MCP_TOOLS)
     if ombre_alive(char_id):
         mcp_configs.append(str(_ombre_mcp_config(char_id)))
         tools += OMBRE_TOOLS

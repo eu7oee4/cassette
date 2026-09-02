@@ -105,10 +105,26 @@ def maybe_auto(cid: str, now: Optional[float] = None) -> bool:
 
 # ---------- 注入（感知白描，执行开始时组装）----------
 
+def wake_headline(trigger: str) -> str:
+    """醒来抬头第一句——点明「这一轮没有人找你」，这类轮和聊天轮唯一的实质区别。
+    活注入（下面 wake_injection）和重铸补锚（chat_loop._stamp_times 按 ts 精确
+    对上 wake_log 后还原）共用这一个字面：两边长得一样，他才认得出是同一种东西。"""
+    if trigger == "scheduled":
+        return "这个点是你自己钉下要醒的。"
+    if trigger == "mail":
+        # 硬触发不是"自己醒的"，别把外面推的一下说成自发（note 里写是什么事）。
+        return f"{config.user_name()}没找你，是外面有动静把你叫起来了。"
+    return f"{config.user_name()}没找你，你自己醒过来了。"
+
+
 def wake_injection(cid: str, trigger: str, note: str = "") -> str:
+    """抬头用 pipeline.stamp_str 的统一格式（2026-09-02）：**重铸之后这条注入整条
+    蒸发，戳和第一句由 chat_loop._stamp_times 补回来**——投递消息的 ts 就是
+    started_ts、和 wake_log 条目同值，锚点按 ts 对上就还原 wake_headline 同一句；
+    只有对不上的槽（游戏 tick）才补光秃秃的时间戳。"""
     now_ts = int(time.time())
     window = state_store.read_recent_window(cid)
-    line = f"〔现在是 {pipeline.now_str()}。"
+    line = f"【{pipeline.stamp_str(now_ts)}】\n〔" + wake_headline(trigger)
     last_ts = next((int(m["ts"]) for m in reversed(window) if m.get("ts")), 0)
     if last_ts and now_ts > last_ts:
         line += f"距上一条消息过了 {pipeline.fmt_gap(now_ts - last_ts)}。"
@@ -118,8 +134,8 @@ def wake_injection(cid: str, trigger: str, note: str = "") -> str:
     if trigger == "scheduled":
         # NEXT 是他主动给自己留话的口——按感知语气渲染成他自己的念头（§5.2）。
         todo = (state_store.read_schedule(cid).get("next_wake_todo") or "").strip()
-        line += (f"\n〔你之前想着这会儿要：{todo}〕" if todo
-                 else "\n〔这个点是你之前自己定下要醒的〕")
+        if todo:
+            line += f"\n〔你自己留下的字条：{todo}〕"
     return line
 
 
