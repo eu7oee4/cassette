@@ -1370,8 +1370,8 @@ struct ContentView: View {
         if allow {
             let what = card.summary ?? card.tool
             let brief = what.count > 30 ? String(what.prefix(30)) + "…" : what
-            // 批是机主批的 → senderID 归 user（无 logo 的素小字）；工具名保持裸名（§7.2）
-            chatStore.appendMemoryNote("批了 \(card.tool)：\(brief)", senderID: "user")
+            // 批完留痕：人物 logo + 裸工具名 + 摘要（§7.2 裸名；logo 是发起申请的角色）
+            chatStore.appendMemoryNote("\(card.tool)：\(brief)", senderID: card.char ?? currentCharID)
         }
         Task {
             do { try await chatService.decidePermit(id: card.id, allow: allow, reason: reason) }

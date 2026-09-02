@@ -1,7 +1,7 @@
 import SwiftUI
 
 /// 聊天页整套色 token（PLAN_chatui §1.1）：浅/深各显式一份，深浅切换整套换。
-/// bg 目前仍取系统语义色（观感与从前一致）；背景图 bgImage/bgImageDim 是 U6 的活。
+/// bg 浅色=白（机主 09-01 拍），深色仍取系统语义色；背景图 bgImage/bgImageDim 是 U6 的活。
 struct ChatPalette {
     let bg: Color            // 聊天流背景
     let bubbleAI: Color      // AI 气泡统一灰底（§3.1，跟是哪个角色无关）
@@ -12,15 +12,15 @@ struct ChatPalette {
 
 extension ChatPalette {
     static let light = ChatPalette(
-        bg: Color(uiColor: .systemGroupedBackground),
-        bubbleAI: Color(uiColor: .systemGray5),
+        bg: Color(hex: 0xFFFFFF),
+        bubbleAI: Color(hex: 0xE9E9EB),
         textOnDark: .white,
         textOnLight: .black,
         theme: Color(hex: 0x352526)
     )
     static let dark = ChatPalette(
         bg: Color(uiColor: .systemGroupedBackground),
-        bubbleAI: Color(uiColor: .systemGray5),
+        bubbleAI: Color(hex: 0xE9E9EB),
         textOnDark: .white,
         textOnLight: .black,
         theme: Color(hex: 0x352526)
@@ -116,28 +116,29 @@ extension HousePalette {
 
 /// 角色识别色：「谁说的」一眼可辨——名字、头像描边、默认头像、染色底都从这儿查。
 /// 与主题解耦（换主题不换身份色）；新角色没配就按 id 哈希出一套稳定色。
-/// light/dark 两身是 2026-09-01 的第一版（base 掺 40% 白 / 掺 25% 黑），看效果再调。
+/// base/light/dark 由机主 09-01 拍定（user AC7F5E/FDEBEB/8C6E6E，
+/// cass CB4C09/F0FCD9/420217，default 7FA8C9/B2CBDE/303030——default 的 light 仍是掺白第一版）。
 enum IdentityColor {
     static func palette(for entityID: String) -> CharPalette {
         switch entityID {
         case "user":            // 眠眠：玫瑰
-            return CharPalette(base: Color(hex: 0xB86166),
-                               light: Color(hex: 0xD4A0A3),
-                               dark: Color(hex: 0x8A494D),
-                               bullet: Color(hex: 0xB86166),
+            return CharPalette(base: Color(hex: 0xAC7F5E),
+                               light: Color(hex: 0xFDEBEB),
+                               dark: Color(hex: 0x8C6E6E),
+                               bullet: Color(hex: 0xAC7F5E),
                                logo: "")                    // 机主的符号待定（§8）
         case "default":         // 小卡：雾蓝
             return CharPalette(base: Color(hex: 0x7FA8C9),
                                light: Color(hex: 0xB2CBDE),
-                               dark: Color(hex: 0x5F7E97),
+                               dark: Color(hex: 0x303030),
                                bullet: Color(hex: 0x7FA8C9),
                                logo: "",
                                logoSymbol: "pawprint.fill")
         case "cass":            // Cassius：琥珀
-            return CharPalette(base: Color(hex: 0xC9A15B),
-                               light: Color(hex: 0xDFC79D),
-                               dark: Color(hex: 0x977944),
-                               bullet: Color(hex: 0xC9A15B),
+            return CharPalette(base: Color(hex: 0xCB4C09),
+                               light: Color(hex: 0xF0FCD9),
+                               dark: Color(hex: 0x420217),
+                               bullet: Color(hex: 0xCB4C09),
                                logo: "✦")
         default:
             var h = 0
@@ -162,10 +163,10 @@ extension Color {
     /// 链接/默认头像；主题色 theme 另存在 ChatPalette 里，暂时无处可用）。
     static var userAccent: Color { IdentityColor.palette(for: "user").base }
 
-    /// 小字提醒/「正在思考」的固定灰（§3.4）：不随深浅模式换值——它直接坐在背景上，
-    /// 要在浅深两种背景和自定义背景图（蒙版兜底）上都读得清。第一版取中性灰，
-    /// 具体值 §8.A 待机主拍（拍板前提是别用 .secondary——那会跟着系统漂）。
-    static let noteGray = Color(hex: 0x8A8A8E)
+    /// 小字提醒/「正在思考」/系统消息的固定灰（§3.4/§3.9）：不随深浅模式换值——
+    /// 它直接坐在背景上，要在浅深两种背景和自定义背景图（蒙版兜底）上都读得清。
+    /// 机主 09-01 拍定 #828282（别用 .secondary——那会跟着系统漂）。
+    static let noteGray = Color(hex: 0x828282)
 
     /// 0xRRGGBB 十六进制建色。
     init(hex: UInt) {

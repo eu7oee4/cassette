@@ -55,7 +55,8 @@ struct PermitCardView: View {
                             in: RoundedRectangle(cornerRadius: 12, style: .continuous))
             }
             if !expired {
-                TextField("不批的话，想说一句吗（可空）", text: $reason)
+                TextField("", text: $reason,
+                          prompt: Text("不批的话，想说一句吗（可空）").foregroundStyle(ink.opacity(0.55)))
                     .font(.caption)
                     .padding(.horizontal, 10).padding(.vertical, 7)
                     .background(ink.opacity(0.10),

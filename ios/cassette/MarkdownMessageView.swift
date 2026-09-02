@@ -58,11 +58,12 @@ struct MarkdownMessageView: View {
                 ForegroundColor(base.opacity(0.5))
             }
             .code {
-                // 行内码：炭黑实底 + 浅字，固定不变——不随深浅模式、不随人物色（§3.1）。
+                // 行内码：自适应——灰底比 AI 气泡（systemGray5）深一度 = systemGray4，
+                // 字色跟正文 .primary（浅色模式黑字、深色模式白字）。
                 FontFamilyVariant(.monospaced)
                 FontSize(.em(0.88))
-                ForegroundColor(Color(hex: 0xE6E6E6))
-                BackgroundColor(Color(hex: 0x2E2F33))
+                ForegroundColor(.primary)
+                BackgroundColor(Color(uiColor: .systemGray4))
             }
             .codeBlock { configuration in
                 CodeBlockView(configuration: configuration)

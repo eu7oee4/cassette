@@ -157,7 +157,8 @@ struct QuestionCardView: View {
     /// 自定义答案（§5.2：功能同 Claude 原生，UI 自己做）。
     private func customRow(_ q: QuestionCard.Question) -> some View {
         HStack(spacing: 6) {
-            TextField("自己写一个…", text: $custom)
+            TextField("", text: $custom,
+                      prompt: Text("自己写一个…").foregroundStyle(ink.opacity(0.55)))
                 .font(.subheadline)
                 .focused($customFocused)
                 .padding(.horizontal, 10).padding(.vertical, 7)

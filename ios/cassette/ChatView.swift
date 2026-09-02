@@ -518,7 +518,7 @@ private struct SystemMessageRow: View {
     var body: some View {
         Text("——\(text)——")
             .font(.caption)
-            .foregroundStyle(.secondary)
+            .foregroundStyle(Color.noteGray)
             .frame(maxWidth: .infinity, alignment: .center)
             .padding(.vertical, 2)
     }
