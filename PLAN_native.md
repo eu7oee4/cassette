@@ -370,7 +370,7 @@ game profile 对 code_bridge 的依赖面（第二批拆前必核）。
 
 ---
 
-## 12. 时间感补线（2026-09-02 施工记录，已 commit `e53f66f`，未重启未上电）
+## 12. 时间感补线（2026-09-02 施工记录，`e53f66f`，**09-02 20:15 已重启上电**）
 
 起因是一句话：Cassius 09-02 **14:07** 开口说「**昨天**我猜滚动窗口」——那句是他
 **14:03** 说的，隔三分半，同一场对话没断过。往下扒出来一串，全在同一个根上。
@@ -543,7 +543,111 @@ ts 没往前走的是编辑）。
 | **「距离上一条消息，过了 X」** | 每条消息都带时间之后它冗余了，机主提过要删。**我留着了**，理由：让模型自己做「08-31 15:46 → 09-02 14:06」这道减法，正是这次翻车的动作；一行的成本换一个「绝对时间 + 算好的间隔」互相对表的机会。**待机主拍。** |
 | **jobhunt 插件壳没进库** | `server/plugins/` 整个在 gitignore（插件从各自的仓 clone）。`jd_list` 的 `q` 参数和「这是一页不是全库、truncated 为真时列表里没有 ≠ 库里没有」那段工具说明**只在本地文件**——后端进库了，壳没有，丢了就退回没有 `q`。要正式发得去 `cassette-plugin-jobhunt` 那个仓提。 |
 
-**状态：512 测试全绿，`e53f66f` 已 commit，未 push、未重启、未上电。**
-重启后会发生：两个角色 session 各重铸一次（铸造材料变了 → sid 变），那次缓存前缀
-作废；`basics` MCP 开始起子进程；`jd_list` 返回体变 dict（iOS 走 `?limit=300`
-只解 `items`，不受影响）。
+**状态：512 测试全绿，`e53f66f` 已 commit（未 push）。**
+**09-02 20:15 重启上电**（旧 PID 54007 → 新 24079，kill+起同一条命令）。
+起来后即时验过 HTTP 面：`jd_list` 返回 `total:33 / shown:5 / truncated:true` 带 hint、
+`?q=1688` 命中 2 条。**真机验收清单见 §12.9，一条都还没跑。**
+
+### 12.9 真机验收清单（上电后待跑）
+
+按「看得见 → 看不见」排，前四条是这一批的正主：
+
+| # | 怎么试 | 该看到什么 | 挂了说明 |
+|---|---|---|---|
+| 1 | **给他发一张图 + 一句话**，等他回完，随便再说一句 | 后端日志**不出现**「重铸」那行 | `absorbable_tail` 没吃到——看日志里 `dirty_reason` 说的是什么 |
+| 2 | 接上条，**过一会儿等一次重铸之后**问他「我刚才发的那张图是什么」 | 他描述得出图的内容 | 图没进 user 槽：查 `state/characters/<cid>/chat_images/index.jsonl` 有没有那条 |
+| 3 | 隔几小时（让他自己醒来一两次）之后问「你上一条消息是什么时候发的 / 你最近一次自己醒来是几点、定点还是自己想起来的」 | 答得出时刻，且分得清 auto/scheduled | 锚点没补上：`ts` join 对不上 wake_log（查 `wake_log.jsonl` 那条的 `ts` 和 `recent_window` 里投递消息的 `ts` 是不是同值） |
+| 4 | 问他「现在几点」 | 他调 `mcp__basics__now`（app 小字会显示裸工具名 `mcp_now`） | `basics` MCP 没挂：看 nohup.out 有没有 stdio 起子进程报错 |
+| 5 | 让他查一份公开资料（比如某个官方文档页） | 走 `mcp_fetch` 回正文，不起 Chrome | SSRF 闸误伤：报错文案会说解析到哪个内网地址 |
+| 6 | 让他「查一下库里有没有 1688 那个岗」 | 一次 `jd_list(q=...)` 就答，且答**在库里 76 分** | 还在翻页猜=菜单/工具说明没生效（插件壳那份没进库，见 §12.8） |
+| 7 | 小卡那边开一次剧情游戏 | ⚠️ **预期会失败**——`_game_capable` 还在问 `owner_of("tmux")`，归属在 Cassius | 这是已知口子，归 §13 一起修 |
+| 8 | 聊天页顶栏右上角 | ⚠️ `</>` 按钮**还在**（code 没拆）；小卡点会吃 409 | 同上，归 §13 |
+
+**顺带盯两处日志**（`server/nohup.out`）：
+- `[chat_loop] 重铸（char=…）：<原因>` —— 现在会说原因了，看它说的和你做的事对不对得上
+- `[chat_loop] 吸收窗口尾巴（char=…）：N 条图片占位进账，不重铸` —— 第 1 条该出现这行
+
+---
+
+## 13. 拆除 code 模式（2026-09-02 立，未动工）
+
+**机主已拍板：拆，且 `STORY_ENGINE=tmux` 那条游戏回退路一起退役。**
+
+### 13.1 拆之前先纠正一个误判
+
+09-02 我一度以为「code 会话已经不存在了」，据此删了 `EXCLUSIVE`/`RESOURCE_LABEL`
+里的 `tmux`。**实测它是活的**，链子每一环都通：
+
+```
+.env  CODE_MODE_ENABLED=1          which tmux → 装着（还挂着一个 7/29 起的 cc 会话）
+GET /code/status → enabled:True, tmux:True
+ContentView:848  codeAvailable = st.enabled && st.tmux        → True
+ContentView:684  if codeAvailable || gameMine { codeToggle }  → 按钮渲染
+ContentView:814  codeStart() → POST /code/start → code_bridge.start() → 真 spawn tmux+claude
+```
+
+U5（`900acd6`）删的是**终端面板**（`CodeTerminalPanel.swift` 545 行），它自己的
+commit message 就写着「`sessionMode` 和 `/code/send` 消息改道不动——那归 native §9
+第二批」。**入口按钮从来没删。** 看着像没了，是因为没人再点。
+
+**当前副作用（拆完自然消失，拆之前别慌）**：`set_owner("tmux")` 现在 400、app 归属页
+不再显示「电脑上的会话」→ 归属被冻在 `cass`，小卡点那颗按钮会吃 409。
+⚠️ **`state/plugin_owners.json` 里的 `{"tmux": "cass"}` 在拆完之前不能删**——
+`owner_of` 表里没有就兜底默认角色，而 `code_bridge.start()` 是「杀旧起新」：
+Cassius 正开着的活会被无声掐掉，新会话的人设/记忆/聊天框全挂到小卡名下。
+
+### 13.2 核心难点：`code_bridge` 是两件事挤在一个文件里
+
+**不能整删**——游戏借了同一套会话基建。按调用面统计：
+
+| 出口 | 用量 | 归谁 |
+|---|---|---|
+| `sdk_loop_handle` | 18 | **游戏**（探 session_mgr 的 `"computer"` 独占组） |
+| `is_busy` | 6 | **游戏**（抓两帧画面比对） |
+| `session_alive` / `session_char` / `active_profile` | 11/8/5 | **混的**（tmux 半边归 code，sdk_loop 半边归游戏） |
+| `start` / `send` / `send_keys` / `capture` / `dialog_pending` / `stop` / `_build_system` / `require_enabled` / `tmux_available` / `save_uploads` / `save_files` / `_read_session_state` / `session_started_at` | — | **纯 code** |
+
+**拆法是劈开不是删除**：tmux 半边整删；`sdk_loop_handle` / `is_busy` 这类游戏还要的
+搬去 `game_bridge.py`（已存在）或直接由 `session_mgr` 出口；`code_bridge.py` 消失。
+`session_alive`/`session_char`/`active_profile` 三个混血函数拆完只剩游戏语义，
+**跟着改名**（别留一个叫 `active_profile` 却只可能返回 "game" 的东西）。
+
+### 13.3 拆迁清单
+
+**后端**
+- `code_bridge.py` — 劈开（见 13.2），文件消失
+- `app.py` 路由整排：`/code/status` `/code/start` `/code/send` `/code/stop`
+  `/code/capture` `/code/keys` `/code/append` `/codemode/start`
+- `app.py` 辅助：`CODE_HISTORY_CAP` `_require_code` `_code_context`
+  `_code_mcp_configs` `_code_session_char`
+- `app.py` `_game_story_start_tmux` 整个 + `_game_session_mcp_config`
+  （`STORY_ENGINE=tmux` 回退路退役，机主已拍）；`STORY_ENGINE` 只剩 `unified`/`sdk`
+- `plugins.py`：`NO_WAKE_PLUGINS = {"codemode"}`、REGISTRY 的 codemode 条目
+  （`EXCLUSIVE`/`RESOURCE_LABEL` 的 tmux 09-02 已删，不用再动）
+- `config.py`：`CODE_MODE_ENABLED` `CODE_CWD`；`.env` 两行
+- `wake.py` / `cohabit.py`：09-02 已改成只探游戏，跟着搬家换 import
+- **游戏侧四处判据改问如鸢账号**（现在还在问 tmux，是 09-02 留下的口子）：
+  `chat_loop.py:405` `_game_capable`、`app.py` `/game/story/start` 三处
+  → `owner_of("tmux")` → `owner_of("maayuan")`
+- `state/plugin_owners.json` 删 `tmux` 键（**最后一步**，见 13.1）
+
+**iOS**
+- `ContentView.swift`：`toggleCodeMode` `codeToggle` `codeAvailable` `codeOwner`
+  `codeOwnerName` `codeMode` `codeSwitching` `codeMine` `syncCodeMode` 的 code 半边、
+  `exitSession` `confirmStopBusy`（63 处引用）
+- `ChatService.swift`：`codeStatus` `codeStart` `codeSend` `codeStop` `codeCapture`
+  `codeKeys`
+- ⚠️ **`sessionMode` 和消息改道是雷**：U5 特意留的，游戏会话现在也走它判「消息发去
+  哪」。动它必须和游戏的投递口同一批确认，别顺手删。
+
+**插件仓**
+- `cassette-plugin-codemode` 下架：REGISTRY 摘掉 + 两个角色 `plugins_enabled.json` 关掉
+
+### 13.4 拆完的验收
+
+- 两个角色聊天页顶栏**不再有 `</>` 按钮**；游戏会话活着时手柄按钮照常（那半边不动）
+- 小卡能开剧情游戏（`_game_capable` 改问 maayuan 之后）
+- `/game/story/start` 起的会话归属是**如鸢账号的主人**，不是 tmux 的
+- 全套测试绿 + `test_static_names` 无 undefined name（删引用链最容易漏的一类）
+
+---
