@@ -439,6 +439,9 @@ def build_options(char_id: str, catalog: Optional[list] = None,
     sb = pipeline.sticker_block(catalog)
     if sb:
         parts.append(sb)
+    # 禁空头承诺那条二选一（§14.2，09-04 从每轮注入挪来）。**排在最尾**是有意的：
+    # 它是离新消息最近的一句，也是被淹掉就等于没有的那一句（one_turn_hint 的复盘）。
+    parts.append(pipeline.one_turn_hint("chat_session"))
     system = "\n\n".join(p for p in parts if p)
 
     servers: dict = {}
@@ -550,20 +553,29 @@ def build_options(char_id: str, catalog: Optional[list] = None,
 
 def build_injection(messages, char_id: Optional[str],
                     extra_hints: Optional[list[str]] = None) -> str:
-    """一轮的包装文本：叮嘱+待办+时间感+新消息。口径抄 build_prompt 的易变段——
-    历史不在这儿（历史活在 transcript 里，这正是整个迁移的意义）。"""
+    """一轮的包装文本：时间感 + 手上有什么 + 新消息。口径抄 build_prompt 的易变段——
+    历史不在这儿（历史活在 transcript 里，这正是整个迁移的意义）。
+
+    **注入瘦身（PLAN_native §14.2，09-04）**：留下的三样——几点、隔了多久、
+    手上有什么——**全是知觉材料**，没有一句是「关于他的说明」。规矩（禁空头承诺
+    那条二选一）挪进了系统提示付一次，用法归工具 schema——原来那段
+    `one_turn_hint("chat_session")` 是**和系统提示重复的第二份**，每轮白付。
+    这正是下面 :1605 那条纪律要的形状，别往回加。
+
+    时间头用 `stamp_str` 不用 `now_str`（不带时段词）：和 `wake_sdk.wake_injection`
+    的抬头、和 `_stamp_times` 重铸时补的锚行**天然同形**，他才认得出是同一种东西。"""
     import pipeline
     last = messages[-1]
     lines = [h for h in (extra_hints or []) if h]
-    lines.append(pipeline.one_turn_hint("chat_session"))
-    pending = pipeline.pending_todo_block(char_id)
-    if pending:
-        lines.append(pending)
-    lines.append("")
-    lines.append(f"【现在是 {pipeline.now_str()}】")
+    if lines:
+        lines.append("")   # 有叮嘱才空一行；没有就别拿空行开头
+    lines.append(f"【{pipeline.stamp_str(int(time.time()))}】")
     gap = pipeline.gap_before_last(messages)
     if gap:
         lines.append(f"【距离上一条消息，过了 {gap}】")
+    pending = pipeline.pending_todo_block(char_id)
+    if pending:
+        lines.append(pending)
     lines.append("")
     lines.append("【回下面这条。按这句的份量和情绪回：随口就随口，别硬凑长，"
                  "一句话或一个词也可以。】")

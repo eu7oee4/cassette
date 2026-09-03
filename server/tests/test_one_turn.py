@@ -119,11 +119,14 @@ class TestPendingTodoBlock(StateBase):
     又写了一句 [[next_wake:8小时]]，单槽位无条件覆盖 → 22:59 当场作废、看着像闹钟没响。
     钟没配待办时旧版整块不出现，等于让他闭着眼睛顶掉自己的承诺。"""
 
+    # ⚠️ 09-04（§14.2）之后**两套措辞**：SDK 常驻路（kind != "wake"）＝一行状态行、
+    # 纯知觉材料、一句规矩都不带（规矩挪进系统提示付一次）；-p 熄火回退路
+    # （kind == "wake"）＝原文照旧（那条路没有系统提示可付）。
+
     def test_future_clock_is_announced_even_without_todo(self):
         state_store.write_schedule({"next_wake_at": int(time.time()) + 7200}, self.cid)
         block = pipeline.pending_todo_block(self.cid)
-        self.assertIn("钉着一个钟", block)        # ← 没待办也得报，这条就是那次覆盖
-        self.assertIn("挪到新时间", block)         # 再写一次是改钟，不是加钟
+        self.assertIn("下一次醒来的闹钟", block)   # ← 没待办也得报，这条就是那次覆盖
 
     def test_nothing_pinned_is_empty(self):
         state_store.write_schedule({}, self.cid)
@@ -133,24 +136,38 @@ class TestPendingTodoBlock(StateBase):
         self.set_todo("给安瞬回信")               # 默认钟点在一小时后
         block = pipeline.pending_todo_block(self.cid)
         self.assertIn("给安瞬回信", block)
-        self.assertIn("钉着一个钟", block)
+        self.assertIn("下一次醒来的闹钟", block)
 
-    def test_marker_wording_forks_by_scene(self):
-        # 09-03（PLAN_native §14.1）：聊天那支从 [[next_wake:]] 标记改指工具。
-        # 标记降级只读兼容——还认得，但 prompt 一个字都不教（拍板三：不能两条路并存）。
+    def test_session_state_line_is_perception_only(self):
+        """§14.2 的整个要点：状态行只报「手上有什么」，一句规矩都不带。
+        规矩每轮重付一遍正是被砍掉的那份；「钟只有一个」归工具 schema 和回执
+        （回执是在他动手那一刻报的，比任何静态句子准）。"""
         self.set_todo("给安瞬回信")
-        chat = pipeline.pending_todo_block(self.cid)
-        self.assertIn("next_wake", chat)
-        self.assertNotIn("[[next_wake", chat)
-        self.assertIn("NEXT", pipeline.pending_todo_block(self.cid, kind="wake"))
+        block = pipeline.pending_todo_block(self.cid)
+        self.assertEqual(block.count("\n"), 0, "状态行就该是一行")
+        for rule in ("钟只有一个", "挪到新时间", "要么", "别默默留着", "action="):
+            self.assertNotIn(rule, block, f"状态行里混进了规矩：{rule}")
+
+    def test_wake_fallback_keeps_the_verbose_form(self):
+        """-p 熄火回退路没有系统提示可付，规矩只能跟着注入走——顺手改它
+        等于在改一条正在当降级兜底用的路。"""
+        self.set_todo("给安瞬回信")
+        block = pipeline.pending_todo_block(self.cid, kind="wake")
+        self.assertIn("钉着一个钟", block)
+        self.assertIn("NEXT", block)
+        self.assertIn("钟只有一个", block)
 
     def test_due_clock_reads_as_this_is_that_next_turn(self):
-        # 到点那轮（钟还没被 finish_wake_turn 消费）：口径不变，递的是活不是钟点
+        # 到点那轮（钟还没被 finish_wake_turn 消费）。措辞不许暗示他失约
+        # （§14.3 口径：清槽是机制干的、不看他做没做）。
         self.set_todo("给安瞬回信", at=int(time.time()) - 10)
         block = pipeline.pending_todo_block(self.cid)
         self.assertIn("给安瞬回信", block)
-        self.assertIn("上一轮", block)
-        self.assertNotIn("钉着一个钟", block)
+        self.assertIn("闹钟到点了", block)
+        for blame in ("失约", "忘了", "食言"):
+            self.assertNotIn(blame, block)
+        # 老路那支照旧
+        self.assertIn("上一轮", pipeline.pending_todo_block(self.cid, kind="wake"))
 
     def test_due_clock_without_todo_is_empty(self):
         state_store.write_schedule({"next_wake_at": int(time.time()) - 10}, self.cid)
@@ -163,6 +180,55 @@ class TestPendingTodoBlock(StateBase):
             self.assertEqual(pipeline.pending_todo_block(self.cid), "")
         finally:
             state_store.read_schedule = orig
+
+
+class TestInjectionIsPerceptionOnly(StateBase):
+    """注入瘦身（PLAN_native §14.2，09-04）：每轮注入只剩**知觉材料**——
+    几点、隔了多久、手上有什么。一句「关于他的说明」都没有。
+
+    这条锁的是 chat_loop.py 那条纪律（「别往这儿加新的二手档案块」）的另一半：
+    规矩和用法**付一次**（系统提示 / 工具 schema），不是每轮重付。"""
+
+    def _inject(self):
+        import chat_loop
+        M = pipeline.Message
+        now = int(time.time())
+        return chat_loop.build_injection(
+            [M(role="user", text="早", ts=now - 3480),
+             M(role="user", text="在忙什么", ts=now)], self.cid)
+
+    def test_no_rules_no_usage(self):
+        self.set_todo("给安瞬回信")
+        inj = self._inject()
+        for banned in ("①", "②", "别把这件事说出口",      # 规矩 → 系统提示
+                       "action=", "minutes", "[[next_wake",  # 用法 → 工具 schema
+                       "钟只有一个", "挪到新时间"):
+            self.assertNotIn(banned, inj, f"注入里混进了「{banned}」——那是付过一次的")
+
+    def test_keeps_the_three_perceptions(self):
+        self.set_todo("给安瞬回信")
+        inj = self._inject()
+        self.assertIn("距离上一条消息", inj)              # 隔了多久
+        self.assertIn("下一次醒来的闹钟", inj)            # 手上有什么
+        self.assertIn("给安瞬回信", inj)
+        self.assertRegex(inj, r"【\d{2}-\d{2} 周. \d{2}:\d{2}】")   # 几点
+
+    def test_time_head_has_no_daypart_word(self):
+        """时间头用 stamp_str 不用 now_str：和 wake_injection 的抬头、和
+        _stamp_times 重铸时补的锚行**天然同形**，他才认得出是同一种东西。"""
+        inj = self._inject()
+        self.assertNotIn("现在是", inj)
+        for daypart in ("凌晨", "早上", "上午", "中午", "下午", "晚上", "深夜"):
+            self.assertNotIn(daypart, inj)
+
+    def test_no_leading_blank_line(self):
+        self.assertFalse(self._inject().startswith("\n"))
+
+    def test_stays_small(self):
+        """379 → 143 字（plan 的实测数）。留个宽松上限当哨兵：这儿再长回去，
+        多半是又有人把说明性文本塞进了每轮注入。"""
+        self.set_todo("给安瞬回信，回完更新名册")
+        self.assertLess(len(self._inject()), 200)
 
 
 class TestOneTurnHint(unittest.TestCase):
@@ -193,16 +259,20 @@ class TestOneTurnHint(unittest.TestCase):
             self.assertIn("②", h)
             self.assertIn("别把这件事说出口", h)
 
-    def test_session_variant_usage_only(self):
-        """SDK 常驻路（机主 08-30 拍板）：只留 next_wake 用法，
-        「你只有这一轮/进程结束/这轮那轮」的存在论解释全删。"""
+    def test_session_variant_is_the_discipline_not_the_usage(self):
+        """SDK 常驻路这一支 09-04（§14.2）从每轮注入挪进了**系统提示**，
+        同时删掉用法半句——用法归工具 schema（那儿写得比这儿全），这里只剩纪律。
+        「你只有这一轮/进程结束」的存在论解释照旧全删（机主 08-30 拍板）。"""
         h = pipeline.one_turn_hint("chat_session")
         self.assertIn("next_wake", h)
-        self.assertNotIn("[[next_wake", h)   # 09-03（§14.1）：用法归工具 schema
+        self.assertNotIn("[[next_wake", h)   # 09-03（§14.1）：标记不再教
+        self.assertNotIn("action=", h)       # 09-04（§14.2）：用法归 schema
+        self.assertNotIn("minutes", h)
         self.assertNotIn("只有这一轮", h)
         self.assertNotIn("进程", h)
-        self.assertNotIn("这轮", h)
-        self.assertNotIn("①", h)
+        self.assertIn("①", h)
+        self.assertIn("②", h)
+        self.assertIn("别把这件事说出口", h)
 
 
 class TestWakeOutputTodo(StateBase):

@@ -268,19 +268,27 @@ class TestPromptsStoppedTeachingTheMarker(unittest.TestCase):
         self.assertEqual(todo, "读第 2 封信")
 
 
-class TestPendingBlockPointsAtTheTool(ToolBase):
-    def test_future_clock_tells_him_how_to_move_it(self):
+class TestPendingBlockIsPerceptionOnly(ToolBase):
+    """§14.2（09-04）之后状态行只报「手上有什么」——怎么改钟归工具 schema，
+    「钟只有一个」归回执。以前这块每轮都注一遍规矩，那是同一条的第三份。"""
+
+    def test_future_clock_is_one_line_of_facts(self):
         _call(action="set", minutes=120, todo="给安瞬回信")
         b = pipeline.pending_todo_block("default")
-        self.assertIn("next_wake", b)
+        self.assertIn("下一次醒来的闹钟", b)
+        self.assertIn("给安瞬回信", b)
         self.assertNotIn("[[next_wake", b)
+        self.assertNotIn("action=", b)      # 用法不在这儿
+        self.assertNotIn("钟只有一个", b)    # 规矩也不在这儿
 
-    def test_due_todo_offers_clear(self):
+    def test_due_clock_does_not_blame_him(self):
         state_store.write_schedule(
             {"next_wake_at": int(time.time()) - 10, "next_wake_todo": "给安瞬回信"},
             "default")
         b = pipeline.pending_todo_block("default")
-        self.assertIn("clear", b)                       # 撤得掉了，不用再求机主清
+        self.assertIn("闹钟到点了", b)
+        self.assertIn("给安瞬回信", b)
+        # -p 熄火回退路照旧带规矩（那条路没有系统提示可付）
         self.assertIn("明说一句", pipeline.pending_todo_block("default", kind="wake"))
 
 
