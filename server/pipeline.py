@@ -319,6 +319,12 @@ def split_wake_stickers(content: str, handle_to_id: dict) -> tuple[str, list, st
 NEXT_MIN_MIN = 5     # 模型自定下次醒来的下限（分钟）
 NEXT_MAX_MIN = 720   # 上限 12 小时
 
+# ⚠️ 2026-09-03（PLAN_native §14.1）：定钟的**正路已经是工具**
+# （mcp__basics__next_wake）。下面这套 [[next_wake:]] 标记降级成**只读兼容**——
+# 还认、还剥，但三个场景的 prompt 一个字都不教了。理由是 §14.0 那次事故：
+# 控制指令写在自然语言正文里，解析器分不出「说」和「做」，模型复述一次自己的
+# 注入就把钟改了。工具调用天生分得出——贴一段包含工具调用的文本不会触发工具。
+# 留着解析器是为了老路（-p 醒来的 NEXT: 段、熄火回退）和历史文本，别再往回加教学。
 _CHAT_NEXT_RE = re.compile(r"\[\[\s*(?:next[_\- ]?wake|下次醒来)\s*[:：]\s*(.*?)\]\]", re.I)
 
 # NEXT 里的待办：时间和「下一轮要做什么」用竖线隔开（[[next_wake:1小时|给安瞬回信]]）。
@@ -359,11 +365,27 @@ def pronoun_hint(second_person: bool = True) -> str:
 
 def _chat_next_hint() -> str:
     # 函数不是模块级常量：名字用户随时可改，import 时冻结就换不动了。
-    # 口径必须和 one_turn_hint('chat') 对得上：那条规矩的②就是靠这个标记落地的，
+    # 口径必须和 one_turn_hint('chat') 对得上：那条规矩的②就是靠这个工具落地的，
     # 两处说法不一样，模型会照着更近的那条写。
-    return (f"【可选：如果{config.user_name()}提到要离开/回来/睡觉之类，你可以顺手安排下次主动醒来——"
-            "在回复里写 [[next_wake:多久后]]（范围 5 分钟~12 小时，会被剥掉、对方看不到）；"
-            "要给下一轮留活就写 [[next_wake:多久后|下一轮要做什么]]。没必要就别写。】")
+    # 09-03（§14.1）：语法不写在这儿了——用法归 schema，这句只留**时机**。
+    # 「钟只有一个」也不进系统提示：那是动态事实，回执报得比静态句子准（拍板二）。
+    return (f"【可选：如果{config.user_name()}提到要离开/回来/睡觉之类，你可以顺手安排"
+            f"下次主动醒来——调 next_wake 工具（5 分钟~12 小时）。没必要就别定。】")
+
+
+def clamp_next_minutes(minutes) -> Optional[int]:
+    """分钟数 → 夹进 [NEXT_MIN_MIN, NEXT_MAX_MIN] 的整数；不是个正数就 None。
+
+    工具路（basics_mcp.next_wake）和标记路（parse_next_minutes）**共用这一夹**：
+    小字文案是在 tool_use 那一刻自己按 minutes 算时点的（那时还没有回执），
+    两边夹法不一致，气泡里报的钟点就会和真落盘的差一截。"""
+    try:
+        m = float(minutes)
+    except (TypeError, ValueError):
+        return None
+    if m <= 0:
+        return None
+    return max(NEXT_MIN_MIN, min(NEXT_MAX_MIN, int(round(m))))
 
 
 def parse_next_minutes(section: str) -> Optional[int]:
@@ -381,7 +403,18 @@ def parse_next_minutes(section: str) -> Optional[int]:
         if not m:
             return None
         mins = float(m.group(1))
-    return max(NEXT_MIN_MIN, min(NEXT_MAX_MIN, int(round(mins))))
+    return clamp_next_minutes(mins)
+
+
+def alarm_slot_str(at, todo: str = "") -> str:
+    """一个钟渲染成人话：`09-03 00:50「给安瞬回信」`，没配待办就只有时点。
+
+    **一律带日期**（fmt_ts 是 'MM-dd HH:mm'）：回执里只写「23:46」，跨天重铸之后
+    读回来是歧义的（§14.1 拍板一）。工具回执、聊天小字、日志三处共用这一份，
+    机主在三个地方看到的是同一串字。"""
+    s = fmt_ts(int(at))
+    todo = (todo or "").strip()
+    return f"{s}「{todo}」" if todo else s
 
 
 def parse_chat_next(reply: str) -> tuple[str, Optional[int], Optional[str], str]:
@@ -432,30 +465,36 @@ def one_turn_hint(kind: str = "chat") -> str:
     # 返 None → 整条作废），别写真值。2026-09-02 实锤：这里原来的「例：[[next_wake:1小时|
     # 给安瞬回信，回完更新名册]]」被复述了一次，当场改掉了她自己的钟。写在 prompt 里的
     # 可执行例子＝埋在文档里的地雷，引用逃逸只是第二道闸。全文 PLAN_native §14.0。
+    # 09-03（§14.1）：SDK 三条路（chat/chat_session/-p 聊天）改教**工具**，标记一个字
+    # 不提——工具名不是可执行文本，复述它不会触发它。只有 'wake' 还留 NEXT 段：那是
+    # -p 熄火回退路的结构化输出格式，和 parse_wake_output 焊死，且那条 prompt 里没有
+    # 第二种写法可并存（_chat_next_hint 不进 wake_prompt）。
     if kind == "wake":
         how = ("在 NEXT 那段写成「时间 | 下一轮要做什么」，例：\n"
                "   NEXT: 多久后 | 到时候要做什么")
+        what = "竖线后面那句"
     else:
-        how = ("在回复里写 [[next_wake:多久后|下一轮要做什么]]（会被剥掉、对方看不到）")
+        how = "调 next_wake 工具（action=\"set\"，minutes=多久之后，todo=到时候要做什么）"
+        what = "todo 那句"
     if kind == "chat_session":
         # 机主拍板（08-30）：session 路把「这轮那轮」的解释整段删掉，只留用法——
         # 存在感的事不解释，工具的事才写字。
-        return ("【想留到之后做的事，写 [[next_wake:多久后|要做什么]]（会被剥掉、对方看不到）。"
-                "竖线后那句会原样存下来，到点递回给你——写清楚做什么，别写「继续」；"
-                "不带时间就没有钉子。】")
+        return ("【想留到之后做的事，用 next_wake 工具给自己留张字条"
+                "（action=\"set\"，minutes=多久之后，todo=要做什么）。"
+                "todo 那句会原样存下来，到点递回给你——写清楚做什么，别写「继续」。】")
     # 机主拍板（08-30）：「你只有这一轮/进程结束」的存在论开场白全线删掉，
     # 只留机制。禁空头承诺的规矩还在——就是下面这两条本身。
     return ("【要提一件还没做的事，二选一：\n"
             "① 这一轮里就做掉，做完了再开口——工具都在你手上，回复里报结果，别报打算；\n"
             f"② 现在做不完、或者现在不该做 → 钉到下一轮：{how}\n"
-            "   竖线后面那句会原样存下来，到点醒来时递回给你，所以写清楚做什么，别写「继续」。"
+            f"   {what}会原样存下来，到点醒来时递回给你，所以写清楚做什么，别写「继续」。"
             "没有时间就没有钉子——②必须带时间。\n"
             "两个都不选，就别把这件事说出口。】")
 
 
 def pending_todo_block(char_id: Optional[str] = None, kind: str = "chat") -> str:
     """现在钉着的那个钟 + 上一轮给自己留的活（schedule 的 next_wake_at/_todo）。都没有则空串。
-    kind 只管定点写法分叉（'wake'＝老路的 NEXT 段，其余＝[[next_wake:]] 标记），口径同 one_turn_hint。
+    kind 只管定点写法分叉（'wake'＝老路的 NEXT 段，其余＝next_wake 工具），口径同 one_turn_hint。
     读盘失败一律当没有：这是个提醒块，为它把一轮聊天/醒来搞崩不值。
 
     两种形态，按「到点没到」分：
@@ -476,7 +515,8 @@ def pending_todo_block(char_id: Optional[str] = None, kind: str = "chat") -> str
         return ""
 
     if at is not None and at > time.time():
-        how = "在 NEXT 那段重写一个时间" if kind == "wake" else "写 [[next_wake:…]]"
+        how = ("在 NEXT 那段重写一个时间" if kind == "wake"
+               else "调一次 next_wake（action=\"set\"）")   # 前面有个「再」，别写成「再再」
         # 「N 后」不写「还有 N」：fmt_gap 最小档是「不到 1 分钟」，拼成「还有 不到 1 分钟」难看。
         head = f"【你现在钉着一个钟：{fmt_ts(int(at))}（{fmt_gap(int(at - time.time()))}后）"
         head += f"，到点要做的是：「{todo}」\n" if todo else "，没配待办。\n"
@@ -486,9 +526,13 @@ def pending_todo_block(char_id: Optional[str] = None, kind: str = "chat") -> str
 
     if not todo:
         return ""
+    # 「不想做了」以前只能跟机主说一句让人来清（标记路没有取消的写法）——09-03 起
+    # next_wake 有 clear 了，这条是他自己撤得掉的（§14.1 那张表的第三行）。
+    drop = ("明说一句" if kind == "wake"
+            else "调 next_wake（action=\"clear\"）撤掉它")
     return (f"【你上一轮给自己留了活：「{todo}」\n"
             "现在就是那个「下一轮」。要么这一轮里做掉，要么重新钉一次（写清还剩什么没做）；"
-            "不想做了就明说一句，别默默留着——留着它下一轮还会再递给你。】")
+            f"不想做了就{drop}，别默默留着——留着它下一轮还会再递给你。】")
 
 
 # 聊天回复附带的移动（同居世界 C2）：[[move:房间id]]。英文 token 为主（§4 口径），
@@ -720,13 +764,19 @@ def _pet_mcp_config(char_id: Optional[str] = None) -> Path:
     return path
 
 
-BASICS_MCP_TOOLS = ["mcp__basics__now", "mcp__basics__fetch"]
+BASICS_MCP_TOOLS = ["mcp__basics__now", "mcp__basics__fetch",
+                    "mcp__basics__next_wake"]
 
 
 def _basics_mcp_config(char_id: Optional[str] = None) -> Path:
     """渲染基础工具 MCP 的 mcp-config（口径同 _pet_mcp_config）。
     **无条件挂、无开关**：now 是钟、fetch 是取一份公开资料，三个场景都该够得着
-    （2026-09-02 定：他一轮跑到中途没有任何办法知道几点，那是核实纪律的地基漏了）。"""
+    （2026-09-02 定：他一轮跑到中途没有任何办法知道几点，那是核实纪律的地基漏了）。
+
+    next_wake（09-03，§14.1）也在这儿：它必须**每一轮都够得着**，而且家选在
+    basics 是因为 BASICS_MCP_TOOLS 在 mounted_tool_names 里无条件打头 →
+    醒来轮的禁用面（chat_loop._wake_gate）自动放行，不用另开口子。
+    「醒来恰恰是最该定下一次的时候」本来是这次迁移最大的施工陷阱，挂这儿就不成立了。"""
     me = (char_id or state_store.DEFAULT_CHAR_ID)
     path = state_store.char_state_dir(char_id) / "basics.mcp.json"
     payload = json.dumps({"mcpServers": {"basics": {
@@ -1138,6 +1188,24 @@ def _stored_from_tool_use(name: str, inp: dict) -> Optional[dict]:
             tool = "grow" if name.endswith("__grow") else ("feel" if inp.get("feel") else "hold")
             return {"tool": tool, "text": text}
         return None
+    if name.endswith("__next_wake"):
+        # 闹钟（§14.1）。定钟从此是一个**看得见**的动作——旧标记路在聊天里是隐形的，
+        # 机主只在 next_wake_hint 那条返回值里瞟得到一眼，重看历史什么都没有。
+        # 口径：写操作（set/clear）出小字，read 不出。
+        # 默认值跟 schema 一致（action="read"）：不给 action 就是查，没有副作用。
+        act = str(inp.get("action") or "read").strip().lower()
+        if act == "read":
+            return None
+        if act == "clear":
+            return {"tool": "alarm", "text": "撤掉了闹钟"}
+        mins = clamp_next_minutes(inp.get("minutes"))
+        if act == "set" and mins is not None:
+            at = int(time.time()) + mins * 60
+            return {"tool": "alarm",
+                    "text": f"定了闹钟 · {alarm_slot_str(at, inp.get('todo') or '')}"}
+        # 参数写歪 / action 不认识：这次调用会失败，**照样出一条小字**——
+        # 失败原因由 tool_result 补在后面（规避规则 4：有副作用的动作不许静默失败）。
+        return {"tool": "alarm", "text": "定闹钟"}
     if name.endswith("__trace"):
         return {"tool": "trace", "text": _describe_trace(inp)}
     if name.endswith("__I"):
@@ -1183,7 +1251,9 @@ def _stored_from_tool_use(name: str, inp: dict) -> Optional[dict]:
 
 # 会走 memory 灰字 / 进心流日志的 stored 类型。codemode 是控制信号不是产物；browse 有
 # 自己的聚合灰字和 browse_log，逐条进心流日志只会刷屏——都不进。
-NON_MEMORY_TOOLS = {"webpage", "codemode", "browse", "gametask", "gamemode"}
+# alarm（09-03）：定钟不是记忆操作，进了心流日志会污染醒来那份「别重复存」清单；
+# 它要的是聊天里的小字（sse._memory_events 不滤它）+ 行为账（执行层 acts_worthy）。
+NON_MEMORY_TOOLS = {"webpage", "codemode", "browse", "gametask", "gamemode", "alarm"}
 
 # ---------- 留痕判线（PLAN_sdk §5.3 S3 补线①，08-31）----------
 # 行为账/经历留痕的判线=「碰没碰外部世界」（§5.2：对外部对象的读写都留——「读过」

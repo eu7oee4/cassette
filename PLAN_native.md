@@ -842,6 +842,52 @@ Cassius 正开着的活会被无声掐掉，新会话的人设/记忆/聊天框�
 - ⚠️ **iOS 那边要认新的 tool 标签**：pipeline.py:1108 记着的坑——app 对不认识的
   `tool` 会兜底成「记住了一件事」的灰字。`ChatView.swift` 的 `NoteRow` 分支得加。
 
+#### 施工记录（2026-09-03，564 测试全绿，**未重启未上电**）
+
+`mcp__basics__next_wake(action, minutes, todo)`，`action` 是 `Literal` →
+schema 里出 enum（写歪的 action 在 MCP 校验层就被挡回，不用等我那句 ValueError）。
+落码七处：
+
+| 处 | 做了什么 |
+|---|---|
+| `basics_mcp.next_wake` | read/set/clear 三支，每支都回执；`_slot` 读槽 |
+| `pipeline.clamp_next_minutes` | 新的共用夹子，`parse_next_minutes` 改成走它 |
+| `pipeline.alarm_slot_str` | `09-03 00:50「活」`——回执/小字/日志三处共用一份渲染 |
+| `pipeline._stored_from_tool_use` | `alarm` 分支；`NON_MEMORY_TOOLS` 收 `alarm` |
+| `chat_loop._tool_summary` | `next_wake` 特判（行为账那行是覆盖留痕，不能是 json 兜底） |
+| 三份 `tool_menu*.md` | 「给自己定下次醒来」块（**不加就 `_warn_uncovered` 每轮喊**，而且醒来那条路是延迟 schema，没菜单他压根不知道自己有闹钟） |
+| `ContentView.swift` | `case "alarm"` 三处（新后端文案 / 老后端回落 / 失败文案） |
+
+四件当时没写进上面、施工时才定的——
+
+1. **默认 action 两边必须一致。** 小字分支是照 `inp` 自己判的，`inp` 里没有
+   `action` 时得和 schema 默认值（`read`）对齐，否则一次空调用会出一条假的「定闹钟」。
+2. **写歪的调用照样出小字。** 参数解析不出来时不返 None——不出小字＝他以为定了、
+   机主也看不见，正是 §14.0 根因④。失败原因由 `tool_result` 补在后面。
+3. **小字的时点是自己算的。** `_stored_from_tool_use` 只看得到 `tool_use`（那会儿
+   还没有回执），所以夹法必须和工具一模一样——`clamp_next_minutes` 就是为这个抽的。
+4. **失败文案破一次裸名口径**：`mcp_next_wake，没成` 看不出丢的是哪张钟，改成
+   「闹钟没定上：…」。
+
+**最险的一处衔接是轮尾结账**：工具是轮中写，`finish_wake_turn` 是轮尾结账，
+「到点醒来那次消费掉已过期的点」那支要是把他刚在这一轮里定的新钟一并清了，
+从外面看就是「闹钟没响」（08-31 那个形状）。实际安全，靠的是那支的第二个条件
+（`cur_next` 已过期才清）+ 工具的下限 5 分钟。已加两条回归锁住，别哪天把条件简化掉。
+同形的 `cohabit.py:456` / `wake.py:622` 条件一致，一并安全。
+
+**已知没做**（不是疏漏，是有意）：
+
+- **跨进程锁没有。** MCP 是子进程，`SCHEDULE_LOCK` 是线程锁跨不了进程；靠
+  `_write_json` 的原子替换保证不出半截文件，丢更新的窗口是毫秒级。真要根治得换
+  文件锁——那是单槽位这个形状本身的账，跟 §14.6 一起算。
+- **`one_turn_hint("wake")` 还教 `NEXT:` 段。** 那是 -p 熄火回退路的结构化输出格式，
+  和 `parse_wake_output` 焊死，且那条 prompt 里没有第二种写法可并存
+  （`_chat_next_hint` 不进 `wake_prompt`）——不违反拍板三。
+- **`parse_chat_next` 一行没删**，降级成只读兼容：老路和历史文本里的标记还认得，
+  只是三条 SDK prompt 一个字都不教了。
+
+**上电前要知道**：`_chat_next_hint` 在系统提示里 → 判脏 → **两个角色下一轮都会重铸一次**。
+
 ### 14.2 注入瘦身：用法进 schema，状态留注入
 
 **现状是同一条规矩写了两遍**：`_chat_next_hint()` 已经在系统提示里
@@ -957,7 +1003,107 @@ Cassius 正开着的活会被无声掐掉，新会话的人设/记忆/聊天框�
 - **那轮已滚出窗口 → 不铸**，回落到状态行。别为了留住它而统一铸到末尾装成
   「刚做的」——那就从保留记忆变成编造时序了。
 - `forge` 伪造 JSONL 无校验是验过的，但 `tool_use`/`tool_result` 得成对、id 对得上。
-  **`forge_regress` 先加「工具调用重放」这一类，再动。**
+  ~~**`forge_regress` 先加「工具调用重放」这一类，再动。**~~ → **09-03 实证跑完了，见下。**
+
+#### 实证：从旧 transcript 截一段重铸，tool / thinking 都过（09-03）
+
+> **先认一件事：这不是新知识，是把二手升级成一手**（机主指出）。
+> `PLAN_sdk.md:175`（08-30 增补）早记过 **Tool Primer**「重铸后保最近一对完整
+> `tool_use`/`tool_result`」，来源是同族工具的 Forge Reload 教程 + 小克Cat 实现。
+> 但那是**二手**，所以结论落在 `PLAN_sdk.md:1366`「现阶段禁止出现……记为真机撞见
+> 工具变形时的后手」，§14.4 也才写「forge_regress 先加这一类，再动」。
+> 下面这一跑是**我们自己的真机**，等级从「同族说行」升到「我们验过行」。
+
+机主提的路子（备份旧 transcript、直接从它重铸，别从手机 app 历史铸），连同同族工具
+`dankefox/swap-tutorial` 一起验的。探针在 `server/tools/forge_swap_probe.py`
+（独立跑，**没有**并进 forge_regress 的默认腿——那会给每次闸门多加几次订阅调用）。
+
+做法：拿一份真 transcript（`3d283a7b`，190 条消息事件、42 个**正文非空**的 thinking
+块），按「一条真人发言 → 下一条真人发言之前」切出一个**完整轮**（9 事件 / 2 组工具对
+/ 3 个 thinking），改写 session id、cwd、事件链（`tool_use.id` 和
+`tool_result.tool_use_id` 一个字不改——那是配对键），落成新 JSONL 再 resume。
+
+探针问的是**只有工具块里才有的东西**：「最后一次工具调用动的是哪个文件」。
+正文里一个字都没提那条路径——问「调了什么工具」不行，C 变体那条收场白写着
+「改好了…DEB7B8 → #8C6E6E」，模型能猜出自己用了 Edit，那样 C 就不是对照组了。
+
+| 变体 | CLI `--resume` | agent-sdk `resume=` |
+|---|---|---|
+| A　thinking ✔ tool ✔（照抄） | ✅ 答出完整路径 | ✅ 同 |
+| B　thinking ✘ tool ✔（14.4 要的形状） | ✅ 答出完整路径 | ✅ 同 |
+| C　thinking ✘ tool ✘（对照＝今天 forge 的形状） | ✅ 答「看不到」 | 免（纯文本史早验过） |
+
+**结论**：① 成对的 `tool_use`/`tool_result` **铸得进去，而且真到了模型眼前**——
+`forge._assert_native_block_types` 那条「不铸 tool 块」可以对**成对**的块放开，
+14.4 的闸解除；② 带签名的 thinking 块**截断前缀之后照样能 replay**，不 400；
+③ 两条加载器一致（这条不能拿旧结论替，tool 块是新形状，所以单独跑了）。
+
+**⚠️ 这一跑顶掉了那条二手记录里的一句。** 08-30 记的 signed thinking 硬约束里有
+「**空 thinking＝首次请求 400**（`each thinking block must contain thinking`）」。
+今天 A 变体那个窗口里**就有一个 `thinking` 正文长度 0 的块**（第三个），CLI 和
+agent-sdk 两条路**都没 400**。
+
+两种解释分不开，从外面看不出来：① API 本来就容忍空 thinking；② CC 的加载器在发出去
+之前把空块滤掉了。**对我们的用处一样**——「绝不能铸出空 thinking」不是我们这条流水线
+的硬要求；但**别反过来把它当成「空 thinking 一定安全」往别处用**，那超出这次测到的范围。
+（②若为真，还顺带说明 A 变体「thinking 活过来了」这个结论更弱：真被保住的可能只有
+非空那两块。）
+
+**顺带一个意外发现，它砍掉了 thinking 的价值**：CC 落盘时**大多数 thinking 块正文
+是空的**，只留 3.6KB 的签名——抽查 6 份 transcript 共 198 块，正文非空的只有 42 块
+（全在同一份里）。所以「照抄 transcript 就能把思考带回来」多数时候**没东西可带**，
+带回去的是一个空壳加一坨签名。thinking 这一路不值得为它改任何东西。
+
+**这个实验没证明的**（别外推）：只测了 2 组工具对、30KB 的小窗口，没测规模；没测
+「最后一块是 tool_use、下一条就是新 user」那种收尾形状；跨模型（transcript 里的
+model 和当前模型不一致）没测。
+
+**另一条观察，够不上结论**：跑完发现源 transcript 和另外几份的 mtime 被顶到了当天
+20:29。已核**内容没变**（仍 190 条消息事件、无当天事件、最后一条还是 09-02T12:15Z），
+探针全程只读。谁顶的没查出来（怀疑是 CLI 自己的后台维护）。**但这件事本身是**
+**「transcript 当真相源」的一个反例方向**：那份文件不只有我们在动。
+
+#### 施工记录（09-03，579 测试全绿，**未重启未上电**）
+
+套路照抄图那一例（§14.4 自己点的名）：**执行层留底，渲染层回填**。
+
+| 处 | 做了什么 |
+|---|---|
+| `forge.render` | 收 assistant 槽的 `tools=[{name,input,result}]`，铸成 **assistant(tool_use) → user(tool_result) → assistant(text)** 三个事件 |
+| `forge._assert_native_block_types` | tool 块解禁（thinking 照旧永远拒） |
+| `forge._assert_tool_pairing` | **新增**：整份文件级双向无孤儿 + 结果不许排在调用前 |
+| `state_store.append_alarm_call` / `read_alarm_calls` | `alarm_calls.jsonl`，按 `tool_use_id` 去重 |
+| `chat_loop._ToolTrace` | `pend` 多存一份原始 `input`；改过钟的调用（`action != read`）落留底 |
+| `chat_loop._merge_alarm_calls` | 回填：挂 `tools` 到那一轮的 assistant 条 |
+| `_reopen` | 排在四道渲染最前（只加键、不动 role/text/ts，下游看不见它） |
+
+**真机验的两层，别混**：① 09-03 的探针验的是「**手工截断的真 transcript**」能不能
+resume；② 这次验的是「**forge 自己铸出来的**那份」——两条路（CLI `--resume` 和
+agent-sdk `resume=`）都读进去了，问 `todo` 参数原文，两边都逐字答对
+（`给安瞬回信，回完更新名册`）。①通不代表②通，形状是我们自己拼的。
+
+施工时定的三件：
+
+1. **确定性红线保住了。** 工具那一维**只在真有工具时才参与 session digest**——
+   否则全仓每一份历史的 `session_id` 都会因为这次改动跳一遍，白留一地孤儿文件。
+   已加断言：不带工具的历史铸出来 sid 和字节都和从前一模一样。
+2. **挂到哪一条只能按时间近似认，因为没有轮 id。** 留底的 ts 是工具返回那一刻，
+   而窗口里 assistant 那条的 ts 是各写各的——**聊天轮是 finalize 时间（调用之后
+   一两秒），醒来轮是 `started_ts`（调用之前）**。两个方向都有，所以取「最近的一条
+   assistant」而不是「之后的第一条」，容差 `ALARM_ATTACH_SLACK_SEC=120`，
+   超了就不铸（回落状态行 = §14.4 本来就写好的口径）。
+3. **整条链跑一遍的测试是必要的**，不是凑数：下游三道渲染（并图/打戳/活动框）
+   任何一道把未知键丢掉，工具块就静默蒸发——而那种失败在生产里只表现为
+   「他不记得了」，没有任何报错。
+
+**顺带一个坑（不影响生产，记一笔）**：探针用 `tempfile` 的 `/var/folders/…` 当 cwd，
+CC 落盘时按**解析过符号链接**的 `/private/var/…` 算 slug，跟 `forge.slug()` 对同一个
+路径算出来的对不上 → 扫尾扫空、留了三个孤儿目录（已手删）。生产的 cwd 是
+`neutral_cwd()`＝`state/claude_cwd`，真实绝对路径，不踩这个。
+
+**还没接的一条线**：`_merge_alarm_calls` 现在无条件铸。§14.3 那条「状态行只在他
+记忆里没有这个钟时出现」还没做，所以**眼下是「铸了也照样注状态行」**——重复，
+但方向安全（多说一遍，不是丢）。两边合上是 14.3 的活。
 
 **两个更大的、还没做的**：
 
@@ -1057,6 +1203,9 @@ Cassius 说「昨天」，他看的是 forge 铸出来的产物。`_stamp_times`
    browser 标记教学（`062bada` 的 docstring）没查，本仓 grep 不到，可能还有真值例子。
 1. **闹钟工具化**（14.1）+ 注入瘦身（14.2/14.3）——一起，因为注入的形状取决于工具
    在不在。`parse_chat_next` 降级只读兼容，三个入口一次覆盖。
+   → **14.1 已完工（09-03，564 测试全绿，未重启未上电）**，施工记录在 14.1 末。
+   14.2/14.3 **没动**：注入还是老形状（`one_turn_hint` + `pending_todo_block` 都在，
+   只是措辞从标记改成了工具），瘦身和状态行三态还欠着。
 2. **时间锚统一**（14.5）——独立，只动 `_stamp_times` 渲染层。
 3. **源头修**（14.6）——独立，先做①的实证判定。
 
@@ -1065,22 +1214,32 @@ Cassius 说「昨天」，他看的是 forge 铸出来的产物。`_stamp_times`
 
 ### 14.8 验收
 
+> 09-03：`✅` = 14.1 落码时已有离线单测锁住；其余待 14.2/14.3/14.5/14.6 或真机。
+
 - `[[next_wake:1小时|x]]` 出现在**回复正文里**（让他复述一段带标记的文本）→
   schedule **不变**、正文**不被剥**（14.0 的回归）
 - 同一条回归对 `[[move:房间id]]`（小屋开着）和 `[[browser:close]]` 也要过：
   复述不搬家、不关浏览器
 - `grep -rn "\[\[" server/*.example.md server/skills/` 里的例子**全是占位符**，
   过一遍 `parse_*` 全部解析失败
-- 定钟走工具 → 回执含绝对日期 + 被替换掉的旧钟；`clear`/`read` 都通
-- 定/撤闹钟在聊天里**看得见小字**（带时间和待办，不是裸工具名、不是
+- ✅ 定钟走工具 → 回执含绝对日期 + 被替换掉的旧钟；`clear`/`read` 都通
+- ✅ 定/撤闹钟在聊天里**看得见小字**（带时间和待办，不是裸工具名、不是
   「记住了一件事」）；`read` 不出小字
+  （单测锁的是后端出的那条 `alarm` 文案；**iOS 那一跳只过了肉眼，欠真机**）
+- ✅ 醒来轮也够得着 `next_wake`（`wake_tools = mounted_tool_names("wake")`，
+  `BASICS_MCP_TOOLS` 无条件打头）
+- ✅ 轮中用工具定的钟，不被 `finish_wake_turn` 的轮尾结账清掉
 - 一轮聊天的注入 ≈ 143 字，且**没有闹钟状态行**（他刚调过工具）
 - 重铸一次 → 那轮的 `tool_use`/`tool_result` 还在，状态行**仍然不出现**
 - 重铸后 transcript：每轮前一行 `【MM-dd 周X HH:mm】`，机主的话不带前缀戳，
   连续 assistant 不再被粘成一条，几秒内的连发**仍然**粘在一起
 - 小屋总开关关→开一轮，钟还在（按剩余时长）
 - 醒来炸一次，`next_wake_at` **没被挪**
-- `tests/test_one_turn.py:125/136/149` 三条按措辞的断言跟着改
+- ✅ `tests/test_one_turn.py` 三条按措辞的断言跟着改（`test_marker_wording_forks_by_scene`
+  / `test_chat_uses_marker`→`test_chat_uses_the_tool` / `test_session_variant_usage_only`）
+- **真机三条**（上电后跑，09-03 欠着）：① 聊天里让他定一次钟，看小字有没有带时间和
+  待办；② 手机上装的是**旧包**的话 `alarm` 会兜底成「记住了一件事」——先确认装的是新包；
+  ③ 醒来轮里让他改一次钟（那条路是延迟 schema，验的是菜单块管不管用）
 
 ### 14.9 待拍
 

@@ -1259,12 +1259,18 @@ struct ContentView: View {
         }
         if !ok {
             let why = reason.trimmingCharacters(in: .whitespacesAndNewlines)
-            return why.isEmpty ? "\(name)，没成" : "\(name)，没成：\(why)"
+            // 闹钟没定上要说人话：裸名「mcp_next_wake，没成」看不出丢的是哪张钟。
+            let head = tool == "alarm" ? "闹钟没定上" : "\(name)，没成"
+            return why.isEmpty ? head : "\(head)：\(why)"
         }
         switch tool {
         case "webpage":    return nil                 // 成功的网页：finalize 补可点的卡片
         case "gametask":   return "\(name)：\(text)"  // 带任务清单，机主要核对派了什么（§3.4）
         case "mail_draft": return "\(name)，落草稿信箱等你过目"   // 「等你过目」≠「寄出了」
+        // 闹钟（PLAN_native §14.1）：这条**带对象**，不是裸名——后端已经把文案拼好
+        // （「定了闹钟 · 09-03 00:50「给安瞬回信」」/「撤掉了闹钟」）。定钟以前在聊天里
+        // 是隐形的，机主重看历史一个字都没有，这条小字就是补那个哑洞的。
+        case "alarm":      return text
         default:           return name
         }
     }
@@ -1279,6 +1285,7 @@ struct ContentView: View {
         case "mail":    return "寄出了一封邮件"
         case "mail_draft": return "写了封信放进草稿信箱，等你过目"
         case "gametask": return "派引擎去跑游戏日常了"
+        case "alarm":   return "动了下次醒来的闹钟"
         default:        return "记住了一件事"
         }
     }
@@ -1296,6 +1303,7 @@ struct ContentView: View {
         case "gamemode": what = "想切去玩游戏"
         case "gametask": what = "想派引擎跑游戏日常"
         case "mail", "mail_draft": what = "想寄一封邮件"
+        case "alarm":   what = "想动下次醒来的闹钟"
         default:        what = "想记住一件事"
         }
         let why = reason.trimmingCharacters(in: .whitespacesAndNewlines)

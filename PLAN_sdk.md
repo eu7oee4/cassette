@@ -1366,6 +1366,12 @@ PR8 发送前比对免费吃掉（PR11 实证）。**
   交替、无空文本；**永不铸 thinking（出现即失败）**；tool_use/tool_result
   现阶段禁止出现（我们不铸 tool 对；Tool Primer 记为真机撞见工具变形时的
   后手）；image 字节参与 digest（确定性单测）；结构校验过了也要 ping——
+  → **2026-09-03 改判：tool 对解禁**（PLAN_native §14.4 一手实证，探针
+  `server/tools/forge_swap_probe.py`）。**成对**的 tool_use/tool_result 铸得进去、
+  CLI 和 agent-sdk 两条路都真到模型眼前；孤儿仍然禁（配对断言照留）。
+  同一跑还顶掉了 §0「空 thinking＝400」那句（见 PLAN_native §14.4 那段）。
+  thinking 保持「永不铸」不变——不是因为不行，是因为**没东西可铸**：CC 落盘的
+  thinking 块大多正文为空，只剩签名。
   FIRST_REQUEST_OK 才算数（重铸后 resume 即 ping，现成）。回灌链警报：
   scrub_seam 沿用，刷掉未知机制文本时**报警日志不静默传**。
   **动工第一件事**：forge_regress 加图块腿——带 image 块的伪造 transcript

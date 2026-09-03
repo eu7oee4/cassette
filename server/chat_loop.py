@@ -629,6 +629,19 @@ def _tool_summary(name: str, inp: dict) -> str:
             return f"{pat}（{path}）" if path else pat
         if name == "Bash":
             return str(inp.get("command") or "")
+        if name.endswith("__next_wake"):
+            import pipeline   # 模块级没 import（循环依赖）；漏了会被下面的 except 吞掉
+            # 闹钟（§14.1）：_OBJ_KEYS 对 {action, minutes, todo} 一个都匹配不上，
+            # 不特判就掉进 json.dumps 兜底。行为账上这一行是**单槽位覆盖的留痕**
+            # （规避规则 5：被顶掉的旧钟不能凭空消失），得读得懂。
+            act = str(inp.get("action") or "read").strip().lower()
+            if act != "set":
+                return act
+            mins = pipeline.clamp_next_minutes(inp.get("minutes"))
+            if mins is None:
+                return "set（分钟数写歪了）"
+            at = int(time.time()) + mins * 60
+            return "set " + pipeline.alarm_slot_str(at, inp.get("todo") or "")
         for k in _OBJ_KEYS:
             v = inp.get(k)
             if isinstance(v, str) and v.strip():
@@ -676,10 +689,12 @@ class _ToolTrace:
         self.pend: dict = {}
 
     def use(self, block_id: str, name: str, inp: Optional[dict]) -> None:
-        self.pend[block_id] = (name, _tool_summary(name, inp or {}))
+        # 原始 input 也留着：闹钟留底要铸回**他真调过的那次调用**，
+        # 拿 summary 那句人话反推等于重写历史（§14.4「照实铸」）。
+        self.pend[block_id] = (name, _tool_summary(name, inp or {}), inp or {})
 
     def result(self, block_id: str, is_error, content=None) -> None:
-        name, summary = self.pend.pop(block_id, (None, ""))
+        name, summary, inp = self.pend.pop(block_id, (None, "", {}))
         if not name:
             return
         import activity_log
@@ -710,6 +725,14 @@ class _ToolTrace:
         if pipeline.acts_worthy(name):
             activity_log.append_act(self.handle.char_id, turn, name, summary,
                                     ok=ok, ret=ret)
+        # 闹钟留底（§14.4 补铸）：只留**改过钟的那几次**——read 没改动世界，
+        # 铸回去只是噪音。失败的也留：他试过这件事是真的，回执会说没成。
+        if (name.endswith("__next_wake")
+                and str(inp.get("action") or "read").strip().lower() != "read"):
+            state_store.append_alarm_call(
+                {"ts": int(time.time()), "id": block_id, "name": name,
+                 "input": inp, "ret": text[:RET_CAP], "ok": ok},
+                self.handle.char_id)
 
 
 async def _turn_events(client, handle: session_mgr.LoopHandle,
@@ -1037,6 +1060,50 @@ def _merge_images(history: list[dict], char_id: str) -> list[dict]:
     return out
 
 
+# 闹钟调用挂回哪条 assistant：容差（秒）。见 _merge_alarm_calls 的注释。
+ALARM_ATTACH_SLACK_SEC = 120
+
+
+def _merge_alarm_calls(history: list[dict], char_id: str) -> list[dict]:
+    """把留底的闹钟调用挂回它那一轮的 assistant 消息（PLAN_native §14.4 补铸）。
+    渲染规则，和 _merge_images / _stamp_times 同一层：只改铸造输入，不动账。
+
+    **照实铸，不看当前槽位**：「我 22:46 定了 00:50 的钟」这件事是真的，后来钟被谁
+    清了不影响它是真的。假的是拿旧回执冒充当前状态，那是注入状态行的职责（§14.3），
+    不是记忆的。所以这儿一次都不读 schedule。
+
+    **那轮已经滚出窗口 → 不铸**，回落到状态行。别为了留住它而统一铸到末尾装成
+    「刚做的」——那就从保留记忆变成编造时序了。
+
+    ⚠️ 挂到哪一条只能按时间近似认，因为**没有轮 id 可用**：留底的 ts 是工具返回
+    那一刻（执行层），而窗口里 assistant 那条的 ts 是各写各的——聊天轮是 finalize
+    时的 `int(time.time())`（调用之后一两秒），醒来轮是 `started_ts`（调用**之前**）。
+    两个方向都有，所以取「最近的一条 assistant」而不是「之后的第一条」。
+    超出容差就不挂（宁可少铸一条，也不能挂到别人那一轮去）。"""
+    calls = state_store.read_alarm_calls(char_id)
+    if not calls or not history:
+        return history
+    spots = [(i, int(m.get("ts") or 0)) for i, m in enumerate(history)
+             if m.get("role") == "assistant" and m.get("ts")]
+    if not spots:
+        return history
+    attach: dict[int, list[dict]] = {}
+    for c in calls:
+        ts = int(c.get("ts") or 0)
+        if not ts:
+            continue
+        i, gap = min(((i, abs(t - ts)) for i, t in spots), key=lambda x: x[1])
+        if gap > ALARM_ATTACH_SLACK_SEC:
+            continue                  # 那一轮不在窗口里了 → 不铸
+        attach.setdefault(i, []).append(
+            {"name": c.get("name") or "mcp__basics__next_wake",
+             "input": c.get("input") or {}, "result": c.get("ret") or ""})
+    if not attach:
+        return history
+    return [({**m, "tools": attach[i]} if i in attach else m)
+            for i, m in enumerate(history)]
+
+
 def _frame_activities(history: list[dict], char_id: str) -> list[dict]:
     """活动段的渲染层处理（§4 折叠规则，PR13 补全）：**最近一场**加两行文档框、
     点评原文逐条保留（那正是当下的对话）；**更早的场**整段折叠成一行框（含 TA
@@ -1223,8 +1290,12 @@ async def run(handle: session_mgr.LoopHandle, *,
         # 1) 并图——要在打戳之前，戳才落在合成后那一条上（先打戳会给占位符也打一个，
         #    然后那条被并掉，戳跟着没了）；
         # 2) 打戳；3) 套活动框——框行自带 HH:MM，别再叠一层（顺序反了就是双戳）。
+        # 闹钟补铸排在最前：它只往 assistant 条上挂 `tools` 键，不动 role/text/ts，
+        # 下游三道（并图/打戳/活动框）看不见它、也不会被它影响。
         rendered = (_frame_activities(
-            _stamp_times(_merge_images(history, handle.char_id), handle.char_id),
+            _stamp_times(_merge_images(
+                _merge_alarm_calls(history, handle.char_id), handle.char_id),
+                handle.char_id),
             handle.char_id)
             if history else [])
         if render_tail and rendered:

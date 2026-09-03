@@ -1,6 +1,6 @@
-"""基础工具 MCP（stdio）：now（真实时间）+ fetch（取一个公开网页）。
+"""基础工具 MCP（stdio）：now（真实时间）+ fetch（取一个公开网页）+ next_wake（闹钟）。
 
-主仓内置、不走插件商店（同 skills_mcp / pet_mcp 口径）：这两件不是"能力扩展"，
+主仓内置、不走插件商店（同 skills_mcp / pet_mcp 口径）：这几件不是"能力扩展"，
 是他每一轮都该够得着的常识器官。三个场景无差别照挂、无开关。
 
 **now 为什么必须存在**（2026-09-02）：模型没有钟。它对"现在几点"的全部知识
@@ -9,6 +9,14 @@
 他手上没有任何办法知道现在几点，只能拿轮首那句往下推，推错的单位是小时甚至天。
 （那天他把 3 分钟前说的话说成「昨天」，根因之一就是手上没有钟。）
 now 返回的是系统读数，不是他自己写的字——这条区别是整套核实纪律的地基。
+
+**next_wake 为什么从标记搬成工具**（2026-09-03，PLAN_native §14.1）：
+`[[next_wake:…]]` 是写在自然语言正文里的控制标记，解析器只做模式匹配，分不出
+「他在下指令」和「他在引用」——09-02 22:46 实锤，他把自己的注入原样贴了一遍，
+里面的例子当场把钟改了，正文还被剥出个窟窿。**工具调用天生分得出**：贴一段
+包含工具调用的文本不会触发那个工具。顺带补上标记做不到的三件——取消（clear）、
+查（read）、以及**当场回执**（旧路是轮尾静默生效，他不知道自己刚定了什么、
+被顶掉的旧钟也凭空消失）。
 
 **fetch 为什么值得和 browser 并存**：browser 功能全（能点能填能截图），但它
 要起 Chrome、会崩、快照进上下文是大块 token。取一份官方公开信息（文档、公告、
@@ -33,12 +41,14 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
+from typing import Literal
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from mcp.server.fastmcp import FastMCP
 
 import pipeline
+import state_store
 
 CHAR_ID = os.environ.get("CASSETTE_CHAR_ID", "default")
 
@@ -123,6 +133,89 @@ def now() -> dict:
     要说"现在几点""过了多久""是不是该睡了"这类话之前，先问一次。"""
     ts = int(time.time())
     return {"ts": ts, "time": pipeline.now_str(), "stamp": pipeline.stamp_str(ts)}
+
+
+def _slot(sched: dict) -> tuple:
+    """schedule 里那一个槽 → (时点或 None, 待办)。读坏了当没有钟。"""
+    try:
+        at = sched.get("next_wake_at")
+        at = int(float(at)) if at is not None else None
+    except (TypeError, ValueError):
+        at = None
+    return at, (sched.get("next_wake_todo") or "").strip()
+
+
+@mcp.tool()
+def next_wake(action: Literal["read", "set", "clear"] = "read",
+              minutes: int = 0, todo: str = "") -> dict:
+    """你的闹钟：到点会有一次醒来，`todo` 那句话原样递回给你。
+
+    action：
+      · "read"  —— 看现在钉着什么（不改任何东西）
+      · "set"   —— 定/改：`minutes`＝多久之后（5~720 分钟），`todo`＝到时候要做的事
+      · "clear" —— 撤掉，之后不再自己醒
+
+    ⚠️ **钟只有一个。** set 一次是把原来那张**换掉**，不是再加一张——回执会告诉你
+    换掉的是什么。想留着原来那个点，这轮就别 set；不确定现在钉着什么，先 read。
+
+    `todo` 写清楚要做的事（「给谁回信」「读第 2 封信」），别写「继续」——到点递回给
+    你的就是这一句，读不懂它的那次醒来是白醒。"""
+    act = (action or "").strip().lower()
+    if act not in ("read", "set", "clear"):
+        raise ValueError(f"action 只能是 read / set / clear，给的是 {action!r}")
+
+    # ⚠️ SCHEDULE_LOCK 是线程锁，**跨不了进程**——这里是 MCP 子进程，服务端那边
+    # finalize/finish_wake_turn 也在写同一份 schedule.json。加它只保本进程内一致；
+    # 跨进程靠 _write_json 的原子替换保证不出半截文件，丢更新的窗口是毫秒级。
+    # （真要根治得换文件锁，那是单槽位这个形状本身的账，记在 §14.6。）
+    with state_store.SCHEDULE_LOCK:
+        sched = state_store.read_schedule(CHAR_ID)
+        old_at, old_todo = _slot(sched)
+        old_desc = pipeline.alarm_slot_str(old_at, old_todo) if old_at else ""
+
+        if act == "read":
+            if not old_at:
+                return {"ok": True, "set": False, "text": "现在没有钟。"}
+            left = old_at - int(time.time())
+            if left > 0:
+                return {"ok": True, "set": True, "at": old_at, "todo": old_todo,
+                        "text": f"现在钉着 {old_desc}（{pipeline.fmt_gap(left)}后）。"}
+            # 到点了还留着＝那次醒来没走完（机制会自己清，不看他做没做）。
+            # 措辞不许暗示他失约——§14.3 那条口径。
+            return {"ok": True, "set": True, "at": old_at, "todo": old_todo, "due": True,
+                    "text": f"{old_desc} 已经到点了（过了 {pipeline.fmt_gap(-left)}），"
+                            "那次醒来还没走完。机制会自己清掉它，你不用管。"}
+
+        if act == "set":
+            mins = pipeline.clamp_next_minutes(minutes)
+            if mins is None:
+                raise ValueError(
+                    f"minutes 要是个正整数（{pipeline.NEXT_MIN_MIN}~"
+                    f"{pipeline.NEXT_MAX_MIN} 分钟），给的是 {minutes!r}。钟没有动。")
+            at = int(time.time()) + mins * 60
+            new_todo = (todo or "").strip()[:pipeline.NEXT_TODO_MAX]
+            sched["next_wake_at"] = at
+            # 待办跟着时点整体替换（没写就是清空）：钉子换了地方，旧的那句活就作废了。
+            sched["next_wake_todo"] = new_todo
+            state_store.write_schedule(sched, CHAR_ID)
+            new_desc = pipeline.alarm_slot_str(at, new_todo)
+            tail = (f"原来那张（{old_desc}）已经不在了——钟只有一个。"
+                    if old_desc else "原来没有钟。")
+            pipeline.logerr(f"[{CHAR_ID}] next_wake set：{new_desc}"
+                            + (f"（顶掉 {old_desc}）" if old_desc else "（原来没有钟）"))
+            return {"ok": True, "set": True, "at": at, "todo": new_todo,
+                    "replaced": old_desc,
+                    "text": f"定在 {new_desc}（{pipeline.fmt_gap(mins * 60)}后）。{tail}"}
+
+        # clear
+        sched["next_wake_at"] = None
+        sched["next_wake_todo"] = ""
+        state_store.write_schedule(sched, CHAR_ID)
+        pipeline.logerr(f"[{CHAR_ID}] next_wake clear："
+                        + (f"撤掉 {old_desc}" if old_desc else "本来就没有钟"))
+        return {"ok": True, "set": False, "replaced": old_desc,
+                "text": (f"撤掉了 {old_desc}，现在没有钟。" if old_desc
+                         else "本来就没有钟，没什么可撤的。")}
 
 
 @mcp.tool()

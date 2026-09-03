@@ -377,6 +377,46 @@ def read_chat_image_index(char_id: Optional[str] = None) -> list[dict]:
     return rows
 
 
+# ---------- 闹钟调用留底（重铸补铸工具块；per 角色）----------
+# PLAN_native §14.4：重铸的输入是 recent_window——app 的扁平消息窗口
+# （role/text/ts），-p 时期的形状，**里面天然没有工具调用**。所以「他 22:46 定了
+# 00:50 的钟」这件事一重铸就没了，只能靠注入状态行兜。图是第一例（save_chat_images
+# 留底 + _merge_images 回填），闹钟是第二例，套路一模一样：执行层留底，渲染层回填。
+#
+# 按 tool_use_id 去重：流里同一条 assistant 会带累计块重复发，id 是唯一的锚。
+_ALARM_LOCK = threading.Lock()
+
+
+def _alarm_calls_path(char_id: Optional[str] = None) -> Path:
+    return _char_path("alarm_calls.jsonl", char_id)
+
+
+def append_alarm_call(rec: dict, char_id: Optional[str] = None) -> None:
+    """记一次改动闹钟的调用。rec={"ts","id","input","ret","ok"}。
+    失败静默：留底是给重铸用的锦上添花，为它把一轮聊天搞崩不值。"""
+    try:
+        with _ALARM_LOCK:
+            if any(r.get("id") == rec.get("id")
+                   for r in read_alarm_calls(char_id)):
+                return
+            p = _alarm_calls_path(char_id)
+            p.parent.mkdir(parents=True, exist_ok=True)
+            with p.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+
+
+def read_alarm_calls(char_id: Optional[str] = None) -> list[dict]:
+    try:
+        with _alarm_calls_path(char_id).open(encoding="utf-8") as f:
+            rows = [json.loads(line) for line in f if line.strip()]
+    except Exception:
+        return []
+    rows.sort(key=lambda r: int(r.get("ts", 0)))
+    return rows
+
+
 def read_chat_image(sha: str, char_id: Optional[str] = None) -> Optional[bytes]:
     """按 sha 取字节。sha 只能是 40 位 hex——它进过路径，不校验就是目录穿越。"""
     if not re.fullmatch(r"[0-9a-f]{40}", sha or ""):

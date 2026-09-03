@@ -136,8 +136,12 @@ class TestPendingTodoBlock(StateBase):
         self.assertIn("钉着一个钟", block)
 
     def test_marker_wording_forks_by_scene(self):
+        # 09-03（PLAN_native §14.1）：聊天那支从 [[next_wake:]] 标记改指工具。
+        # 标记降级只读兼容——还认得，但 prompt 一个字都不教（拍板三：不能两条路并存）。
         self.set_todo("给安瞬回信")
-        self.assertIn("[[next_wake:", pipeline.pending_todo_block(self.cid))
+        chat = pipeline.pending_todo_block(self.cid)
+        self.assertIn("next_wake", chat)
+        self.assertNotIn("[[next_wake", chat)
         self.assertIn("NEXT", pipeline.pending_todo_block(self.cid, kind="wake"))
 
     def test_due_clock_reads_as_this_is_that_next_turn(self):
@@ -164,12 +168,17 @@ class TestPendingTodoBlock(StateBase):
 class TestOneTurnHint(unittest.TestCase):
     """两条路共用一份规矩，只有②的写法分叉。"""
 
-    def test_chat_uses_marker(self):
+    def test_chat_uses_the_tool(self):
+        # 09-03（§14.1）：聊天那支②改成调工具。标记不再教——正文里的控制标记
+        # 分不出「说」和「做」，工具调用天生分得出（§14.0 那次事故）。
         h = pipeline.one_turn_hint("chat")
-        self.assertIn("[[next_wake:", h)
+        self.assertIn("next_wake", h)
+        self.assertNotIn("[[next_wake", h)
         self.assertNotIn("NEXT:", h)
 
     def test_wake_uses_next_section(self):
+        # -p 熄火回退路照旧：NEXT 段和 parse_wake_output 焊死，且那条 prompt 里
+        # 没有第二种写法可并存
         h = pipeline.one_turn_hint("wake")
         self.assertIn("NEXT:", h)
         self.assertNotIn("[[next_wake:", h)
@@ -188,7 +197,8 @@ class TestOneTurnHint(unittest.TestCase):
         """SDK 常驻路（机主 08-30 拍板）：只留 next_wake 用法，
         「你只有这一轮/进程结束/这轮那轮」的存在论解释全删。"""
         h = pipeline.one_turn_hint("chat_session")
-        self.assertIn("[[next_wake:", h)
+        self.assertIn("next_wake", h)
+        self.assertNotIn("[[next_wake", h)   # 09-03（§14.1）：用法归工具 schema
         self.assertNotIn("只有这一轮", h)
         self.assertNotIn("进程", h)
         self.assertNotIn("这轮", h)

@@ -187,6 +187,31 @@ class FinishWakeTurnTest(WakeStateBase):
         self.assertEqual(sched["next_wake_at"], at)
         self.assertEqual(sched["next_wake_todo"], "回信")
 
+    def test_tool_set_clock_survives_the_turn_end_bookkeeping(self):
+        """闹钟工具化（PLAN_native §14.1）最险的一处衔接：工具是**轮中写**，
+        而 finish_wake_turn 是轮尾结账——「到点醒来那次消费掉已过期的点」那支
+        要是把他刚在这一轮里定下的新钟一并清了，从外面看就是「闹钟没响」。
+
+        实际安全，靠的是那支的第二个条件（cur_next 已过期才清）：工具定的点
+        至少在 5 分钟之后。这条锁住它，别哪天把条件简化掉。"""
+        state_store.write_schedule({"next_wake_at": int(time.time()) - 5,
+                                    "next_wake_todo": "旧的活"}, self.cid)
+        # 轮中：他调 next_wake 工具改了钟（回复正文里一个标记都没有）
+        at = int(time.time()) + 7200
+        state_store.write_schedule({"next_wake_at": at,
+                                    "next_wake_todo": "新的活"}, self.cid)
+        wake_sdk.finish_wake_turn(self.cid, "scheduled", False, 5000, "〔到点醒了〕", [])
+        sched = state_store.read_schedule(self.cid)
+        self.assertEqual(sched["next_wake_at"], at)
+        self.assertEqual(sched["next_wake_todo"], "新的活")
+
+    def test_tool_cleared_clock_stays_cleared(self):
+        state_store.write_schedule({"next_wake_at": None, "next_wake_todo": ""}, self.cid)
+        wake_sdk.finish_wake_turn(self.cid, "scheduled", False, 5000, "〔撤了钟〕", [])
+        sched = state_store.read_schedule(self.cid)
+        self.assertIsNone(sched["next_wake_at"])
+        self.assertEqual(sched["next_wake_todo"], "")
+
     def test_acts_recorded(self):
         """wake_log 扩展字段（行为留痕先行，PR13 归一账本）。"""
         stored = [{"tool": "mail_read", "ok": True, "text": "安瞬的信"}]

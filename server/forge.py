@@ -116,16 +116,22 @@ def render(messages: list[dict], *, cwd, session_id: Optional[str] = None,
     """把权威消息列表铸成 transcript，返回 session_id（resume 用它接上）。
 
     messages：[{"role": "user"|"assistant", "text": str, "ts": 秒级时间戳,
-    "images": [{"media_type": str, "data": b64 str}, ...]（可选，只许 user 槽）}]，
+    "images": [{"media_type": str, "data": b64 str}, ...]（可选，只许 user 槽），
+    "tools": [{"name": str, "input": dict, "result": str}, ...]（可选，只许
+    assistant 槽）}]，
     顺序即历史。ts 允许缺省（沿用上一条的），但第一条必须有——时间是权威源里的
     事实，不在这里发明。images（PR13 图块腿 2026-08-30 真机验通：CLI/agent-sdk
     两条路 resume 都真到模型眼前）：字节参与 session digest（确定性），数据由
     调用方从账本引用读出——render 仍是纯函数，不读盘。
+    tools（PLAN_native §14.4，2026-09-03 真机验通）：他那一轮做过的事。铸成
+    **assistant(tool_use) → user(tool_result) → assistant(text)** 三个事件，
+    也就是真 transcript 里那一轮本来的形状——不是拿正文描述一遍。回执要点进
+    result（§14.4 三类分层：动作留、材料丢，所以这儿只该放短回执，别搬返回体）。
     写盘原子（临时文件 + rename），文件 600 / 目录 700。
     """
     if not messages:
         raise ValueError("空消息列表没有可铸的历史")
-    norm: list[tuple[str, str, float, tuple]] = []
+    norm: list[tuple[str, str, float, tuple, tuple]] = []
     ts: Optional[float] = None
     for i, m in enumerate(messages):
         role, text = m.get("role"), m.get("text")
@@ -146,7 +152,18 @@ def render(messages: list[dict], *, cwd, session_id: Optional[str] = None,
             if not mt or not isinstance(data, str) or not data.strip():
                 raise ValueError(f"第 {i} 条第 {j} 张图缺 media_type/data")
             images.append((str(mt), data))
-        norm.append((role, text, float(ts), tuple(images)))
+        tools = []
+        for j, tc in enumerate(m.get("tools") or []):
+            if role != "assistant":
+                raise ValueError(f"第 {i} 条：tool 块只许铸 assistant 槽"
+                                 "（工具是他调的，结果是递回给他的）")
+            nm = (tc.get("name") or "").strip()
+            if not nm:
+                raise ValueError(f"第 {i} 条第 {j} 个 tool 缺 name")
+            tools.append((nm, json.dumps(tc.get("input") or {}, ensure_ascii=False,
+                                         sort_keys=True),
+                          str(tc.get("result") or "")))
+        norm.append((role, text, float(ts), tuple(images), tuple(tools)))
 
     # 连续同角色合并成一轮（08-30 game 实锤的污染根修）：铸出来的历史必须长得像
     # 引擎自己会写的历史——严格 user/assistant 交替。游戏点评那种一口气几十条
@@ -154,14 +171,14 @@ def render(messages: list[dict], *, cwd, session_id: Optional[str] = None,
     # token 余量标记+截断提示），模型看满屏这种缝就学舌，把「user·system<total_
     # tokens>…」缀在自己每段话结尾，投递→再铸→自我放大。合并=逐字拼接（\n\n），
     # 字面不动，红线合规（口径同 sse 把一轮多段拼成 full_reply）。
-    merged: list[tuple[str, str, float, tuple]] = []
-    for role, text, t, imgs in norm:
+    merged: list[tuple[str, str, float, tuple, tuple]] = []
+    for role, text, t, imgs, tls in norm:
         if merged and merged[-1][0] == role:
-            prev_role, prev_text, prev_t, prev_imgs = merged[-1]
-            merged[-1] = (prev_role, prev_text + "\n\n" + text, prev_t,
-                          prev_imgs + imgs)
+            p_role, p_text, p_t, p_imgs, p_tls = merged[-1]
+            merged[-1] = (p_role, p_text + "\n\n" + text, p_t,
+                          p_imgs + imgs, p_tls + tls)
         else:
-            merged.append((role, text, t, imgs))
+            merged.append((role, text, t, imgs, tls))
     norm = merged
 
     # 校验矩阵（PLAN_sdk 设计稿三 / §2.4 Forge Reload 入账，出现即失败）：
@@ -169,23 +186,86 @@ def render(messages: list[dict], *, cwd, session_id: Optional[str] = None,
     # CLI 会在顶上垫合成 user 槽，同「缝隙学舌」一类）。有 user 可去头就去
     # （渲染规则只决定「带不带」，字面不动）；全程没有 user（罕见：纯醒来独白
     # 窗口）保持原样，顶垫一枚认了，scrub_seam 在投递侧兜学舌。
-    if any(r == "user" for r, _, _, _ in norm):
+    if any(r == "user" for r, _, _, _, _ in norm):
         while norm and norm[0][0] != "user":
             norm.pop(0)
 
     if session_id is None:
+        # 工具块参与 digest（口径同图字节）：同一段话、做过的事不同，是两份历史。
+        # 不算进去的话「铸了一次不带工具的、又铸一次带工具的」会撞同一个 session_id，
+        # 后一次静默盖掉前一次还以为是同一份。
+        # ⚠️ 但**一个工具都没有时，这一维整个不参与**——否则全仓每一份历史的
+        # session_id 都会因为这次改动跳一遍，白留一地孤儿文件。
+        any_tools = any(tls for _, _, _, _, tls in norm)
         digest = hashlib.sha256(
             json.dumps([slug(cwd)] + [[r, t, s,
                                        [hashlib.sha256(d.encode()).hexdigest()
                                         for _, d in imgs]]
-                                      for r, t, s, imgs in norm],
+                                      + ([[list(x) for x in tls]] if any_tools else [])
+                                      for r, t, s, imgs, tls in norm],
                        ensure_ascii=False).encode()).hexdigest()
         session_id = _det_uuid("session", digest)
 
-    lines = []
+    events: list[dict] = []
     parent: Optional[str] = None
-    for i, (role, text, t, imgs) in enumerate(norm):
+
+    def _assistant_ev(key, t: float, content: list, uid: str,
+                      out_tokens: int) -> dict:
+        """key 只管 msg/req 那两个标注 id 的派生。text 事件传 i（和从前一个字节
+        不差），工具事件传 (i, "tool_use")——不带工具的历史因此铸出来完全照旧。"""
+        return {
+            "parentUuid": parent, "isSidechain": False,
+            "message": {
+                "model": model,
+                "id": "msg_forge_" + _det_uuid(session_id, "msg", *key)[:12],
+                "type": "message", "role": "assistant",
+                "content": content,
+                "stop_reason": "end_turn", "stop_sequence": None,
+                "usage": {"input_tokens": 1,
+                          "output_tokens": max(1, out_tokens),
+                          "cache_creation_input_tokens": 0,
+                          "cache_read_input_tokens": 0},
+            },
+            "requestId": "req_forge_" + _det_uuid(session_id, "req", *key)[:12],
+            "type": "assistant",
+            "uuid": uid, "timestamp": _iso(t), "effort": "high",
+            "userType": "external", "entrypoint": "sdk-cli",
+            "cwd": str(cwd), "sessionId": session_id,
+            "version": TRANSCRIPT_VERSION, "gitBranch": git_branch,
+        }
+
+    for i, (role, text, t, imgs, tls) in enumerate(norm):
         uid = _det_uuid(session_id, "evt", i)
+        # 工具块：铸成真 transcript 里那一轮本来的形状——他先调，结果递回来，
+        # 然后才是收场白。**排在 text 前面**，不然读起来像「说完了才去做」。
+        # ⚠️ 子事件的 uuid 另起后缀，不占 ("evt", i) 那个号——不带工具的历史
+        # 因此和从前铸出来的字节一模一样（确定性红线）。
+        if tls:
+            tu_uid = _det_uuid(session_id, "evt", i, "tool_use")
+            tr_uid = _det_uuid(session_id, "evt", i, "tool_result")
+            ids = [("toolu_forge_"
+                    + _det_uuid(session_id, "toolu", i, k).replace("-", "")[:20])
+                   for k in range(len(tls))]
+            ev = _assistant_ev((i, "tool_use"), t, [
+                {"type": "tool_use", "id": ids[k], "name": nm,
+                 "input": json.loads(inp)}
+                for k, (nm, inp, _) in enumerate(tls)], tu_uid,
+                sum(estimate_tokens(inp) for _, inp, _ in tls))
+            events.append(ev)
+            parent = tu_uid
+            events.append({
+                "parentUuid": parent, "isSidechain": False,
+                "type": "user",
+                "message": {"role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": ids[k],
+                     "content": ret}
+                    for k, (_, _, ret) in enumerate(tls)]},
+                "uuid": tr_uid, "timestamp": _iso(t),
+                "userType": "external", "entrypoint": "sdk-cli",
+                "cwd": str(cwd), "sessionId": session_id,
+                "version": TRANSCRIPT_VERSION, "gitBranch": git_branch,
+            })
+            parent = tr_uid
         if role == "user":
             content = [{"type": "text", "text": text}]
             content += [{"type": "image",
@@ -203,29 +283,16 @@ def render(messages: list[dict], *, cwd, session_id: Optional[str] = None,
                 "version": TRANSCRIPT_VERSION, "gitBranch": git_branch,
             }
         else:
-            ev = {
-                "parentUuid": parent, "isSidechain": False,
-                "message": {
-                    "model": model,
-                    "id": "msg_forge_" + _det_uuid(session_id, "msg", i)[:12],
-                    "type": "message", "role": "assistant",
-                    "content": [{"type": "text", "text": text}],
-                    "stop_reason": "end_turn", "stop_sequence": None,
-                    "usage": {"input_tokens": 1,
-                              "output_tokens": max(1, estimate_tokens(text)),
-                              "cache_creation_input_tokens": 0,
-                              "cache_read_input_tokens": 0},
-                },
-                "requestId": "req_forge_" + _det_uuid(session_id, "req", i)[:12],
-                "type": "assistant",
-                "uuid": uid, "timestamp": _iso(t), "effort": "high",
-                "userType": "external", "entrypoint": "sdk-cli",
-                "cwd": str(cwd), "sessionId": session_id,
-                "version": TRANSCRIPT_VERSION, "gitBranch": git_branch,
-            }
+            ev = _assistant_ev((i,), t, [{"type": "text", "text": text}], uid,
+                               estimate_tokens(text))
         parent = uid
+        events.append(ev)
+
+    for ev in events:
         _assert_native_block_types(ev)
-        lines.append(json.dumps(ev, ensure_ascii=False, separators=(",", ":")))
+    _assert_tool_pairing(events)
+    lines = [json.dumps(ev, ensure_ascii=False, separators=(",", ":"))
+             for ev in events]
 
     pdir = project_dir(cwd, projects_root)
     pdir.mkdir(parents=True, exist_ok=True)
@@ -239,16 +306,41 @@ def render(messages: list[dict], *, cwd, session_id: Optional[str] = None,
 
 
 def _assert_native_block_types(ev: dict) -> None:
-    """校验矩阵（PLAN_sdk 设计稿三，出现即失败）：content 只许 text/image——
-    **永不铸 thinking**（signed thinking 伪造不了=首次请求 400，§2.4 Forge
-    Reload 入账）、**不铸 tool_use/tool_result**（孤儿 tool 块同 400；Tool
-    Primer 是真机撞见工具变形时的后手，不是现在的路）。这条断言防的是未来
-    有人改 render 忘了这页历史。"""
+    """校验矩阵（PLAN_sdk 设计稿三，出现即失败）：content 只许 text/image/
+    tool_use/tool_result——**永不铸 thinking**（signed thinking 伪造不了=首次
+    请求 400，§2.4 Forge Reload 入账；何况 CC 落盘的 thinking 块正文大多是空的，
+    只剩签名，根本没东西可铸）。这条断言防的是未来有人改 render 忘了这页历史。
+
+    **tool 块 2026-09-03 解禁**（PLAN_native §14.4 一手实证，探针
+    server/tools/forge_swap_probe.py）：成对的 tool_use/tool_result 铸得进去，
+    CLI 和 agent-sdk 两条路都真到了模型眼前。**孤儿仍然是 400**——配对由
+    _assert_tool_pairing 在整份文件这一层管，单个事件这儿看不出来。"""
     for b in ev["message"]["content"]:
         t = b.get("type")
-        if t not in ("text", "image"):
+        if t not in ("text", "image", "tool_use", "tool_result"):
             raise AssertionError(
-                f"forge 铸出了禁块类型 {t!r}——校验矩阵：只许 text/image")
+                f"forge 铸出了禁块类型 {t!r}——校验矩阵：只许 "
+                "text/image/tool_use/tool_result")
+
+
+def _assert_tool_pairing(events: list[dict]) -> None:
+    """整份文件级：tool_use 和 tool_result **双向**无孤儿，且结果不许跑到调用前面。
+    孤儿块＝首次请求 400，而 400 发生在重铸之后的第一次请求——那时旧会话已经关了，
+    炸在这儿比炸在他嘴上强。"""
+    seen: list[str] = []
+    for ev in events:
+        for b in ev["message"]["content"]:
+            if b.get("type") == "tool_use":
+                seen.append(b["id"])
+            elif b.get("type") == "tool_result":
+                tid = b.get("tool_use_id")
+                if tid not in seen:
+                    raise AssertionError(
+                        f"孤儿 tool_result（{tid!r}）：结果没有对应的调用，"
+                        "或者排在调用前面")
+                seen.remove(tid)
+    if seen:
+        raise AssertionError(f"孤儿 tool_use（{seen}）：调用没有配上结果")
 
 
 # ---------- 运维自检（PLAN_sdk S0/PR3：§2.5 三条纪律的机器化） ----------

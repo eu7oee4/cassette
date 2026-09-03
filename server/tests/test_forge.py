@@ -204,14 +204,30 @@ class ForgeTest(unittest.TestCase):
         self.assertEqual([e["type"] for e in self._events(path2)], ["assistant"])
 
     def test_native_block_type_assertion(self):
-        """校验矩阵断言直测：thinking/tool 块出现即失败（永不铸）。"""
+        """校验矩阵断言直测。**thinking 永远拒**；tool 块 2026-09-03 解禁
+        （PLAN_native §14.4 一手实证），孤儿归 _assert_tool_pairing 那道管。"""
         forge._assert_native_block_types(
             {"message": {"content": [{"type": "text", "text": "x"},
-                                     {"type": "image", "source": {}}]}})
-        for bad in ("thinking", "tool_use", "tool_result"):
+                                     {"type": "image", "source": {}},
+                                     {"type": "tool_use", "id": "t", "name": "n"},
+                                     {"type": "tool_result", "tool_use_id": "t"}]}})
+        for bad in ("thinking", "redacted_thinking", "document"):
             with self.assertRaises(AssertionError):
                 forge._assert_native_block_types(
                     {"message": {"content": [{"type": bad}]}})
+
+    def test_tool_pairing_assertion(self):
+        """孤儿 tool 块＝首次请求 400，而那次请求发生在重铸之后、旧会话已经关了。
+        炸在铸造这一步，比炸在他嘴上强。"""
+        use = {"message": {"content": [{"type": "tool_use", "id": "a", "name": "n"}]}}
+        res = {"message": {"content": [{"type": "tool_result", "tool_use_id": "a"}]}}
+        forge._assert_tool_pairing([use, res])          # 成对：过
+        with self.assertRaises(AssertionError):
+            forge._assert_tool_pairing([use])           # 调用没配结果
+        with self.assertRaises(AssertionError):
+            forge._assert_tool_pairing([res])           # 结果没有调用
+        with self.assertRaises(AssertionError):
+            forge._assert_tool_pairing([res, use])      # 结果跑到调用前面
 
     def test_tail_window(self):
         msgs = []
