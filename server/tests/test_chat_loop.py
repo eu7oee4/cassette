@@ -1089,8 +1089,18 @@ class ReadonlyGuardTest(unittest.TestCase):
         self.assertIsNone(g(None, "cass"))
         mine = state_store.CHAR_STATE_ROOT / "cass" / "wake_log.jsonl"
         self.assertIsNone(g({"file_path": str(mine)}, "cass"))
+        # 放行：Claude Code 项目记忆目录（09-03 加白，「主仓 PLAN + memory 索引」老规矩）
+        self.assertIsNone(g({"file_path": str(pipeline.MEMORY_ROOT / "MEMORY.md")},
+                            "cass"))
         # 拒：根目录外 / .env* / 私人仓 / 别的角色的房间
         self.assertIsNotNone(g({"file_path": "/etc/passwd"}, "cass"))
+        # 拒：memory 之外的 ~/.claude（settings/凭据/别的项目的记忆都不放）
+        self.assertIsNotNone(
+            g({"file_path": str(pipeline.MEMORY_ROOT.parents[2] / "settings.json")},
+              "cass"))
+        self.assertIsNotNone(
+            g({"file_path": str(pipeline.MEMORY_ROOT.parent / "sessions" / "x.jsonl")},
+              "cass"))
         self.assertIsNotNone(g({"file_path": str(root / ".env")}, "cass"))
         self.assertIsNotNone(g({"file_path": str(root / "server" / ".env.local")},
                                "cass"))

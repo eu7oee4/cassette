@@ -1244,6 +1244,14 @@ def acts_worthy(name: str) -> bool:
 # mianmian-app。缺口真机撞见再从执行层补，别在这儿穷举。
 CODE_ROOT = Path(__file__).resolve().parent.parent   # cassette 仓根
 
+# 机主「主仓 PLAN + memory 加一条索引」老规矩的另一半：Claude Code 的项目记忆目录。
+# code 模式时代 TA 在仓根跑 CLI 天然够得着它；code 停用后（09-03）聊天路的写类要
+# 续上这个老规矩，就得在这儿点名放行（2026-09-03 机主拍板加白）。
+# ⚠️ 只放 memory/ 这一层——~/.claude 其余（settings.json、凭据、别的项目的记忆）
+# 都不在内；写进去每一笔照样过 permit 弹卡，这儿只是让申请到得了机主指头上。
+MEMORY_ROOT = (Path.home() / ".claude" / "projects"
+               / str(CODE_ROOT).replace("/", "-") / "memory")
+
 _GUARD_PATH_KEYS = ("file_path", "path", "notebook_path")
 
 
@@ -1262,9 +1270,10 @@ def readonly_path_guard(tool_input: Optional[dict],
             rp = p.resolve()
         except Exception:
             return "这条路径看不懂——换条正经路径"
-        if not rp.is_relative_to(CODE_ROOT):
-            return (f"你手边只看得到 cassette 仓（{CODE_ROOT}），"
-                    "这条路在范围外")
+        if not (rp.is_relative_to(CODE_ROOT)
+                or rp.is_relative_to(MEMORY_ROOT)):
+            return (f"你手边只看得到 cassette 仓（{CODE_ROOT}）"
+                    f"和记忆索引目录（{MEMORY_ROOT}），这条路在范围外")
         if any(seg.startswith(".env") for seg in rp.parts):
             return "凭据类的文件（.env 之类）不在你可看的范围里"
         if "mianmian-app" in rp.parts:
