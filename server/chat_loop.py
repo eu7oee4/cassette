@@ -489,9 +489,10 @@ def build_options(char_id: str, catalog: Optional[list] = None,
         if config.READONLY_TOOLS_ENABLED:
             tools += sorted(pipeline.READONLY_BUILTINS)
             segs.append("你手边常驻一套只读的文件工具（Read/Grep/Glob），看得到 "
-                        f"cassette 仓（{pipeline.CODE_ROOT}）的代码和资料——想核实"
-                        "什么随手翻，别背结论。凭据（.env）和别的角色的 state "
-                        "房间不在范围里。")
+                        f"cassette 仓（{pipeline.CODE_ROOT}）的代码和资料，"
+                        f"还有{config.user_name()}的 dossier 仓（{pipeline.DOSSIER_ROOT}）"
+                        "——想核实什么随手翻，别背结论。凭据（.env）和别的角色的 "
+                        "state 房间不在范围里。")
         if config.WRITE_TOOLS_ENABLED:
             tools += sorted(pipeline.WRITE_BUILTINS)
             segs.append(f"改东西的工具（Edit/Write/Bash）也在手边。每次动手，"

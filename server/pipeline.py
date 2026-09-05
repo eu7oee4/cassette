@@ -1342,6 +1342,19 @@ CODE_ROOT = Path(__file__).resolve().parent.parent   # cassette 仓根
 MEMORY_ROOT = (Path.home() / ".claude" / "projects"
                / str(CODE_ROOT).replace("/", "-") / "memory")
 
+# 机主的 dossier 仓（求职案例研究站，Next.js）——整仓放行给两个角色看（2026-09-05
+# 机主拍板加白）。起因：09-04 小卡被叫去审框架文档，Glob 一进 ~/dossier 就被闸
+# 拦回，research/ 只能走 Bash 弹卡等批。放的是**看**：写进去照样过 permit 弹卡；
+# .env* 黑名单对这个根同样生效（Next.js 的 .env.local 就在仓根）。
+DOSSIER_ROOT = Path.home() / "dossier"
+
+# 只读闸放行的根，按序列在拒绝原话里；新加一个根往这儿追加，别再往条件里叠 or。
+READ_ROOTS: tuple[tuple[str, Path], ...] = (
+    ("cassette 仓", CODE_ROOT),
+    ("记忆索引目录", MEMORY_ROOT),
+    ("dossier 仓", DOSSIER_ROOT),
+)
+
 _GUARD_PATH_KEYS = ("file_path", "path", "notebook_path")
 
 
@@ -1360,10 +1373,9 @@ def readonly_path_guard(tool_input: Optional[dict],
             rp = p.resolve()
         except Exception:
             return "这条路径看不懂——换条正经路径"
-        if not (rp.is_relative_to(CODE_ROOT)
-                or rp.is_relative_to(MEMORY_ROOT)):
-            return (f"你手边只看得到 cassette 仓（{CODE_ROOT}）"
-                    f"和记忆索引目录（{MEMORY_ROOT}），这条路在范围外")
+        if not any(rp.is_relative_to(r) for _, r in READ_ROOTS):
+            scope = "、".join(f"{label}（{r}）" for label, r in READ_ROOTS)
+            return f"你手边只看得到 {scope}，这条路在范围外"
         if any(seg.startswith(".env") for seg in rp.parts):
             return "凭据类的文件（.env 之类）不在你可看的范围里"
         if "mianmian-app" in rp.parts:

@@ -1092,6 +1092,18 @@ class ReadonlyGuardTest(unittest.TestCase):
         # 放行：Claude Code 项目记忆目录（09-03 加白，「主仓 PLAN + memory 索引」老规矩）
         self.assertIsNone(g({"file_path": str(pipeline.MEMORY_ROOT / "MEMORY.md")},
                             "cass"))
+        # 放行：dossier 整仓（09-05 加白），两个角色都看得到；.env* 黑名单照样生效
+        for cid in ("cass", "default"):
+            self.assertIsNone(g({"path": str(pipeline.DOSSIER_ROOT)}, cid))
+            self.assertIsNone(
+                g({"file_path": str(pipeline.DOSSIER_ROOT / "research" / "x.md")},
+                  cid))
+        self.assertIsNotNone(
+            g({"file_path": str(pipeline.DOSSIER_ROOT / ".env.local")}, "cass"))
+        # 拒：dossier 的邻居（家目录别的仓不因为 dossier 放行而连带放行）
+        self.assertIsNotNone(
+            g({"file_path": str(pipeline.DOSSIER_ROOT.parent / "dossier2" / "a.md")},
+              "cass"))
         # 拒：根目录外 / .env* / 私人仓 / 别的角色的房间
         self.assertIsNotNone(g({"file_path": "/etc/passwd"}, "cass"))
         # 拒：memory 之外的 ~/.claude（settings/凭据/别的项目的记忆都不放）
