@@ -63,6 +63,11 @@ struct ContentView: View {
     @State private var questionCards: [QuestionCard] = []
     // 权限卡队列（PLAN_native §6/U4）：同款通道，permit 事件实时进 + 轮询对齐。
     @State private var permitCards: [PermitCard] = []
+    // 发送排队（09-05 生成中不禁发）：气泡先上屏，POST 由 pumpOutbox 串行补发。
+    // 排队必须在 app 不在引擎：判脏比对要求每轮快照含上一轮回复，并发发送=
+    // 每条插话都逼后端全量重铸（divergence 口径，chat_loop.py:145）。
+    @State private var outbox: [OutboxItem] = []
+    @State private var pumping = false
 
     /// 一条等待补投的轮：断流时的半截气泡 ids + 登记时间 + 是否已放弃等待（放弃后仍留着兜迟到补投）。
     struct RescueWait {
@@ -403,7 +408,6 @@ struct ContentView: View {
                     }
                     InputBar(text: $draft,
                              stickersActive: showStickers,
-                             sending: isGenerating || isWaiting,
                              hasAttachments: pendingSticker != nil || !pendingImages.isEmpty
                                              || !pendingFiles.isEmpty,
                              onAttach: { dismissKeyboard(); showAttachMenu = true },
@@ -931,8 +935,9 @@ struct ContentView: View {
 
     private func send() {
         let trimmed = draft.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !isGenerating,
-              !trimmed.isEmpty || pendingSticker != nil
+        // 生成中不禁发（09-05）：重复触发的防线不再是 isGenerating——draft/附件
+        // 都是同步清空的，二连点第二下没有内容，被这条 guard 挡住。
+        guard !trimmed.isEmpty || pendingSticker != nil
                 || !pendingImages.isEmpty || !pendingFiles.isEmpty else { return }
 
         // 会话模式（code/游戏）：走 tmux 会话那条管道。表情没接——在那种会话里没什么
@@ -946,14 +951,17 @@ struct ContentView: View {
             return
         }
 
-        isGenerating = true   // 同步占位：立刻禁用发送、挡住极快的重复触发
-        isWaiting = true
+        // 出屏即排队：气泡立刻上屏（用户马上看到），真正的 POST 由 pumpOutbox
+        // 串行补发——快照必须含上一轮回复，判脏才永远干净。
+        var bubbleIds: [UUID] = []
 
         // 暂存的照片：先落盘成 .image 消息上屏；base64 数据随本轮请求带给后端（多模态）。
         let imagesToSend = pendingImages
         for data in pendingImages {
             if let url = AppFiles.saveChatImage(data) {
-                chatStore.append(ChatMessage(sender: .me, kind: .image(url), timestamp: Date()))
+                let m = ChatMessage(sender: .me, kind: .image(url), timestamp: Date())
+                chatStore.append(m)
+                bubbleIds.append(m.id)
             }
         }
         pendingImages = []
@@ -962,19 +970,25 @@ struct ContentView: View {
         let filesToSend = pendingFiles
         for f in pendingFiles {
             if let url = AppFiles.saveChatFile(f.data, name: f.name) {
-                chatStore.append(ChatMessage(sender: .me, kind: .file(url, f.name), timestamp: Date()))
+                let m = ChatMessage(sender: .me, kind: .file(url, f.name), timestamp: Date())
+                chatStore.append(m)
+                bubbleIds.append(m.id)
             }
         }
         pendingFiles = []
 
         if !trimmed.isEmpty {
-            chatStore.append(ChatMessage(sender: .me, kind: .text(trimmed), timestamp: Date()))
+            let m = ChatMessage(sender: .me, kind: .text(trimmed), timestamp: Date())
+            chatStore.append(m)
+            bubbleIds.append(m.id)
         }
         // 暂存的表情：作为表情消息上屏（历史里以 [表情包：描述] 发给后端，模型看描述）。
         if let st = pendingSticker {
-            chatStore.append(ChatMessage(sender: .me,
-                                         kind: .sticker(stickerStore.imageURL(for: st), st.description),
-                                         timestamp: Date()))
+            let m = ChatMessage(sender: .me,
+                                kind: .sticker(stickerStore.imageURL(for: st), st.description),
+                                timestamp: Date())
+            chatStore.append(m)
+            bubbleIds.append(m.id)
             pendingSticker = nil
         }
 
@@ -983,7 +997,49 @@ struct ContentView: View {
         DispatchQueue.main.async { draft = "" }
         draftStore.clear(currentCharID)
 
-        Task { await generateReply(imagesData: imagesToSend, filesData: filesToSend) }
+        outbox.append(OutboxItem(bubbleIds: bubbleIds,
+                                 images: imagesToSend, files: filesToSend))
+        if !pumping {
+            Task { await pumpOutbox() }
+        }
+    }
+
+    /// outbox 唯一的泵：串行出队发送（同一时刻只有一条流，rescue/流式渲染全不用改）。
+    /// 出队即「真正送出」：把这单的气泡搬到列表末尾、ts 打成现在——排队期间上一轮
+    /// 的回复可能已落在它下面，沉底之后窗口顺序才和后端账的顺序一致（不沉底，
+    /// 下一轮判脏必 dirty）。快照要剔掉还在排队的后续单，防止它们混进本轮窗口尾巴
+    /// 被后端当成 new_msg。锁屏拿 ~30s 后台余量把排队的 POST 送出去（请求进了
+    /// 后端队列即可，回复走 rescue/补投兜底）；真被杀的漏网单走判脏自愈路。
+    @MainActor
+    private func pumpOutbox() async {
+        guard !pumping else { return }
+        pumping = true
+        var bgTask: UIBackgroundTaskIdentifier = .invalid
+        bgTask = UIApplication.shared.beginBackgroundTask {
+            UIApplication.shared.endBackgroundTask(bgTask)
+            bgTask = .invalid
+        }
+        defer {
+            pumping = false
+            if bgTask != .invalid { UIApplication.shared.endBackgroundTask(bgTask) }
+        }
+        while !outbox.isEmpty {
+            let item = outbox.removeFirst()
+            var movedAny = false
+            for id in item.bubbleIds {
+                // 排队期间被 TA 删掉的气泡：跳过（这单剩下的照发）
+                guard let old = chatStore.messages.first(where: { $0.id == id }) else { continue }
+                chatStore.remove(id: id)
+                chatStore.append(ChatMessage(sender: .me, kind: old.kind,
+                                             timestamp: Date(), senderID: old.senderID))
+                movedAny = true
+            }
+            guard movedAny else { continue }   // 整单都被删了＝TA 反悔，不发
+            let queuedIds = Set(outbox.flatMap(\.bubbleIds))
+            let snapshot = chatStore.messages.filter { !queuedIds.contains($0.id) }
+            await generateReply(history: snapshot,
+                                imagesData: item.images, filesData: item.files)
+        }
     }
 
     /// 文件选择器放行的类型 + 各自的 MIME（后端按这个决定 PDF 直喂 / 文本读 / docx 抽正文）。
@@ -1023,10 +1079,11 @@ struct ContentView: View {
         )
     }
 
-    /// 把当前完整历史发给后端（流式），回复逐字上屏；失败则弹提示。
-    /// 约定调用前 chatStore.messages 已以用户的新消息结尾。
+    /// 把 history 快照发给后端（流式），回复逐字上屏；失败则弹提示。
+    /// 约定 history 以用户的新消息结尾（pumpOutbox 出队时剔掉了还在排队的后续单）。
     @MainActor
-    private func generateReply(imagesData: [Data] = [], filesData: [OutgoingFile] = []) async {
+    private func generateReply(history: [ChatMessage],
+                               imagesData: [Data] = [], filesData: [OutgoingFile] = []) async {
         isGenerating = true
         isWaiting = true
         defer { isWaiting = false; isGenerating = false }
@@ -1042,7 +1099,7 @@ struct ContentView: View {
         // inFlight=流还开着：这条登记先不亮三个点（那是 isWaiting 的活）、也不参与对账判死。
         rescueWaiting[reqId] = RescueWait(ids: [], since: Date(), inFlight: true)
         do {
-            let stream = chatService.sendStream(history: chatStore.messages,
+            let stream = chatService.sendStream(history: history,
                                                 sessionId: sessionId,
                                                 stickers: stickerStore.stickers, reqId: reqId,
                                                 imagesData: imagesData, filesData: filesData)
@@ -1568,14 +1625,15 @@ struct ContentView: View {
         // 「编辑并重新回复」＝相当于重发，刷新时间；「仅修改」保留原时间。
         chatStore.editText(id: message.id, newText: newText, updateTimestamp: regenerate)
         editRefreshTick += 1   // 亲手编辑立即上屏（离底冻结快照做手术式合并）
-        if regenerate, !isGenerating {
+        if regenerate, !isGenerating, !pumping {
             // 附件找回（mianmian 实踩 bug）：图/文件只在原发送轮注入，历史里只剩
             // [图片]/[文件:名] 占位——直接重答模型就看不到了。从这条往前收集紧邻的
             // 同回合附件（发送时图/文件都排在文字前面），从沙盒把数据重建出来随重发带上。
             let (imagesData, filesData) = collectAdjacentAttachments(before: message.id)
             chatStore.truncateAfter(id: message.id)   // 删掉这条之后的旧对话
             backToNowTick += 1                        // 回底，等着看重答的那条
-            Task { await generateReply(imagesData: imagesData, filesData: filesData) }
+            Task { await generateReply(history: chatStore.messages,
+                                       imagesData: imagesData, filesData: filesData) }
         } else {
             // 「仅修改」没有后续请求，窗口得自己去对齐；「编辑并重新回复」不用管——
             // 后面紧跟的 /chat 会整体覆盖窗口。

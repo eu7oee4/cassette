@@ -87,8 +87,13 @@ GAME_TURN_EVENT_TIMEOUT = 600       # 泵轮单事件间隔上限（watch 链最
 # 时机轴只有一条：TA 静默 ≥1h 的轮间隙——对话进行中永不铸（缓存正值钱）；
 # 1h 恰好是缓存 TTL 边界，过了它缓存横竖已死，此时铸的缓存成本严格为零。
 # 压力轴现在只有「窗口超软阈」一条可用（脏走发送前比对；可折活动段等 PR13）。
-# 硬阈=马拉松对话没间隙也得铸（下个轮尾强铸）——聊天正文**绝不退** harness
+# 硬阈=马拉松对话没间隙也得铸（轮尾强铸）——聊天正文**绝不退** harness
 # auto-compact（摘要压缩=信感复发）。门槛三值施工中调（plan 原话）。
+# 09-05 改判：硬阈强铸**让路排队消息**——app 去掉了生成中禁发（outbox 串行），
+# 轮尾先等一口 grace（done 刚发出去、TA 排队的下一条还在网上），队列非空就把
+# 铸期推迟到队列清空的那个轮尾（ctx 仍超阈，每个轮尾都会重判，必然收敛）。
+# panic 阈是无条件铸的天花板：让路理论上可被连续排队无限推迟，这条挡住上下文
+# 奔着 auto-compact/模型上限跑。正常永远够不到。
 # ⚠️ 08-31：两个阈值现在量的是**真实上下文**（_ctx_from_usage，含系统提示 +
 # 工具 schema + 工具入参返回 + thinking）。此前量的是只数对话文本的估算值，
 # 实测偏小 4.4 倍——这两个数字是在那把偏小的尺子上定的，换尺之后触发频率会
@@ -96,6 +101,8 @@ GAME_TURN_EVENT_TIMEOUT = 600       # 泵轮单事件间隔上限（watch 链最
 CHAT_REFORGE_IDLE_SEC = int(os.environ.get("CHAT_REFORGE_IDLE_SEC", "3600"))
 CHAT_SOFT_TOKENS = int(os.environ.get("CHAT_SOFT_TOKENS", "100000"))
 CHAT_HARD_TOKENS = int(os.environ.get("CHAT_HARD_TOKENS", "150000"))
+CHAT_PANIC_TOKENS = int(os.environ.get("CHAT_PANIC_TOKENS", "175000"))
+HARD_FORGE_GRACE_SEC = float(os.environ.get("HARD_FORGE_GRACE_SEC", "2"))
 IDLE_CHECK_SEC = 60           # 泵在轮间隙醒来看一眼的周期
 CONSOLIDATE_TIMEOUT = 300
 
@@ -1762,18 +1769,29 @@ async def run(handle: session_mgr.LoopHandle, *,
                 if (ok and not handle.meta.get("game_pump")
                         and int(handle.meta.get("ctx_est", 0)) > CHAT_HARD_TOKENS):
                     # （泵开着时不走 chat 硬阈——段内重铸只认 N 张，设计稿三）
-                    # 硬阈强铸：马拉松对话没等到静默间隙——就在这个轮尾铸，
-                    # 绝不留给 harness auto-compact（§4：那是摘要压缩，信感复发）
-                    try:
-                        await _consolidate_and_reforge("硬阈强铸",
-                                                       handle.meta.get("catalog"))
-                    except Exception as e:
-                        print(f"[chat_loop] 硬阈强铸失败，session 关掉惰性重起: {e}",
-                              file=sys.stderr)
-                        await _safe_disconnect(client)
-                        client = None
-                        ledger = []
-                        handle.meta["ledger"] = ledger
+                    # 硬阈强铸：马拉松对话没等到静默间隙——在轮尾铸，绝不留给
+                    # harness auto-compact（§4：那是摘要压缩，信感复发）。
+                    # 09-05 让路：铸前先给 app 排队的下一条留出到达窗口（outbox
+                    # 在 done 后毫秒级补枪），队列非空就推迟——ctx 仍超阈，
+                    # 后续每个轮尾重判，TA 最后一条处理完的轮尾队列必空，铸在
+                    # 那儿落地。panic 阈无条件铸（见卷首节奏注释）。
+                    ctx = int(handle.meta.get("ctx_est", 0))
+                    if ctx <= CHAT_PANIC_TOKENS:
+                        await asyncio.sleep(HARD_FORGE_GRACE_SEC)
+                    if ctx > CHAT_PANIC_TOKENS or handle.queue.empty():
+                        try:
+                            await _consolidate_and_reforge("硬阈强铸",
+                                                           handle.meta.get("catalog"))
+                        except Exception as e:
+                            print(f"[chat_loop] 硬阈强铸失败，session 关掉惰性重起: {e}",
+                                  file=sys.stderr)
+                            await _safe_disconnect(client)
+                            client = None
+                            ledger = []
+                            handle.meta["ledger"] = ledger
+                    else:
+                        print(f"[chat_loop] 硬阈已过（ctx≈{ctx}）但有消息在排队，"
+                              "铸期推迟到队列清空的轮尾", file=sys.stderr)
                 if not ok:
                     print(f"[chat_loop] 轮没收到回复（flags={flags}），"
                           "session 关掉下条重起", file=sys.stderr)

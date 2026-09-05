@@ -1,17 +1,18 @@
 import SwiftUI
 
 /// 底部输入栏：➕(附件) + 笑脸(表情包)按钮 + 文字输入框 + 发送按钮。
+/// 生成中不禁用（09-05）：想说就说，消息进 app 侧 outbox 排队串行发——
+/// 「正在生成」的反馈归 ThinkingNoteRow 三个点小字，不归这排按钮。
 struct InputBar: View {
     @Binding var text: String
     var stickersActive: Bool = false  // 表情面板是否已展开，用来高亮笑脸按钮
-    var sending: Bool = false         // 正在等待后端回复：发送按钮转圈并禁用
     var hasAttachments: Bool = false  // 有暂存待发的表情/图片时，即使没文字也能发送
     var onAttach: () -> Void = { }    // ➕：选照片（以后加文件）
     var onStickers: () -> Void = { }  // 展开/收起表情包面板
     let onSend: () -> Void
 
     private var canSend: Bool {
-        !sending && (!text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || hasAttachments)
+        !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || hasAttachments
     }
 
     var body: some View {
@@ -20,19 +21,17 @@ struct InputBar: View {
             Button(action: onAttach) {
                 Image(systemName: "plus.circle")
                     .font(.system(size: 22, weight: .regular))
-                    .foregroundStyle(sending ? Color(.systemGray3) : Color.userAccent)
+                    .foregroundStyle(Color.userAccent)
                     .frame(width: 32, height: 32)
             }
-            .disabled(sending)
 
             // 笑脸按钮：展开表情包面板
             Button(action: onStickers) {
                 Image(systemName: stickersActive ? "face.smiling.inverse" : "face.smiling")
                     .font(.system(size: 22, weight: .regular))
-                    .foregroundStyle(sending ? Color(.systemGray3) : Color.userAccent)
+                    .foregroundStyle(Color.userAccent)
                     .frame(width: 32, height: 32)
             }
-            .disabled(sending)
 
             // 文字输入框："隐形镜像定高 + TextEditor"——TextField(axis:.vertical)+lineLimit(1...5)
             // 对超长无换行文本的内部测量有 bug（滑不到底、光标错位，实机复现）。
@@ -58,16 +57,11 @@ struct InputBar: View {
                         .fill(Color(.systemGray6))
                 )
 
-            // 发送按钮（等待回复时显示转圈）
+            // 发送按钮：只看有没有内容，不看生成状态
             Button(action: onSend) {
-                if sending {
-                    ProgressView()
-                        .frame(width: 30, height: 30)
-                } else {
-                    Image(systemName: "chevron.up.circle.fill")
-                        .font(.system(size: 30))
-                        .foregroundStyle(canSend ? Color.userAccent : Color(.systemGray3))
-                }
+                Image(systemName: "chevron.up.circle.fill")
+                    .font(.system(size: 30))
+                    .foregroundStyle(canSend ? Color.userAccent : Color(.systemGray3))
             }
             .disabled(!canSend)
         }

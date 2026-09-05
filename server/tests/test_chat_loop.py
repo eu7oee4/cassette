@@ -219,6 +219,9 @@ class ChatLoopTest(unittest.IsolatedAsyncioTestCase):
         self._persist_orig = chat_loop._persist_ledger
         self._ombre_orig = chat_loop._ombre_on
         self._hard_orig = chat_loop.CHAT_HARD_TOKENS
+        self._panic_orig = chat_loop.CHAT_PANIC_TOKENS
+        self._grace_orig = chat_loop.HARD_FORGE_GRACE_SEC
+        chat_loop.HARD_FORGE_GRACE_SEC = 0.01   # 别让每个硬阈用例白等 2s
         chat_loop.forge = types.SimpleNamespace(
             render=lambda msgs, **kw: (self.forged.append(list(msgs)),
                                        f"sid-{len(self.forged)}")[1])
@@ -248,6 +251,8 @@ class ChatLoopTest(unittest.IsolatedAsyncioTestCase):
         chat_loop._persist_ledger = self._persist_orig
         chat_loop._ombre_on = self._ombre_orig
         chat_loop.CHAT_HARD_TOKENS = self._hard_orig
+        chat_loop.CHAT_PANIC_TOKENS = self._panic_orig
+        chat_loop.HARD_FORGE_GRACE_SEC = self._grace_orig
         chat_loop._frame_activities = self._frame_orig
         if not self.task.done():
             self.handle.stop_reason = "test-teardown"
@@ -450,6 +455,97 @@ class ChatLoopReforgeTest(ChatLoopTest):
                              [_stamp("早"), "早，小狗", _stamp("在吗", 2000), "在。"])
             self.assertEqual(self.clients[1].options.resume, "sid-2")
             self.assertTrue(self.handle.meta.get("needs_opening"))
+        finally:
+            state_store.read_recent_window = rw_orig
+
+    async def test_hard_threshold_defers_when_queue_busy(self):
+        """硬阈让路（09-05）：轮尾队列里还有排队消息 → 铸期推迟，先服务消息；
+        队列清空的那个轮尾再铸。"""
+        chat_loop.CHAT_HARD_TOKENS = 1
+        chat_loop._ombre_on = lambda cid: True
+        import state_store
+        mirror = [{"role": "user", "text": "早", "ts": 1000},
+                  {"role": "assistant", "text": "早，小狗", "ts": 1001},
+                  {"role": "user", "text": "在吗", "ts": 2000},
+                  {"role": "assistant", "text": "在。", "ts": 2001},
+                  {"role": "user", "text": "陪我", "ts": 3000},
+                  {"role": "assistant", "text": "嗯。", "ts": 3001}]
+        rw_orig = state_store.read_recent_window
+        state_store.read_recent_window = lambda cid=None: list(mirror)
+        try:
+            hist = [_m("user", "早"), _m("assistant", "早，小狗")]
+            t1 = self._turn(hist, "在吗")
+            hist2 = hist + [_m("user", "在吗", 2000), _m("assistant", "在。", 2001)]
+            t2 = self._turn(hist2, "陪我")
+            self.handle.queue.put_nowait(t1)
+            self.handle.queue.put_nowait(t2)   # t1 轮尾时队列非空 → 让路
+            for _ in range(20):
+                await asyncio.sleep(0)
+                if self.clients and self.clients[-1].queries:
+                    break
+            # 预喂两轮正文 + 末尾一发巩固 result（只有 t2 轮尾那次铸会用到）
+            self.clients[-1].feed(*_text_events("在。"), _result("在。"),
+                                  *_text_events("嗯。"), _result("嗯。"),
+                                  _result("整理好了"))
+            for t in (t1, t2):
+                while True:
+                    c = await asyncio.wait_for(t.out.get(), timeout=2)
+                    if c is None:
+                        break
+            # t1 轮尾没铸：巩固钩子排在 t2 正文之后（[t1, t2, 巩固]）
+            q0 = self.clients[0].queries
+            self.assertEqual(q0.index(chat_loop.CONSOLIDATE_PROMPT), 2)
+            # 铸只发生一次换 client（t2 轮尾，队列已空）
+            self.assertEqual(len(self.clients), 2)
+            self.assertEqual(len(self.forged), 2)
+        finally:
+            state_store.read_recent_window = rw_orig
+
+    async def test_panic_forges_even_with_queue(self):
+        """panic 天花板（09-05）：ctx 超 CHAT_PANIC_TOKENS 时队列非空也照铸——
+        让路不能把上下文送进 harness auto-compact。"""
+        chat_loop.CHAT_HARD_TOKENS = 1
+        chat_loop.CHAT_PANIC_TOKENS = 1
+        chat_loop._ombre_on = lambda cid: True
+        import state_store
+        mirror = [{"role": "user", "text": "早", "ts": 1000},
+                  {"role": "assistant", "text": "早，小狗", "ts": 1001},
+                  {"role": "user", "text": "在吗", "ts": 2000},
+                  {"role": "assistant", "text": "在。", "ts": 2001}]
+        rw_orig = state_store.read_recent_window
+        state_store.read_recent_window = lambda cid=None: list(mirror)
+        try:
+            hist = [_m("user", "早"), _m("assistant", "早，小狗")]
+            t1 = self._turn(hist, "在吗")
+            hist2 = hist + [_m("user", "在吗", 2000), _m("assistant", "在。", 2001)]
+            t2 = self._turn(hist2, "陪我")
+            self.handle.queue.put_nowait(t1)
+            self.handle.queue.put_nowait(t2)   # 队列非空，但 panic 无视它
+            for _ in range(20):
+                await asyncio.sleep(0)
+                if self.clients and self.clients[-1].queries:
+                    break
+            self.clients[0].feed(*_text_events("在。"), _result("在。"),
+                                 _result("整理好了"))
+            while True:
+                c = await asyncio.wait_for(t1.out.get(), timeout=2)
+                if c is None:
+                    break
+            # t1 轮尾就铸了：clients[0] 只有 [t1, 巩固]，t2 会去新 client
+            self.assertEqual(len(self.clients[0].queries), 2)
+            self.assertEqual(self.clients[0].queries[1],
+                             chat_loop.CONSOLIDATE_PROMPT)
+            for _ in range(40):
+                await asyncio.sleep(0)
+                if len(self.clients) >= 2 and self.clients[1].queries:
+                    break
+            # t2 在新 client 上跑；它的轮尾还会再撞 panic，再喂一发巩固 result
+            self.clients[1].feed(*_text_events("嗯。"), _result("嗯。"),
+                                 _result("整理好了"))
+            while True:
+                c = await asyncio.wait_for(t2.out.get(), timeout=2)
+                if c is None:
+                    break
         finally:
             state_store.read_recent_window = rw_orig
 

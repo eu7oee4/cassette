@@ -69,6 +69,15 @@ struct OutgoingFile {
     let mime: String
 }
 
+/// 一次发送的排队单（09-05 生成中不禁发）：气泡已上屏，真正的 POST 由
+/// pumpOutbox 串行补发。排队必须在 app 不在引擎——判脏比对要求每轮快照
+/// 含上一轮回复，并发发送会逼后端每条插话都全量重铸。
+struct OutboxItem {
+    let bubbleIds: [UUID]     // 已上屏的气泡；出队时搬到列表末尾＝真正送出时刻
+    let images: [Data]
+    let files: [OutgoingFile]
+}
+
 /// 发给后端的请求体：完整对话历史（最后一条是用户新消息）。
 /// 后端无状态，靠这份历史理解上下文。session_id 仅供记账，nil 时自动省略。
 private struct ChatRequestBody: Encodable {
