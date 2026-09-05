@@ -62,7 +62,10 @@ struct QuestionCardView: View {
             guard let dl = card.deadline else { return }
             let wait = TimeInterval(dl) - Date().timeIntervalSince1970
             if wait > 0 {
-                try? await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000))
+                // 被取消（换卡/视图离场）≠ 超时：try? 会吞掉 CancellationError
+                // 直接掉进置灰（同 PermitCardView，09-05）
+                do { try await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000)) }
+                catch { return }
             }
             expired = true                          // 后端同刻已超时自拒，这儿只管置灰
         }

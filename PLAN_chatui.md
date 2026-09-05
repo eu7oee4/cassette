@@ -621,3 +621,51 @@ hold/grow/trace/I/webpage_write/code_start/task_run/game_start/mail_send。
   所以小卡的 persona 实际读的是 `persona.example.md`（干净）。
 - `server/chat_loop.py:118` `OPENING_NUDGE` + `:992` `needs_opening = True`
   （重铸后置真）——**机制早就是对的口径，是人设/菜单文本没跟上。**
+
+## 11. 复盘：卡片「已超时」提前亮（2026-09-05）
+
+**现象**（机主发现，我定位）：聊天轮的 permit 卡 10:01:42 挂起、后端足额等到
+10:11:42 才自动拒（消息库里小卡自己说「等 10 分钟没批」，日志对得上），但
+10:07 的截图里卡已经置灰标「已超时」——**灰的时候后端还在等、还能批**。
+
+### 根因：四个条件同时成立
+
+1. **槽位复用不换身份**：`permitCards.first` 塞固定视图槽位，换卡时视图身份不变，
+   `@State`（expired / 倒计时 task / 拒绝理由草稿）跨卡存活。
+2. **取消被吞成完成**：`.task(id:)` 换卡时取消旧任务，`try? await Task.sleep` 把
+   `CancellationError` 吞掉后直接掉进下一行 `expired = true`——取消路径和到点
+   路径合流。
+3. **超时是 app 本地掐表**：置灰靠 deadline+sleep 自算，后端没有「卡超时」事件，
+   掐错了没有纠偏源（syncPermits 只收「不在册」的卡，救不回视图私有的 expired）。
+4. **触发器——两张卡并发**：模型一条 assistant 消息发两个 Bash 调用 → 两张卡排队，
+   机主批掉第一张，第二张顶进同一槽位 → 条件 1+2 点火，第二张卡出生即灰
+   （这一步是读代码推的，没单独复现；时间线实证的是「服务端还在等、卡先灰了」）。
+
+### 归类
+
+- **「等够了才做 X」的代码里，被打断和到点必须是两条出路——静默吞异常会把
+  『被打断』改写成『到点了』。**
+- 槽位复用那半不是新类：就是本文件 ContentView:343 注释里写过的
+  「换内容必须换身份，逐个手动清 @State 是跟漏清赛跑」（8d533c0，08-15 修的
+  换会话串聊天记录）。**类是已知的，U4 两张卡是类修完之后半个月新写的代码，
+  又把它造了回来**——根治口径写在注释里，拦不住新槽位。
+
+### 规避规则
+
+1. `try? await Task.sleep` 后面跟任何动作＝红旗：要么 `do/catch { return }`，
+   要么睡醒先 `guard !Task.isCancelled`。本仓其余 7 处全有防，唯二裸奔的就是两张卡。
+2. 凡「列表.first 塞固定槽位」且子视图带 @State：必须 `.id(内容主键)`。
+   review 判据就搜这个形状。
+3. 「一次一张」的 UI 队列，测试用例必须含「同时来两张、第一张先 resolve」
+   ——模型一条消息能发多个 tool_use，这不是边角是常态。
+4. 本地掐表的过期态，理想是提升到可对齐的数据层（poll 能纠偏）。**评估后不修**：
+   置灰只是提示、误报路已被 1/2 堵死，改动不值。
+
+### 扫描结果
+
+- 横扫 `try? await Task.sleep` 全仓 9 处：修 2（PermitCardView / QuestionCardView，
+  加 catch-return + 父层 `.id(card.id)`），其余 7 处已有防不动
+  （ContentView:210/1534、DraftStore:97、HousePage:74/524、MarkdownMessageView:136
+  无取消源、ProactiveSettings:147、RoomPage:111、PluginsPage:331）。
+- 竖翻 git：槽位复用类第二犯（前科 8d533c0）；吞取消类无前科。
+- 验证状态：模拟器构建过；**真机未验**（属 §9.1 真机验收欠账同一批）。

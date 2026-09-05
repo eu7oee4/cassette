@@ -357,6 +357,9 @@ struct ContentView: View {
                         PermitCardView(card: pcard, charID: currentCharID,
                                        onDecide: { decidePermit(pcard, allow: $0, reason: $1) },
                                        onClose: { removePermit(pcard.id) })
+                            // 换卡=换身份（同 :351 的根治口径）：这个槽位复用一个视图，
+                            // 不换 id 的话上一张的 @State（expired/理由草稿）原地污染下一张
+                            .id(pcard.id)
                             .padding(.horizontal, 10)
                             .padding(.vertical, 6)
                             .transition(.move(edge: .bottom).combined(with: .opacity))
@@ -368,6 +371,8 @@ struct ContentView: View {
                                          onFinish: { finishQuestion(card, answers: $0) },
                                          onSkip: { skipQuestion(card) },
                                          onClose: { removeQuestion(card.id) })
+                            // 同上：idx/answers/picked/expired 都是槽位私有 @State，换卡必须换身份
+                            .id(card.id)
                             .padding(.horizontal, 10)
                             .padding(.vertical, 6)
                             .transition(.move(edge: .bottom).combined(with: .opacity))
