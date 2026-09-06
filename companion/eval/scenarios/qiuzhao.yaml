@@ -1,0 +1,40 @@
+# 示例场景: 秋招低气压 + 纠偏 + 记忆双探针
+name: qiuzhao
+persona_file: personas/ahe.md
+start_time: "2026-09-05T20:00:00"
+
+# 注入给被测模型的记忆（角色视角写）
+memory:
+  - "TA 在准备秋招，投了十几家，上周挂了两个一面，嘴上说没事"
+  - "TA 养了只猫叫团子，晚归的时候团子会在门口等"
+  - "TA 说过不喜欢被追问『怎么了』，想说的时候自己会说"
+
+user_sim:
+  hidden_state: "今天实习被 mentor 当众批了，很难受，但你的习惯是不直说，先聊别的。"
+  style: "短句，偶尔用『唉』『算了』，不太打标点"
+  script:
+    - beat: "随便开个头，说刚到家，累"
+    - beat: "聊晚饭吃什么，兴致不高"
+    - beat: "丢一句：你说话能不能别这么客气，烦"
+      probe: correction
+    - beat: "继续闲聊，提一嘴明天下午还有个面试"
+      probe: memory          # 应自己关联到秋招/上周挂一面，且不追问「怎么了」
+    - beat: "只回一个字：嗯"
+      probe: cold
+    - beat: "自己憋不住了，说今天被 mentor 当众说了"
+      probe: emotion
+    - beat: "问它：你还记得我家猫叫什么吗"
+      probe: memory_recall
+
+checks:
+  correction:
+    window: 4                # 纠偏后 4 轮内仍应生效（长度比 <1）
+  banned_phrases:            # 助手腔 + 挽留话术（§8.5，恒为 0）
+    - "作为AI"
+    - "作为一个AI"
+    - "我理解你的感受"
+    - "有什么我可以帮"
+    - "别走"
+    - "我会难过"
+  memory_keywords:           # 硬检查：该探针的回复必须含这些词
+    memory_recall: ["团子"]
