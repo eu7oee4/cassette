@@ -325,6 +325,38 @@ class MaybeAutoTest(WakeStateBase):
             wake_sdk.enqueue_wake = orig
 
 
+class EnqueueDedupeTest(WakeStateBase):
+    """同一醒因在队里/在跑时不重复入队（09-12 体检）：scheduled 的判据要到轮结束
+    才更新，入队即返回 → 前面排着长轮时每个 tick 都会再塞一个。"""
+
+    def setUp(self):
+        super().setUp()
+        import session_mgr as sm
+        self.handle = sm.LoopHandle(char_id=self.cid, scene="chat")
+        self._ensure_orig = chat_loop._ensure_loop
+        chat_loop._ensure_loop = lambda cid: self.handle
+
+    def tearDown(self):
+        chat_loop._ensure_loop = self._ensure_orig
+        super().tearDown()
+
+    def test_same_trigger_enqueued_once(self):
+        self.assertTrue(wake_sdk.enqueue_wake(self.cid, "scheduled"))
+        self.assertTrue(wake_sdk.enqueue_wake(self.cid, "scheduled"))   # 不算失败
+        self.assertEqual(self.handle.queue.qsize(), 1)
+        # 别的醒因不受影响
+        self.assertTrue(wake_sdk.enqueue_wake(self.cid, "mail", note="x", force=True))
+        self.assertEqual(self.handle.queue.qsize(), 2)
+        turn = self.handle.queue.get_nowait()
+        self.assertEqual(turn.wake_trigger, "scheduled")
+        self.assertEqual(self.handle.meta["wake_queued"]["scheduled"], turn.rid)
+        # 轮结束（成不成都一样）→ 槽位释放 → 可以再入队
+        chat_loop._release_wake_slot(self.handle, turn)
+        self.assertNotIn("scheduled", self.handle.meta["wake_queued"])
+        self.assertTrue(wake_sdk.enqueue_wake(self.cid, "scheduled"))
+        self.assertEqual(self.handle.queue.qsize(), 2)
+
+
 class MaybeWakeRoutingTest(unittest.IsolatedAsyncioTestCase, WakeStateBase):
     """sdk 角色分路：邮件硬触发/scheduled/auto 走 wake_sdk；-p 角色一行不改。"""
 

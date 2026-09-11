@@ -303,11 +303,21 @@ def enqueue_wake(cid: str, trigger: str, note: str = "", force: bool = False) ->
         return {"reply": delivered}
 
     try:
+        handle = chat_loop._ensure_loop(cid)
+        # 同一醒因在队里/在跑 → 不再入队（2026-09-12 体检）。scheduled 的判据
+        # last_wake_at/next_wake_at 都要到轮**结束**才更新，而入队即返回：前面排着
+        # 等权限卡的聊天轮时，每个 tick 都会再塞一个「这是你自己钉的点」醒来轮，
+        # 背靠背跑好几个、各自投递。auto 钟靠「先抹 auto_wake_at 再入队」天然免疫，
+        # 这儿把免疫做成通用的：槽位在 chat_loop 每轮 finally 释放（成不成都放）。
+        slots = handle.meta.setdefault("wake_queued", {})
+        if trigger in slots:
+            logerr(f"sdk 醒来已在队/在跑（{cid}，{trigger}），本 tick 不重复入队")
+            return True
         turn = chat_loop.Turn(
             rid=f"wake-{trigger}-{uuid.uuid4().hex[:8]}", history=[], new_msg={},
-            injection="", finalize=_finalize, kind="wake",
+            injection="", finalize=_finalize, kind="wake", wake_trigger=trigger,
             injection_factory=_injection, on_dead=lambda: _wake_dead(cid, trigger))
-        handle = chat_loop._ensure_loop(cid)
+        slots[trigger] = turn.rid
         handle.queue.put_nowait(turn)
         logerr(f"sdk 醒来入队（{cid}，{trigger}{'，硬触发' if force else ''}）")
         return True

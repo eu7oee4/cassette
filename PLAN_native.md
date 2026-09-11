@@ -1298,3 +1298,59 @@ Cassius 说「昨天」，他看的是 forge 铸出来的产物。`_stamp_times`
    `test_hard_threshold_defers_when_queue_busy` / `test_panic_forges_even_with_queue`。
 
 ---
+
+## 15. 09-12 整仓体检：修的六处与复盘
+
+体检方式：全量测试 + 线上 6 天日志 + 四路审查（核心/外围/iOS/仓库卫生），高严重度条目逐条读代码核过。
+报告全文在 `~/.claude/plans/kind-skipping-flurry.md`。下面只写**修了的**和它们各自属于哪一类。
+「读代码推的」和「线上日志实证的」分开标。
+
+### 15.1 只读闸放行了 `server/characters/*/char.json`（安全，读代码推的）
+
+- **根因**（四条同时成立）：① 只读工具常驻不弹卡；② 闸是黑名单式，列了 `.env*`/mianmian-app/别人的 `state/characters/`；
+  ③ 凭据不止住在 `.env` 一处——char.json 里有邮箱授权码、ombre token/密码、galatea token；
+  ④ `characters.py` 的注释写着「授权码同 .env 待遇」但没有任何代码执行这句话。
+- **归类**：**黑名单式安全面 + 凭据搬了家 = 注释里的承诺没人执行**。凭据从 .env 搬进 char.json 那次（多角色化）没回头看闸。
+- **规则**：凭据搬家的 commit 必须同时改闸；闸的拒绝项按「目录」不按「文件名」（Glob 点名目录就能列文件名）；
+  写「同 X 待遇」这种注释时，当场加测试证明它成立。
+- **扫同类**：`pipeline.readonly_path_guard` 是唯一的只读闸；写类走 permit 弹卡不受影响。`plugins/` 目录也在 CODE_ROOT 下、
+  已 gitignore，里面是插件本体没凭据（插件靠 mounted 下发 CASSETTE_CHAR_ID 认人）——不加。
+- **修**：`pipeline.py` 加一条整目录拒绝 + `test_chat_loop.test_paths` 三种路径断言。
+
+### 15.2 醒来轮失败只记了标签不记正文（线上实证）
+
+- **现象**：09-07 起每天 2-6 次「sdk 醒来轮没走完 → 记 error + 冷却 30 分钟」，双角色都有；日志只有
+  `flags={'error_subtype': 'success'}`——CLI 在 API 报错时发的是 `subtype=success, is_error=true`，原因全在 `result` 字符串里，
+  全仓没有一处打印它。六天不知道是 529 还是限流还是 400。
+- **归类**：**记了错误的分类字段、没记错误的内容**。分类字段是别人（CLI）定义的，它的取值空间和语义会变；正文才是证据。
+- **规则**：任何「记 error」的地方，正文（截断到 300）必须跟着标签一起落；接外部协议的错误时，先看一眼它的错误形状再决定记什么。
+- **修**：`chat_loop._turn_events` 与 `sse.py` 的 result 分支都打 `result[:300]` + `api_error_status`。**先观察一两天再定下一步**。
+
+### 15.3 loop 退出时队里的轮成孤儿（「闸」类第四例，读代码推的）
+
+- **根因**（三条）：① `chat_loop.run` 的 finally 不碰 `handle.queue`；② `session_mgr.start` 每次新建 LoopHandle = 新 queue；
+  ③ `stream_turn` 对 `turn.out` 无限 await、`_ACTIVE_REQS` 只在轮结束时摘。
+  后果链：/chat/stream 永不结束 → app 永远转点点 → `chat_turn_begin` 计数不归零 → 退回 -p 后 `chat_turn_active` 永久拦住这个角色的醒来。
+- **归类**：同 [[cassette-wake-gate-bug-class]]：**一个消费者死了，生产者塞进来的东西没有结局**。和前三次「入口一刀切 return」是同一件事的另一端——那边是进不去没声音，这边是进去了没出来。
+- **规则**（补进那条 memory）：有队列就有「消费者退出时 drain 并给每条结局」；每种退出路径都得让等待方能醒。
+- **扫同类**：`cohabit_queue`/`pet_queue` 是线程+自己的队列，退出即进程退出，不适用；`game_loop` 老路 `handle.queue` 同构——
+  它的 finally 也不 drain，但 game 独立 loop 已并入统一路（STORY_ENGINE=unified），老路休眠，**不修**。
+- **修**：`chat_loop._finish_orphans`，口径同轮内异常（error+done+None，醒来轮走 on_dead）；不往新 loop 转投。测试 `test_loop_exit_finishes_queued_turns`。
+
+### 15.4 scheduled 钟醒每个 tick 重复入队（读代码推的）
+
+- **根因**（三条）：① 判据 `last_wake_at`/`next_wake_at` 只在轮**结束**更新；② `enqueue_wake` 入队即返回（老路 `run_in_executor` 是阻塞到跑完的）；
+  ③ auto 钟有「先抹 auto_wake_at 再入队」，scheduled 没有同款。
+- **归类**：**「入队」被当成「执行」——判据在执行端更新、入口端复用**。老路同步执行时二者重合，升 A 改成队列后就分开了，只给 auto 补了一半。
+- **规则**：把同步调用改成入队时，所有「上次做过没」的判据都要问一句：它在入队那刻更新还是在跑完那刻更新？入队时占槽、跑完时释放，槽位跟着 handle 走。
+- **修**：`handle.meta["wake_queued"]` 槽位，`enqueue_wake` 占、`chat_loop` 每轮 finally 释放（成不成都放，孤儿收尾也放）。测试 `EnqueueDedupeTest`。
+
+### 15.5 公开仓里的 PII（仓库卫生，实证）
+
+- `PLAN_jobhunt.md` 里 Cass 的 163 信箱（=手机号）从 `5aa2438` 起在公网；顺带 tailnet IP、`/Users/nemu` 路径、一次性探针里的会话 UUID。
+- 当前树已清；**历史是否改写由机主拍**（filter-repo + force push，或接受已泄露）。
+- **规则**：PLAN 文档里写外部账号一律写「在 char.json 里」不写字面；测试里的路径/IP 用文档保留段（`/Users/x`、`100.64.0.1`）。
+
+### 15.6 iOS 两处（读代码推的，待装新包验）
+
+见 PLAN_chatui §12。

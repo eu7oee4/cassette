@@ -227,7 +227,10 @@ async def translate_events(events, finalize):
         elif t == "result":
             if ev.get("is_error"):
                 is_error = True
-                logerr(f"/chat/stream result 报错: {ev.get('subtype')}")
+                # 正文一起打（09-12）：subtype 多半是 success，原因只在 result 里。
+                logerr(f"/chat/stream result 报错: {ev.get('subtype')} "
+                       f"api_error_status={ev.get('api_error_status')} "
+                       f"{str(ev.get('result') or '')[:300]!r}")
                 break
             result_text = ev.get("result")
 

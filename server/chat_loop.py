@@ -255,6 +255,7 @@ class Turn:
     kind: str = "chat"                   # "chat" | "wake"（轮来源标签，投递路由靠它）
     injection_factory: Optional[Callable[[], str]] = None
     on_dead: Optional[Callable[[], None]] = None
+    wake_trigger: str = ""               # kind="wake" 时的醒因（去重槽位的键，09-12）
     # 判脏时从窗口尾巴摘下来的 `[图片]` 占位（absorbable_tail）：不算脏，但账要补记。
     # 轮内填，轮尾和 new_msg 一起进账。
     absorbed: list = field(default_factory=list)
@@ -803,6 +804,12 @@ async def _turn_events(client, handle: session_mgr.LoopHandle,
                         bool(handle.meta.get("game_pump")))
             if msg.is_error:
                 flags["error_subtype"] = msg.subtype or "?"
+                # 错误正文必须落日志（2026-09-12 体检）：CLI 在 API 报错时发的是
+                # subtype=success + is_error=true，原因全在 result 字符串里；之前只
+                # 打 subtype，09-07 起每天 2-6 次「醒来轮没走完」查不出是 529 还是别的。
+                print(f"[chat_loop] 轮结果报错（{handle.char_id}，subtype={msg.subtype}，"
+                      f"api_error_status={msg.api_error_status}）："
+                      f"{str(msg.result or '')[:300]!r}", file=sys.stderr)
             yield {"type": "result", "result": msg.result,
                    "is_error": msg.is_error, "subtype": msg.subtype,
                    "api_error_status": msg.api_error_status}
@@ -1809,6 +1816,7 @@ async def run(handle: session_mgr.LoopHandle, *,
                 turn.out.put_nowait(sse.sse({"type": "done"}))
             finally:
                 turn.out.put_nowait(None)
+                _release_wake_slot(handle, turn)
                 handle.meta.pop("turn_kind", None)   # 门的默认态=放行（巩固轮也走默认）
                 if not ok:
                     if turn.on_dead is not None:
@@ -1835,11 +1843,55 @@ async def run(handle: session_mgr.LoopHandle, *,
         why = handle.stop_reason or "unknown-exit"
         print(f"[chat_loop] loop 退出：char={handle.char_id} reason={why}",
               file=sys.stderr)
+        _finish_orphans(handle, why)
         try:
             await _pump_close(f"loop-exit: {why}")   # 拿着游戏时 loop 死了：锁/账别悬着
         except Exception as e:
             print(f"[chat_loop] 退出时放下游戏失败: {e}", file=sys.stderr)
         await _safe_disconnect(client)
+
+
+def _release_wake_slot(handle: session_mgr.LoopHandle, turn) -> None:
+    """醒来轮结束（不管成没成）→ 放开这个醒因的去重槽位（enqueue_wake 占的）。"""
+    if getattr(turn, "kind", "") == "wake":
+        slots = handle.meta.get("wake_queued")
+        if isinstance(slots, dict):
+            slots.pop(turn.wake_trigger or "", None)
+
+
+def _finish_orphans(handle: session_mgr.LoopHandle, why: str) -> None:
+    """loop 退出时，队里还没轮到的 Turn 一个个给结局（2026-09-12 体检，「闸」类第四例）。
+
+    以前这儿什么都不做：正在跑的那轮有 error+done，排在后面的一个字都收不到——
+    stream_turn 对着 turn.out 永远 await，/chat/stream 永不结束，_ACTIVE_REQS 一直
+    含 rid，app 问 /chat/active 得「还在跑」永远转点点；chat_turn_begin 计数不归零，
+    这个角色退回 -p 后 chat_turn_active 永久拦住它的一切醒来。09-05 app outbox
+    串行排队之后第二条常在队里，暴露面比以前大。
+    口径同轮内异常：error+done+None，醒来轮走 on_dead（记 error 心流+冷却）。
+    不往新 loop 转投：chat 轮的窗口已过时、醒来轮重跑会双投，app 侧 rescue 会提示重发。"""
+    n = 0
+    while True:
+        try:
+            turn = handle.queue.get_nowait()
+        except asyncio.QueueEmpty:
+            break
+        if turn is _KICK or isinstance(turn, PumpNote):
+            continue
+        n += 1
+        try:
+            turn.out.put_nowait(sse.sse({"type": "error",
+                                         "content": "连接中断了，大模型那边出了点问题。"}))
+            turn.out.put_nowait(sse.sse({"type": "done"}))
+            turn.out.put_nowait(None)
+            _release_wake_slot(handle, turn)
+            if turn.on_dead is not None:
+                turn.on_dead()
+        except Exception as e:
+            print(f"[chat_loop] 孤儿轮收尾失败（rid={getattr(turn, 'rid', '?')}）: {e}",
+                  file=sys.stderr)
+    if n:
+        print(f"[chat_loop] loop 退出时队里还有 {n} 轮没轮到，已各发 error+done"
+              f"（char={handle.char_id} reason={why}）", file=sys.stderr)
 
 
 # ---------- 路由入口 ----------
