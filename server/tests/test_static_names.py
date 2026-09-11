@@ -51,7 +51,7 @@ class BasicsMcpTest(unittest.TestCase):
         import basics_mcp
         for bad in ("http://localhost:8000/chat", "http://127.0.0.1:8765/",
                     "http://192.168.1.1/", "http://10.0.0.5/",
-                    "http://100.103.75.38:8000/"):
+                    "http://100.64.0.1:8000/"):
             with self.assertRaises(ValueError, msg=bad):
                 basics_mcp.fetch(bad)
         for bad in ("file:///etc/passwd", "ftp://x/y", "notaurl"):

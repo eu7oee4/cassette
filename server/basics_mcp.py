@@ -69,7 +69,7 @@ UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 " \
 # 198.18.0.0/15（IANA benchmarking 段，Python 的 is_private 认它），example.com
 # 解析出来就是 198.18.0.57。那个段在这儿是代理的转发入口，不是能连到的内网服务，
 # 放行；真要收紧得先搞清楚这台机器的代理拓扑，别拿"看着像内网"当判据。
-# 100.64.0.0/10 必须挡：Tailscale 的 tailnet 在那儿（手机就是 100.103.75.38）。
+# 100.64.0.0/10 必须挡：Tailscale 的 tailnet 在那儿（手机的 tailnet 地址就在这一段）。
 _BLOCKED = [ipaddress.ip_network(n) for n in (
     "0.0.0.0/8", "10.0.0.0/8", "127.0.0.0/8", "169.254.0.0/16",
     "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10",   # ← tailnet

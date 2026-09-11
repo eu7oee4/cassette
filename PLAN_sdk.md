@@ -597,7 +597,7 @@
 
 定案：**限根目录 + 黑名单**，不做全盘放行。
 
-- 根目录：cassette 仓（`/Users/nemu/cassette`）。
+- 根目录：cassette 仓（`~/cassette`）。
 - 黑名单（读都不给）：`.env` / 任何凭据文件；`state/characters/<别的角色>/`
   （串台面，[[cassette-charswitch-bug-class]] 的新一维）；私有仓
   `mianmian-app`。
@@ -1484,7 +1484,7 @@ PR8 发送前比对免费吃掉（PR11 实证）。**
   批准落后端状态 → 门查记录不查对话；一场一批、收摊失效、超时自动拒（纪律同
   §5.5 权限卡）。**门的粒度＝写类工具**（不是整场会话）。
 - **只读常驻 + 黑名单**（§5.3 安全面，机主 08-31 拍板）：只读工具挂所有轮次，
-  限根目录 `/Users/nemu/cassette`；黑名单＝`.env`/凭据、别的角色的
+  限根目录 `~/cassette`；黑名单＝`.env`/凭据、别的角色的
   `state/characters/`、私有仓 `mianmian-app`。缺口真机撞见再从执行层补。
 - **并入本体**（三轮改判口径，见设计稿三）：**code 不是第三种轮来源**——上机＝
   状态位 ＋ 带外批准门 ＋ computer 互斥锁，与 game 泵同构，轮仍只有 chat/wake

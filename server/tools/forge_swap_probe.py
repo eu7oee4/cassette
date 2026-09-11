@@ -21,10 +21,11 @@ import time
 import uuid
 from pathlib import Path
 
-sys.path.insert(0, "/Users/nemu/cassette/server")
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import forge
 
-SRC = Path.home() / ".claude/projects/-Users-nemu-cassette/3d283a7b-7b2d-4f22-8254-7a3aa4ebeffb.jsonl"
+# 用法：python tools/forge_swap_probe.py <某份 ~/.claude/projects/<仓>/<session>.jsonl>
+SRC = Path(sys.argv[1]) if len(sys.argv) > 1 else None
 WANT_EVENTS = 20          # 截多少条消息事件（含 tool_result 那些 user 槽）
 MODEL = "claude-opus-5"
 
@@ -197,6 +198,10 @@ async def sdk_resume(sid: str, cwd: Path) -> str:
 
 
 def main() -> int:
+    if SRC is None or not SRC.is_file():
+        print(__doc__.strip().splitlines()[0])
+        print("用法：python tools/forge_swap_probe.py <transcript.jsonl>", file=sys.stderr)
+        return 2
     evs = load_msg_events(SRC)
     print(f"源 transcript：{SRC.name}，可用消息事件 {len(evs)}")
     base = cut_at_turn_boundary(evs, WANT_EVENTS)
