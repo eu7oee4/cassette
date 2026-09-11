@@ -1380,6 +1380,13 @@ def readonly_path_guard(tool_input: Optional[dict],
             return "凭据类的文件（.env 之类）不在你可看的范围里"
         if "mianmian-app" in rp.parts:
             return "mianmian-app 是私人仓，不在你可看的范围里"
+        # 角色配置目录 server/characters/ 整个不给看（2026-09-12 体检发现）：
+        # char.json 装着邮箱授权码、ombre token/密码、galatea token——凭据待遇同 .env，
+        # characters.py 的注释早这么写了，闸没执行。整目录挡而不是只挡 char.json：
+        # 目录里以后放什么都可能是凭据，且 Glob/Grep 点名目录就能把文件名列出来。
+        import characters as _chars
+        if rp.is_relative_to(_chars.CHARS_DIR.resolve()):
+            return "角色配置目录（server/characters/）里有凭据，不在你可看的范围里"
         croot = state_store.CHAR_STATE_ROOT.resolve()
         if rp.is_relative_to(croot):
             rel = rp.relative_to(croot)

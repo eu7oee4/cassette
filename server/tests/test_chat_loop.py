@@ -378,6 +378,44 @@ class ChatLoopTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn(b'"type": "done"', blob)
         self.assertEqual(self.handle.meta["ledger"], [])   # 没收尾不入账
 
+    async def test_loop_exit_finishes_queued_turns(self):
+        """loop 死时队里还排着的轮也要有结局（09-12 体检，「闸」类）：
+        error+done+None 各一份，醒来轮的 on_dead 被调，槽位释放。"""
+        class CancelLeakClient(FakeClient):
+            async def receive_messages(self):
+                raise asyncio.CancelledError()
+                yield  # pragma: no cover
+
+        sm._registry.clear()
+        handle = sm.LoopHandle(char_id="cass", scene="chat3")
+        task = asyncio.create_task(chat_loop.run(
+            handle, client_factory=lambda o: CancelLeakClient(o),
+            options_factory=lambda cid, catalog=None:
+                types.SimpleNamespace(cwd="/tmp/nowhere", resume=None)))
+        await asyncio.sleep(0)
+        first = self._turn([_m("user", "早")], "在吗")
+        second = self._turn([_m("user", "早")], "还在吗")
+        dead = []
+        wake = chat_loop.Turn(rid="wake-scheduled-x", history=[], new_msg={},
+                              injection="", finalize=lambda r, s: {"reply": r},
+                              kind="wake", wake_trigger="scheduled",
+                              on_dead=lambda: dead.append(1))
+        handle.meta["wake_queued"] = {"scheduled": wake.rid}
+        for t in (first, second, wake):
+            handle.queue.put_nowait(t)
+        await asyncio.wait_for(task, timeout=2)
+        for t in (second, wake):
+            chunks = []
+            while not t.out.empty():
+                chunks.append(t.out.get_nowait())
+            self.assertIsNone(chunks[-1], "结局要以 None 收尾")
+            blob = b"".join(c for c in chunks if c)
+            self.assertIn(b'"type": "error"', blob)
+            self.assertIn(b'"type": "done"', blob)
+        self.assertEqual(dead, [1])
+        self.assertEqual(handle.meta["wake_queued"], {})
+        self.assertTrue(handle.queue.empty())
+
     async def test_foreign_cancel_marks_engine_error(self):
         """无 stop_reason 的取消=引擎死外泄（08-30 事故的同类回归）。"""
         class CancelLeakClient(FakeClient):
@@ -1212,7 +1250,16 @@ class ReadonlyGuardTest(unittest.TestCase):
         self.assertIsNotNone(g({"file_path": str(root / ".env")}, "cass"))
         self.assertIsNotNone(g({"file_path": str(root / "server" / ".env.local")},
                                "cass"))
-        self.assertIsNotNone(g({"path": "/Users/nemu/mianmian-app/x.py"}, "cass"))
+        self.assertIsNotNone(g({"path": "/Users/x/mianmian-app/x.py"}, "cass"))
+        # 拒：角色配置目录（server/characters/）——char.json 里是凭据（09-12 体检）。
+        # 自己的、别人的、整个目录，三种都挡；旁边的 characters.py 模块照常放行。
+        import characters
+        for cid in ("cass", "default"):
+            self.assertIsNotNone(
+                g({"file_path": str(characters.CHARS_DIR / "cass" / "char.json")}, cid))
+            self.assertIsNotNone(g({"path": str(characters.CHARS_DIR)}, cid))
+        self.assertIsNone(g({"file_path": str(root / "server" / "characters.py")},
+                            "cass"))
         other = state_store.CHAR_STATE_ROOT / "default" / "wake_log.jsonl"
         self.assertIsNotNone(g({"file_path": str(other)}, "cass"))
         # 相对路径必须解析后再查：「../」一步就从恒空 cwd 爬进 state/characters
