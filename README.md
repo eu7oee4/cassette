@@ -30,7 +30,7 @@ Give it a name, write it a persona, add a few stickers — and it will "wake up"
 Three design principles:
 
 1. **The app owns the chat history.** The backend keeps no conversation of its own — every request carries the recent history from the app (100 messages by default), and the backend assembles it into a one-shot prompt for the model. That's why editing, deleting and regenerating are purely local operations, and the history travels with the app.
-2. **One throwaway `claude -p` subprocess per message.** No long-lived session; context comes from the injected history, not from a living process. The persona file is passed via `--system-prompt-file`, which **replaces** the default system prompt rather than appending to it — the model sees exactly the character you wrote and nothing else. Credentials come from the CLI login session (the subprocess environment has `ANTHROPIC_API_KEY` stripped): with a subscription account, both chat and wake-ups draw on your subscription quota and never incur metered API charges. If you'd rather use an API key, delete the line that strips it in `pipeline.py`.
+2. **One throwaway `claude -p` subprocess per message** (the default, `CHAT_ENGINE=p`). The current production shape is `CHAT_ENGINE=sdk`: one long-lived Agent SDK session per character, with the app's history forged into the session transcript and re-forged whenever the two drift (see `PLAN_sdk.md`, `PLAN_native.md`). The paragraph below describes the default path. No long-lived session; context comes from the injected history, not from a living process. The persona file is passed via `--system-prompt-file`, which **replaces** the default system prompt rather than appending to it — the model sees exactly the character you wrote and nothing else. Credentials come from the CLI login session (the subprocess environment has `ANTHROPIC_API_KEY` stripped): with a subscription account, both chat and wake-ups draw on your subscription quota and never incur metered API charges. If you'd rather use an API key, delete the line that strips it in `pipeline.py`.
 3. **The backend stores only the minimum state needed to wake up** (`server/state/`, gitignored): a window snapshot of the recent conversation, the wake log, the wake schedule (its self-chosen next wake-up time, preserved across restarts), the pending outbox, the sticker catalog, and settings. When the app isn't around, this is what the model wakes up into.
 
 ## How waking up works
@@ -56,6 +56,11 @@ A few details:
 - Repeated failures (an expired CLI login, say) trigger a 30-minute backoff instead of burning a doomed subprocess every tick.
 
 ## Code mode
+
+> **Status (2026-09):** this section describes the original tmux-based code mode, which is now
+> disabled by default and being retired. The long-lived-session engine replaced it with a
+> per-call write permission: file edits and shell commands are requested from the chat itself and
+> approved on a card in the app (`WRITE_TOOLS=1`, `PLAN_native.md`). The inline terminal panel is gone.
 
 Everywhere else in this project the model runs with a per-tool allowlist and no built-in tools.
 Code mode is the deliberate exception: it starts a long-lived interactive `claude` inside a tmux
@@ -175,6 +180,12 @@ Ombre also has two dependencies that **change without you touching anything**: t
 
 One more of the same kind: that alias may be re-pointed at a **thinking model**, or the model you already use may switch thinking on by default one day. Hybrid-reasoning models like DeepSeek and Gemini spend output tokens reasoning first, and the reasoning shares **the same `max_tokens` budget** as the answer — with headroom that only costs you money and latency (measured: one diary digest on DeepSeek burns three thousand reasoning tokens), without headroom the reasoning eats the entire budget and the answer comes back as an empty string. On Ombre that lands as the two silent failures above: dehydration degrades to a truncated excerpt, and diary digest (`grow`) reports "empty result" — nothing from that day gets stored, and the log only says JSON parse failed, never that reasoning ate the budget. Ombre turns it off by default for providers it can identify (Gemini goes through the native `thinkingConfig`, `thinking_budget` defaults to 0), but anything can sit behind `openai_compat`, so it can't decide for you — you turn it off yourself under `dehydration.extra_body` in `config.yaml` (`thinking: {type: disabled}` for DeepSeek; the parameter is not portable across providers, so change it when you switch). Dehydration and diary digest are mechanical transforms that don't need reasoning: turning it off is cheaper and sidesteps this whole class of silent failure.
 
+## Running the tests
+
+```
+cd server && .venv/bin/python -m unittest discover -s tests -t .
+```
+
 ## Project layout
 
 ```
@@ -184,7 +195,15 @@ server/
                   #   disconnect-rescue guard
   config.py       # config loading: .env → constants; name resolution (app settings first,
                   #   env as fallback)
-  pipeline.py     # prompt assembly, claude -p subprocess, time awareness, inline markers
+  pipeline.py     # prompt assembly, claude -p subprocess, time awareness, inline markers,
+                  #   read-only path guard
+  chat_loop.py    # the long-lived per-character session (CHAT_ENGINE=sdk): one queue per
+                  #   character, reforge on drift, wake-ups and game "pump" ride the same stream
+  wake_sdk.py     # wake-ups on the long-lived session (enqueue, deliver, dedupe)
+  forge.py        # transcript forging: rebuilds the CLI session file from the app's history
+  permits.py / questions.py   # permission cards / question cards (can_use_tool → app → answer)
+  mail_bridge.py / jobhunt_store.py / game_*.py / pet_*.py / cohabit*.py / world.py
+                  #   mailbox, job hunt, game pump, pets, cohabitation world (see PLAN_*.md)
   sse.py          # stream-json → SSE translation (marker filtering, idle-timeout detection)
   wake.py         # wake scheduler: local pre-gates → four-section protocol → interruption control
   state_store.py  # runtime state (plain files, atomic writes + locks)
@@ -194,12 +213,11 @@ server/
   persona.example.md
   code_addendum.example.md   # working rules appended to the persona in code mode
 ios/cassette/     # SwiftUI app: chat UI, sticker library, settings, local persistence
-  CodeTerminalPanel.swift    # the inline terminal (two heights, output pinned to the bottom)
 ```
 
 ## Data and safety
 
-- Chat history lives in the app sandbox at `Documents/chat_history.json`; the backend keeps only a shadow snapshot of the recent window (≤300 messages).
+- Chat history lives in the app sandbox at `Documents/conversations/<character>/chat_history.json` (one file per character); the backend keeps only a shadow snapshot of the recent window (≤300 messages).
 - Every endpoint except the `/health` check requires the `X-Auth` shared key; with no key configured they all refuse requests (fail closed), and the comparison is constant-time.
 - The wake log at `server/state/wake_log.jsonl` is append-only. It holds the full inner monologue from every wake-up, including the text of messages that interruption control blocked from ever being sent, and it is never pruned (the pending outbox has a 7-day cleanup; this doesn't). It never leaves your Mac, but it is the single most intimate file in the project — worth knowing it exists.
 - The model subprocess runs with `--tools ""` by default: conversation only. With Ombre mounted, only the memory-tool whitelist is allowed (`--strict-mcp-config` shuts out any other MCP servers on the machine, `--allowedTools` pre-approves so nothing prompts) — built-in tools like Bash and file access are never enabled, and `--dangerously-skip-permissions` is never used.

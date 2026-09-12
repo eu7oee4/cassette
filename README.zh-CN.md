@@ -30,7 +30,7 @@
 三条设计主线：
 
 1. **app 是聊天历史的唯一主人**。后端不记对话——每次请求 app 把最近的完整历史发过来（默认 100 条），后端拼成一次性 prompt 交给模型。编辑、删除、重新生成因此都是纯本地操作，历史随 app 走。
-2. **每条消息一个一次性 `claude -p` 子进程**。没有常驻会话，上下文靠历史注入。人设文件通过 `--system-prompt-file` **完整替换**默认系统提示词——模型看到的就是你写的人格，别的什么都不混进来。凭据走 CLI 登录态（子进程环境里主动删掉 `ANTHROPIC_API_KEY`）——订阅账号登录时聊天和醒来全部吃订阅额度，不产生按量 API 计费；想走 API key 的话，把 `pipeline.py` 里删 key 的那行去掉即可。
+2. **每条消息一个一次性 `claude -p` 子进程**（默认，`CHAT_ENGINE=p`）。现在生产跑的是 `CHAT_ENGINE=sdk`：每个角色一条常驻的 Agent SDK 会话，app 的历史铸进会话 transcript、两边一漂移就重铸（见 `PLAN_sdk.md`、`PLAN_native.md`）。下面这段说的是默认那条路。没有常驻会话，上下文靠历史注入。人设文件通过 `--system-prompt-file` **完整替换**默认系统提示词——模型看到的就是你写的人格，别的什么都不混进来。凭据走 CLI 登录态（子进程环境里主动删掉 `ANTHROPIC_API_KEY`）——订阅账号登录时聊天和醒来全部吃订阅额度，不产生按量 API 计费；想走 API key 的话，把 `pipeline.py` 里删 key 的那行去掉即可。
 3. **后端只存"醒来所需的最小状态"**（`server/state/`，已 gitignore）：最近对话的窗口快照、醒来日志、醒来排程（自定的下次醒来时间点，跨重启保留）、待送达盒子、表情清单、设置。app 不在场时，模型靠这些醒来。
 
 ## 自主醒来是怎么工作的
@@ -56,6 +56,10 @@ NEXT:     希望多久后再醒（可写"无"）
 - 连续失败（如 CLI 登录态过期）→ 30 分钟退避，不会每个 tick 都白起进程。
 
 ## Code 模式
+
+> **现状（2026-09）**：这一节写的是最早的 tmux 版 Code 模式，现在默认关闭、正在退役。常驻会话
+> 引擎把它换成了「一次写权限申请」：改文件、跑命令都从聊天里直接申请，在 app 的卡片上批
+> （`WRITE_TOOLS=1`，见 `PLAN_native.md`）。内联终端面板已经拆掉。
 
 本项目其它地方，模型都跑在逐个工具的白名单里、内置工具一个不开。Code 模式是有意为之的例外：
 它在你 Mac 上的 tmux 里起一个长期活着的交互式 `claude`，Bash、写文件，全都有。这正是它的用处，
@@ -181,7 +185,13 @@ server/
   app.py          # FastAPI 路由（/health /chat /chat/stream /chat/active /pending
                   #   /pending/ack /settings /describe_sticker）+ 流式心跳、断连补投守护
   config.py       # 配置读取：.env → 常量；名字取值（app 设置优先，env 兜底）
-  pipeline.py     # prompt 拼装、claude -p 子进程、时间感知、内联标记解析
+  pipeline.py     # prompt 拼装、claude -p 子进程、时间感知、内联标记解析、只读路径闸
+  chat_loop.py    # 常驻 session（CHAT_ENGINE=sdk）：每角色一条队列、漂移即重铸、醒来和游戏泵走同一条流
+  wake_sdk.py     # 常驻 session 上的醒来（入队、投递、去重）
+  forge.py        # 铸造：从 app 的历史重建 CLI 的会话文件
+  permits.py / questions.py   # 权限卡 / 问答卡（can_use_tool → app → 回答）
+  mail_bridge.py / jobhunt_store.py / game_*.py / pet_*.py / cohabit*.py / world.py
+                  #   信箱、求职、游戏泵、宠物、同居世界（各见 PLAN_*.md）
   sse.py          # stream-json → SSE 的流式翻译（标记过滤、空闲超时检测）
   wake.py         # 醒来调度器：本地预闸门 → 四段协议 → 打扰控制
   state_store.py  # 运行时状态（纯文件，原子写 + 锁）
@@ -191,12 +201,11 @@ server/
   persona.example.md
   code_addendum.example.md   # Code 模式下追加在人设后面的干活守则
 ios/cassette/     # SwiftUI app：聊天界面、表情库、设置页、本地持久化
-  CodeTerminalPanel.swift    # 内联终端（两档高度、输出永远贴底）
 ```
 
 ## 数据与安全
 
-- 聊天记录存 app 沙盒 `Documents/chat_history.json`；后端只保留一份最近窗口的影子快照（≤300 条）。
+- 聊天记录存 app 沙盒 `Documents/conversations/<角色>/chat_history.json`（每个角色一份）；后端只保留一份最近窗口的影子快照（≤300 条）。
 - 除 `/health` 健康检查外，所有接口都要过 `X-Auth` 共享密钥认证；没配密钥时这些接口全部拒绝（fail closed），密钥比较用常数时间。
 - 醒来日志 `server/state/wake_log.jsonl` 是 append-only 的，存着每次醒来的完整内心独白、连同被打扰控制拦下没发出的消息正文，且不会自动清理（待送达盒子有 7 天清理，它没有）。它不出你的 Mac，但整个项目里私密浓度最高的就是这个文件，值得知道它的存在。
 - 模型子进程默认 `--tools ""`，纯对话；挂了 Ombre 时也只放行记忆工具白名单（`--strict-mcp-config` 屏蔽机器上其它 MCP，`--allowedTools` 预批准免弹权限），Bash / 文件读写这类内置工具永远不开，也从不使用 `--dangerously-skip-permissions`。
