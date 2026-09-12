@@ -1474,8 +1474,8 @@ async def run(handle: session_mgr.LoopHandle, *,
             print(f"[chat_loop] 冲补醒失败: {e}", file=sys.stderr)
         if why.startswith("engine-error"):
             try:
-                from notify import bark_push
-                bark_push("游戏那边引擎连着挂，替他把游戏放下了"
+                from notify import bark_push_bg
+                bark_push_bg("游戏那边引擎连着挂，替他把游戏放下了"
                           "（画面原地不动，可以重新 game_start）")
             except Exception:
                 pass
@@ -1621,8 +1621,8 @@ async def run(handle: session_mgr.LoopHandle, *,
                         print("[chat_loop] PumpNote 到达时泵已停，弃投",
                               file=sys.stderr)
                         try:
-                            from notify import bark_push
-                            bark_push("刚那条消息赶上他放下游戏的空当，没送进去"
+                            from notify import bark_push_bg
+                            bark_push_bg("刚那条消息赶上他放下游戏的空当，没送进去"
                                       "——聊天框再发一次就好")
                         except Exception:
                             pass

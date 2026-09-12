@@ -41,6 +41,7 @@ from email.utils import formataddr, getaddresses, make_msgid, parsedate_to_datet
 from pathlib import Path
 
 import config
+from notify import logerr
 import state_store
 
 _BODY_CAP = 20000        # 读信正文上限（字符）：防一封巨型 HTML 邮件吃光上下文
@@ -108,9 +109,15 @@ def _cfg(char_id=None) -> dict:
 
 
 # ---------- IMAP ----------
+IMAP_TIMEOUT_SEC = 30   # 单次 socket 操作上限；watcher 每 5 分钟一拍，30s 足够慢网
+
+
 def _imap(cfg: dict) -> imaplib.IMAP4_SSL:
     try:
-        conn = imaplib.IMAP4_SSL(cfg["imap_host"], 993)
+        # timeout 必须给（2026-09-12 体检，「闲置致死」类）：不给的话 search/fetch/store 全无
+        # 上限，半开连接（Wi-Fi 切换/NAT 老化）让唯一的 watcher 线程永久卡在 recv 上——
+        # 异常路径不触发、err_logged 不亮，两个角色的邮件唤醒一起静默失效直到重启。
+        conn = imaplib.IMAP4_SSL(cfg["imap_host"], 993, timeout=IMAP_TIMEOUT_SEC)
         conn.login(cfg["address"], cfg["auth_code"])
     except Exception as e:
         raise MailError(f"连不上邮箱（{cfg['imap_host']}）：{e}") from e
@@ -124,6 +131,10 @@ def _imap(cfg: dict) -> imaplib.IMAP4_SSL:
     try:
         conn.select("INBOX")
     except Exception as e:
+        try:
+            conn.logout()   # 09-12：以前抛了就走，连接泄漏
+        except Exception:
+            pass
         raise MailError(f"打不开收件箱：{e}") from e
     return conn
 
@@ -390,6 +401,9 @@ def watch_tick(char_id=None) -> None:
     try:
         typ, data = conn.uid("search", None, "ALL")
         if typ != "OK":
+            # 09-12：以前无声 return——163 限流/"Unsafe Login" 复发时每 5 分钟静默一次，
+            # 看起来只是「没新信」。
+            logerr(f"mail watcher（{cid}）：IMAP search 返回 {typ}，本拍跳过")
             return
         uids = sorted(int(u) for u in (data[0] or b"").split())
         if not uids:

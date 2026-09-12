@@ -1354,3 +1354,20 @@ Cassius 说「昨天」，他看的是 forge 铸出来的产物。`_stamp_times`
 ### 15.6 iOS 两处（读代码推的，待装新包验）
 
 见 PLAN_chatui §12。
+
+### 15.7 事件循环上的阻塞 IO（读代码推的）
+
+- game 工具（`game_loop.build_game_server`）是 async def，里面却是 `time.sleep`/`subprocess.run`/
+  `ensure_device`（冷启动 90s）——SDK 在主循环上 await 它们，`game_watch` 一次 6 张×5s、开机期间
+  整个后端停摆。Bark 推送（`urlopen(timeout=5)`）在 `can_use_tool` 回调、收摊路径、补投路径上同款。
+- **归类**：**把同步库塞进 async def 不会报错，只会让所有人一起等**。判据：async def 里出现
+  `time.sleep`/`subprocess.run`/`urlopen`/`requests` 就是红旗。
+- **修**：等待改 `asyncio.sleep`，子进程/探活走 `asyncio.to_thread`（工具逻辑一字不改）；
+  `notify.bark_push_bg` 后台线程版，事件循环上的 7 处调用点换过去；`wake_sdk` 那处要 ok 值
+  记 wake_log，保留同步（每次醒来一发）。
+- **扫同类**：`pipeline.ombre_alive`（1.5s 探活，`_open_session` 上）、`browser_keeper.apply_choice`
+  的 pgrep（每轮 finalize）——**这次不动**：都 <2s 且有超时，先看 game/Bark 两处改完的效果。
+  插件仓 `game_session_mcp.py` 同款（sips 临时文件 + 阻塞）不在本仓。
+- 顺手：`_shot_bytes` 的 sips 失败路径临时 PNG 不清（P3）进了 finally；`mail_bridge._imap`
+  加 `timeout=30`（「闲置致死」类：半开连接让唯一的 watcher 线程永久卡 recv）+ select 失败
+  logout + search 非 OK 打日志。

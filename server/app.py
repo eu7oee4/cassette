@@ -71,7 +71,7 @@ import sse
 import state_store
 import wake
 import world
-from notify import bark_push, logerr
+from notify import bark_push, bark_push_bg, logerr
 from pipeline import Message
 
 
@@ -719,7 +719,7 @@ async def chat_stream(req: ChatRequest, x_auth: Optional[str] = Header(default=N
             if n >= 3 and cid not in chat_loop.SDK_CHAT_OFF:
                 chat_loop.SDK_CHAT_OFF.add(cid)
                 logerr(f"chat SDK 路连败 3 次，{cid} 自动回 -p（重启前不再尝试）")
-                bark_push(f"聊天 SDK 路连败，{cid} 已自动回 -p", title="cassette 后端")
+                bark_push_bg(f"聊天 SDK 路连败，{cid} 已自动回 -p", title="cassette 后端")
             async for c in _p_chunks(translate):
                 yield c
             return
@@ -798,7 +798,7 @@ async def chat_stream(req: ChatRequest, x_auth: Optional[str] = Header(default=N
                                                    "char_id": cid,
                                                    "delivered": False, "origin": "chat_rescue",
                                                    "req_id": rid})
-                        bark_push(text if text else "（发来了表情）",
+                        bark_push_bg(text if text else "（发来了表情）",
                                   title=characters.display_name(cid))
                         logerr("/chat/stream 客户端断了，完整回复已补投 outbox")
                     else:
@@ -2480,7 +2480,7 @@ def _game_loop_closed(handle) -> None:
     except Exception as e:
         logerr(f"game loop 收摊补醒失败: {e}")
     if (handle.stop_reason or "").startswith("engine-error"):
-        bark_push("游戏会话引擎挂了，已收摊（游戏画面原地不动，可以重新 game_start）")
+        bark_push_bg("游戏会话引擎挂了，已收摊（游戏画面原地不动，可以重新 game_start）")
 
 
 def _game_story_start_unified(cid: str):
@@ -2600,7 +2600,7 @@ async def _game_watchdog() -> None:
                 if idle > GAME_IDLE_STOP_SEC:
                     code_bridge.stop()
                     game_bridge.release_lock("story")
-                    bark_push("游戏会话 20 分钟没动静，替 TA 收摊了")
+                    bark_push_bg("游戏会话 20 分钟没动静，替 TA 收摊了")   # 看守在事件循环上
                     st.update(hash=None, nudged=False, reminded=0.0)
                     continue
                 if idle > GAME_WAIT_NUDGE_SEC and not st["nudged"]:
@@ -2612,7 +2612,7 @@ async def _game_watchdog() -> None:
                         st["nudged"] = True
                         # 名字按**会话归属角色**取：config.agent_name() 读的是默认角色，
                         # 玩游戏的要是别人，通知就顶着错的名字发出去。
-                        bark_push(f"{characters.display_name(_session_char())} "
+                        bark_push_bg(f"{characters.display_name(_session_char())} "
                                   "在游戏会话里停着等你回话")
             started = code_bridge.session_started_at()
             base = max(started, st["reminded"] or started)

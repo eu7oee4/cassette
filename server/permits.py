@@ -106,9 +106,9 @@ def _push_card(char_id: str, tool: str, summary: str) -> None:
     """Bark 只能提醒不能拍板（§6）。推不出去不影响挂起——app 里照样看得到卡。"""
     try:
         import characters
-        from notify import bark_push
+        from notify import bark_push_bg
         who = characters.display_name(char_id)
         what = (summary or "").strip().replace("\n", " ")[:80] or tool
-        bark_push(f"{who}想动手：{what}——到 app 里批", title=who)
+        bark_push_bg(f"{who}想动手：{what}——到 app 里批", title=who)   # 事件循环上：不阻塞
     except Exception:
         pass

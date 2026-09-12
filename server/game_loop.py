@@ -169,15 +169,20 @@ def _shot_bytes():
             f.write(png)
             src = f.name
         dst = src + ".jpg"
-        subprocess.run(["sips", "-z", str(int(h / SCALE)), str(int(w / SCALE)),
-                        "-s", "format", "jpeg", "-s", "formatOptions", JPEG_QUALITY,
-                        src, "--out", dst], capture_output=True, timeout=20)
-        with open(dst, "rb") as f:
-            jpg = f.read()
-        import os
-        os.unlink(src)
-        os.unlink(dst)
-        return jpg
+        try:
+            subprocess.run(["sips", "-z", str(int(h / SCALE)), str(int(w / SCALE)),
+                            "-s", "format", "jpeg", "-s", "formatOptions", JPEG_QUALITY,
+                            src, "--out", dst], capture_output=True, timeout=20)
+            with open(dst, "rb") as f:
+                return f.read()
+        finally:
+            # sips 失败时 dst 不存在、以前 src 就留在 /tmp（一晚几十 MB）：清理进 finally
+            import os
+            for path in (src, dst):
+                try:
+                    os.unlink(path)
+                except FileNotFoundError:
+                    pass
     except Exception as e:
         return f"error: 截屏失败: {e}"
 
@@ -214,11 +219,15 @@ def build_game_server(handle: session_mgr.LoopHandle, *, unified: bool = False,
                     "mimeType": "image/jpeg"}
         return _text(str(jpg_or_err))
 
-    def _acted(desc: str, shot: bool, wait_ms: int) -> dict:
+    # 2026-09-12 体检：这些工具是 async def，却直接跑 time.sleep / subprocess.run(adb, sips)
+    # / ensure_device（模拟器冷启动最长 90s）——SDK 在 FastAPI 主事件循环上 await 它们，
+    # 每次 game_watch（6 张×5s）或开机期间整个后端停摆：所有角色的 SSE、弹卡回包、调度器
+    # 一起冻。等待改 asyncio.sleep，子进程/探活全走 to_thread；工具内部逻辑一字不改。
+    async def _acted(desc: str, shot: bool, wait_ms: int) -> dict:
         if not shot:
             return _ok(_text(desc))
-        time.sleep(max(0, wait_ms) / 1000)
-        return _ok(_text(desc), _img(_shot_bytes()))
+        await asyncio.sleep(max(0, wait_ms) / 1000)
+        return _ok(_text(desc), _img(await asyncio.to_thread(_shot_bytes)))
 
     @tool("game_look",
           "看一眼当前画面（480x853 截图）。wait_ms 是先等多久再截（等加载/动画用，毫秒）。"
@@ -228,12 +237,12 @@ def build_game_server(handle: session_mgr.LoopHandle, *, unified: bool = False,
           {"type": "object", "properties": {"wait_ms": {"type": "integer"}},
            "required": []})
     async def game_look(args):
-        if (err := _gate()):
+        if (err := await asyncio.to_thread(_gate)):
             return _ok(_text(err))
         wait_ms = int(args.get("wait_ms", 0))
         if wait_ms > 0:
-            time.sleep(wait_ms / 1000)
-        return _ok(_img(_shot_bytes()))
+            await asyncio.sleep(wait_ms / 1000)
+        return _ok(_img(await asyncio.to_thread(_shot_bytes)))
 
     @tool("game_watch",
           "连拍：一次调用隔 interval_ms 毫秒连截 shots 张（2-6 张），**一个往返拿到全过程**。"
@@ -249,7 +258,7 @@ def build_game_server(handle: session_mgr.LoopHandle, *, unified: bool = False,
                                             "shots": {"type": "integer"}},
            "required": []})
     async def game_watch(args):
-        if (err := _gate()):
+        if (err := await asyncio.to_thread(_gate)):
             return _ok(_text(err))
         shots = max(2, min(int(args.get("shots", 3)), 6))
         interval_ms = max(200, min(int(args.get("interval_ms", 1500)), 5000))
@@ -257,8 +266,8 @@ def build_game_server(handle: session_mgr.LoopHandle, *, unified: bool = False,
                         "对比最后两张的对话框文案：一字不差才算打完。")]
         for i in range(shots):
             if i:
-                time.sleep(interval_ms / 1000)
-            jpg = _shot_bytes()
+                await asyncio.sleep(interval_ms / 1000)
+            jpg = await asyncio.to_thread(_shot_bytes)
             if not isinstance(jpg, bytes):
                 return _ok(_text(f"连拍到第 {i + 1} 张时失败；{jpg}"))
             blocks.append(_img(jpg))
@@ -283,19 +292,19 @@ def build_game_server(handle: session_mgr.LoopHandle, *, unified: bool = False,
                           "double": {"type": "boolean"}},
            "required": ["x", "y"]})
     async def game_tap(args):
-        if (err := _gate()):
+        if (err := await asyncio.to_thread(_gate)):
             return _ok(_text(err))
         x, y = int(args["x"]), int(args["y"])
         double = bool(args.get("double", False))
         try:
             a = ("shell", "input", "tap", str(int(x * SCALE)), str(int(y * SCALE)))
-            _adb(*a)
+            await asyncio.to_thread(_adb, *a)
             if double:
-                time.sleep(DOUBLE_TAP_GAP_MS / 1000)
-                _adb(*a)
+                await asyncio.sleep(DOUBLE_TAP_GAP_MS / 1000)
+                await asyncio.to_thread(_adb, *a)
         except Exception as e:
             return _ok(_text(f"error: {e}"))
-        return _acted(f"tapped ({x},{y})" + ("×2" if double else ""),
+        return await _acted(f"tapped ({x},{y})" + ("×2" if double else ""),
                       bool(args.get("shot", True)), int(args.get("wait_ms", SHOT_WAIT_MS)))
 
     @tool("game_swipe",
@@ -309,17 +318,18 @@ def build_game_server(handle: session_mgr.LoopHandle, *, unified: bool = False,
                           "wait_ms": {"type": "integer"}, "shot": {"type": "boolean"}},
            "required": ["x1", "y1", "x2", "y2"]})
     async def game_swipe(args):
-        if (err := _gate()):
+        if (err := await asyncio.to_thread(_gate)):
             return _ok(_text(err))
         x1, y1, x2, y2 = (int(args[k]) for k in ("x1", "y1", "x2", "y2"))
         dur = int(args.get("duration_ms", 300))
         try:
-            _adb("shell", "input", "swipe",
-                 str(int(x1 * SCALE)), str(int(y1 * SCALE)),
-                 str(int(x2 * SCALE)), str(int(y2 * SCALE)), str(dur))
+            await asyncio.to_thread(
+                _adb, "shell", "input", "swipe",
+                str(int(x1 * SCALE)), str(int(y1 * SCALE)),
+                str(int(x2 * SCALE)), str(int(y2 * SCALE)), str(dur))
         except Exception as e:
             return _ok(_text(f"error: {e}"))
-        return _acted(f"swiped ({x1},{y1})→({x2},{y2}) {dur}ms",
+        return await _acted(f"swiped ({x1},{y1})→({x2},{y2}) {dur}ms",
                       bool(args.get("shot", True)), int(args.get("wait_ms", SHOT_WAIT_MS)))
 
     @tool("game_back",
@@ -328,13 +338,13 @@ def build_game_server(handle: session_mgr.LoopHandle, *, unified: bool = False,
                                             "shot": {"type": "boolean"}},
            "required": []})
     async def game_back(args):
-        if (err := _gate()):
+        if (err := await asyncio.to_thread(_gate)):
             return _ok(_text(err))
         try:
-            _adb("shell", "input", "keyevent", "4")
+            await asyncio.to_thread(_adb, "shell", "input", "keyevent", "4")
         except Exception as e:
             return _ok(_text(f"error: {e}"))
-        return _acted("back", bool(args.get("shot", True)),
+        return await _acted("back", bool(args.get("shot", True)),
                       int(args.get("wait_ms", SHOT_WAIT_MS)))
 
     @tool("game_launch",
@@ -344,13 +354,13 @@ def build_game_server(handle: session_mgr.LoopHandle, *, unified: bool = False,
                                             "shot": {"type": "boolean"}},
            "required": []})
     async def game_launch(args):
-        if (err := _gate()):
+        if (err := await asyncio.to_thread(_gate)):
             return _ok(_text(err))
-        r = game_bridge._mumutool_json("control", game_bridge.VM_INDEX,
-                                       "--action", "open_app", "--package", RUYUAN_PKG)
+        r = await asyncio.to_thread(game_bridge._mumutool_json, "control", game_bridge.VM_INDEX,
+                                    "--action", "open_app", "--package", RUYUAN_PKG)
         if r.get("error"):
             return _ok(_text(f"error: {r['error']}"))
-        return _acted("launched", bool(args.get("shot", True)),
+        return await _acted("launched", bool(args.get("shot", True)),
                       int(args.get("wait_ms", 5000)))
 
     @tool("game_close",
@@ -359,13 +369,13 @@ def build_game_server(handle: session_mgr.LoopHandle, *, unified: bool = False,
                                             "shot": {"type": "boolean"}},
            "required": []})
     async def game_close(args):
-        if (err := _gate()):
+        if (err := await asyncio.to_thread(_gate)):
             return _ok(_text(err))
-        r = game_bridge._mumutool_json("control", game_bridge.VM_INDEX,
-                                       "--action", "close_app", "--package", RUYUAN_PKG)
+        r = await asyncio.to_thread(game_bridge._mumutool_json, "control", game_bridge.VM_INDEX,
+                                    "--action", "close_app", "--package", RUYUAN_PKG)
         if r.get("error"):
             return _ok(_text(f"error: {r['error']}"))
-        return _acted("closed", bool(args.get("shot", True)),
+        return await _acted("closed", bool(args.get("shot", True)),
                       int(args.get("wait_ms", 1500)))
 
     @tool("game_quit",
@@ -375,9 +385,9 @@ def build_game_server(handle: session_mgr.LoopHandle, *, unified: bool = False,
     async def game_quit(args):
         if game_bridge.paused():
             return _ok(_text("⏸ 机主按了游戏急停：立刻停手，问问 TA 哪步不对。"))
-        game_bridge._mumutool_json("control", game_bridge.VM_INDEX,
-                                   "--action", "close_app", "--package", RUYUAN_PKG)
-        r = game_bridge._mumutool_json("close", game_bridge.VM_INDEX)
+        await asyncio.to_thread(game_bridge._mumutool_json, "control", game_bridge.VM_INDEX,
+                                "--action", "close_app", "--package", RUYUAN_PKG)
+        r = await asyncio.to_thread(game_bridge._mumutool_json, "close", game_bridge.VM_INDEX)
         if r.get("error"):
             return _ok(_text(f"error: {r['error']}"))
         return _ok(_text("收摊了：游戏和模拟器都关了"))

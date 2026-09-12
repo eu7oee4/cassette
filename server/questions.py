@@ -101,12 +101,12 @@ def _push_card(char_id: str, questions: list[dict]) -> None:
     """Bark 只能提醒不能作答。推不出去不影响挂起——app 里照样看得到卡。"""
     try:
         import characters
-        from notify import bark_push
+        from notify import bark_push_bg
         who = characters.display_name(char_id)
         first = ""
         if questions:
             first = str(questions[0].get("question") or "").strip()
         what = first.replace("\n", " ")[:80] or "有个问题想问你"
-        bark_push(f"{who}想问：{what}——到 app 里答", title=who)
+        bark_push_bg(f"{who}想问：{what}——到 app 里答", title=who)   # 事件循环上：不阻塞
     except Exception:
         pass

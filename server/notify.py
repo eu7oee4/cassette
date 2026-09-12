@@ -13,6 +13,17 @@ def logerr(msg: str) -> None:
     print(f"[{ts}] {msg}", file=sys.stderr, flush=True)
 
 
+def bark_push_bg(text: str, title: str = "") -> None:
+    """bark_push 的后台线程版：给事件循环上的调用点用（2026-09-12 体检）。
+    bark_push 是同步 urlopen(timeout=5) 打公网——在 can_use_tool 回调/轮尾 finalize/
+    收摊路径里直接调，Bark 抖动时整个后端冻 5s（所有角色的 SSE、弹卡回包、调度器一起停，
+    STREAM_PING 心跳也发不出）。推送结果只进 stderr（失败照旧 logerr），调用方拿不到 ok。
+    需要 ok 值的地方（wake_sdk 的 wake_log「bark」字段）仍用同步版，那是每次醒来一发、可接受。"""
+    import threading
+    threading.Thread(target=bark_push, args=(text, title), daemon=True,
+                     name="bark-push").start()
+
+
 def bark_push(text: str, title: str = "") -> bool:
     if not config.BARK_URL:
         return False
