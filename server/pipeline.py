@@ -497,6 +497,56 @@ def one_turn_hint(kind: str = "chat") -> str:
             "两个都不选，就别把这件事说出口。】")
 
 
+def turn_frame_hint() -> str:
+    """框是读数不是话（2026-09-12，抄 nostos system.md）。原来「按这句的份量回」那条
+    每轮跟在注入里、紧贴新消息——正是他学舌时连着一起吐出来的那句。挪进系统提示付一次，
+    注入里只剩时间读数和正文，当前轮和历史轮同形（见 chat_loop.build_injection）。"""
+    return ("【每条消息前面的【时间】【距离上一条消息…】是给你看的读数，不是对方说的话："
+            "不用复述，也别给自己的话加这种框。回复只写你要说的话，按对方这句的份量和"
+            "情绪回：随口就随口，别硬凑长，一句话或一个词也可以。】")
+
+
+# ---------- 投递前的刷子：剥掉学舌吐出来的轮次框（2026-09-12，抄 nostos scrub.py）----------
+# 一整行、且只是框的：可选角色标签 + 【戳】/【距离…】/【回下面这条…】（老框，旧账里还有样本）
+_FRAME_LINE_RE = re.compile(
+    r"^[ \t]*(?:user|assistant)?[ \t]*"
+    r"【(?:"
+    r"\d{2}-\d{2}[ \t]*周.[ \t]*\d{2}:\d{2}[^】]*"
+    r"|距离上一条消息[^】]*"
+    r"|回下面这条[^】]*"
+    r")】[ \t]*$"
+)
+
+
+def scrub_turn_frame(text: str) -> tuple[str, Optional[str]]:
+    """返回 (干净正文, 被刷掉的部分或 None)。拼装侧已经把「仪式」消掉了（当前轮和历史轮同形），
+    这是第二道：**别让学舌的字节落库**——落了库下一轮就成了历史里的样本，投递→入账→再拼装
+    →自我放大。两种形态：开头的框行剥掉、正文留着；正文中间冒出的框行从那里到结尾整段砍掉
+    ——那是他在续写下一轮（含跟在后面的「眠眠：…」）。刷掉的部分调用方记日志，不静默丢。"""
+    if not text:
+        return text, None
+    lines = text.split("\n")
+    i, last_head_frame = 0, -1
+    while i < len(lines):
+        if _FRAME_LINE_RE.match(lines[i]):
+            last_head_frame = i
+        elif lines[i].strip():
+            break
+        i += 1
+    head = last_head_frame + 1
+    cut = None
+    for j in range(head, len(lines)):
+        if _FRAME_LINE_RE.match(lines[j]):
+            cut = j
+            break
+    kept = lines[head:cut] if cut is not None else lines[head:]
+    clean = "\n".join(kept).strip()
+    if head == 0 and cut is None:
+        return text, None
+    dropped = "\n".join(lines[:head] + (lines[cut:] if cut is not None else []))
+    return clean, dropped.strip() or None
+
+
 def pending_todo_block(char_id: Optional[str] = None, kind: str = "chat") -> str:
     """现在钉着的那个钟 + 上一轮给自己留的活（schedule 的 next_wake_at/_todo）。都没有则空串。
     kind 只管定点写法分叉（'wake'＝老路的 NEXT 段，其余＝next_wake 工具），口径同 one_turn_hint。

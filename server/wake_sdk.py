@@ -181,6 +181,7 @@ def finish_wake_turn(cid: str, trigger: str, force: bool, started_ts: int,
     browser_keeper.apply_choice(browser_choice, browsed=bool(browse_urls), char_id=cid)
 
     said, musing = split_musings(reply)
+    # pipeline.scrub_turn_frame 故意不挂（同 sse.translate_events，机主 09-12 拍板：先看得见学舌）
 
     # wake_log 扩展字段（PR12 先行，PR13 归一进活动事件账本）：acts=这轮碰了外部世界
     # 的工具调用（时间+轮来源在条目上，工具+对象摘要在这），行为留痕不靠他自觉。

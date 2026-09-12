@@ -266,7 +266,7 @@ class ChatLoopTest(unittest.IsolatedAsyncioTestCase):
         return chat_loop.Turn(
             rid="r1", history=chat_loop.norm_history(history),
             new_msg=_m("user", new_text, ts),
-            injection=f"【现在是……】\n眠眠：{new_text}",
+            injection=f"【现在是……】\n{new_text}",   # 同 build_injection 形状（09-12）
             finalize=lambda reply, stored: {"reply": reply, "stored": stored})
 
     async def _play(self, turn, *feed):
@@ -461,7 +461,9 @@ class ChatLoopReforgeTest(ChatLoopTest):
         sent = self.clients[0].queries[0]          # 这一轮的 user 消息
         text = sent[0]["message"]["content"][0]["text"]
         self.assertIn(chat_loop.OPENING_NUDGE, text)
-        self.assertIn("眠眠：在吗", text)
+        self.assertTrue(text.endswith("\n在吗"), text)   # 正文光秃，不带「眠眠：」（09-12）
+        self.assertNotIn("眠眠：", text)
+        self.assertNotIn("回下面这条", text)
         # 开局旗消耗后第二轮不再重复注入
         hist2 = hist + [_m("user", "在吗", 2000), _m("assistant", "在。", 2001)]
         await self._play(self._turn(hist2, "陪我"),
@@ -723,7 +725,7 @@ class ActivityFrameTest(unittest.TestCase):
         hist = [_m("user", "早", 1000), _m("assistant", "早，小狗", 1100)]
         out = chat_loop._stamp_times(hist)
         self.assertEqual(len(out), 2)
-        self.assertTrue(out[0]["text"].startswith("【01-01 周四 08:16】\n眠眠：早"))
+        self.assertEqual(out[0]["text"], "【01-01 周四 08:16】\n早")   # 同 build_injection 形状
         self.assertEqual(out[1]["text"], "早，小狗")        # assistant 原样
         self.assertEqual(hist[0]["text"], "早")             # 输入不被改写
         self.assertEqual(out, chat_loop._stamp_times(hist))  # 确定性

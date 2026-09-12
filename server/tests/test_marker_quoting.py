@@ -135,3 +135,33 @@ class TestPromptExamplesAreInert(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ScrubTurnFrameTest(unittest.TestCase):
+    """投递前剥掉学舌的轮次框（09-12，抄 nostos scrub.py）。"""
+
+    def test_clean_text_untouched(self):
+        import pipeline
+        self.assertEqual(pipeline.scrub_turn_frame("在。"), ("在。", None))
+        self.assertEqual(pipeline.scrub_turn_frame(""), ("", None))
+
+    def test_mid_text_frame_cuts_to_end(self):
+        import pipeline
+        raw = ("那就妙控键盘 + 支架，安静好看不折腾。\n\n"
+               "user【09-07 周一 14:02】\n【距离上一条消息，过了 1 分钟】\n\n"
+               "【回下面这条。按这句的份量和情绪回：随口就随口。】\n"
+               "眠眠：ipad在这里的定位很尴尬")
+        clean, dropped = pipeline.scrub_turn_frame(raw)
+        self.assertEqual(clean, "那就妙控键盘 + 支架，安静好看不折腾。")
+        self.assertIn("眠眠：ipad", dropped)
+
+    def test_head_frames_stripped_body_kept(self):
+        import pipeline
+        clean, dropped = pipeline.scrub_turn_frame("【09-08 周二 11:38】\n\n能。直接跟它说。")
+        self.assertEqual(clean, "能。直接跟它说。")
+        self.assertEqual(dropped, "【09-08 周二 11:38】")
+
+    def test_brackets_inside_a_sentence_are_not_frames(self):
+        import pipeline
+        raw = "我记得你说过【09-08 周二 11:38】那会儿在忙，后来呢"
+        self.assertEqual(pipeline.scrub_turn_frame(raw), (raw, None))

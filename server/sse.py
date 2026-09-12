@@ -248,6 +248,8 @@ async def translate_events(events, finalize):
 
     # 权威回复 = 全部正文段拼接（工具前说的话也是话，进历史不能丢）。
     full_reply = "\n\n".join([s.strip() for s in raw_segments if s.strip()] + [result_text.strip()])
+    # 刷子 pipeline.scrub_turn_frame **故意不挂**（机主 09-12 拍板）：学舌原样落进聊天，
+    # 机主看得见才知道同形改判有没有治住；复发了再挂。挂法：这里 scrub 一遍、刷掉的 logerr。
     payload = finalize(full_reply, collector.items)
     payload["type"] = "done"
     yield sse(payload)

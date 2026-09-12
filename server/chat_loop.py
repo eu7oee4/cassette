@@ -443,7 +443,8 @@ def build_options(char_id: str, catalog: Optional[list] = None,
     mb = pipeline.tool_menu_block("chat", char_id)
     if mb:
         parts.append(mb)
-    parts += [pipeline.pronoun_hint(), pipeline._chat_next_hint(), _wake_contract()]
+    parts += [pipeline.pronoun_hint(), pipeline._chat_next_hint(), _wake_contract(),
+              pipeline.turn_frame_hint()]
     sb = pipeline.sticker_block(catalog)
     if sb:
         parts.append(sb)
@@ -572,7 +573,16 @@ def build_injection(messages, char_id: Optional[str],
     这正是下面 :1605 那条纪律要的形状，别往回加。
 
     时间头用 `stamp_str` 不用 `now_str`（不带时段词）：和 `wake_sdk.wake_injection`
-    的抬头、和 `_stamp_times` 重铸时补的锚行**天然同形**，他才认得出是同一种东西。"""
+    的抬头、和 `_stamp_times` 重铸时补的锚行**天然同形**，他才认得出是同一种东西。
+
+    **当前轮和历史轮长得一样，差别只有「距离」那一行（2026-09-12，抄 nostos
+    assemble.py 的定案）。** 以前当前轮多两样：一句「【回下面这条。按这句的份量…】」
+    和「眠眠：」前缀。模型会模仿**只在当前轮出现的那套格式**——它每轮出现在紧贴生成
+    边界的位置，看多了就成了「轮次开始的仪式」，于是他答完自己那句顺手把下一条 user
+    轮也写出来（09-07 14:02、09-08 11:34 两次实锤，形状是 `user【09-08 周二 11:38】…
+    眠眠：<他编的下一句>`）。历史里全是同一个形状，就没有仪式可学。「份量」那条规矩
+    挪进系统提示付一次（pipeline.turn_frame_hint）；名字前缀不要——「名字：台词」是
+    剧本格式，剧本天然招续写，说话人本来就由 role 承担。"""
     import pipeline
     last = messages[-1]
     lines = [h for h in (extra_hints or []) if h]
@@ -585,10 +595,7 @@ def build_injection(messages, char_id: Optional[str],
     pending = pipeline.pending_todo_block(char_id)
     if pending:
         lines.append(pending)
-    lines.append("")
-    lines.append("【回下面这条。按这句的份量和情绪回：随口就随口，别硬凑长，"
-                 "一句话或一个词也可以。】")
-    lines.append(f"{config.user_name()}：{last.text}")
+    lines.append(last.text)
     return "\n".join(lines)
 
 
@@ -996,7 +1003,8 @@ def _stamp_times(history: list[dict],
         #   都可能落在 10min 内，靠 gap 判会整条漏掉；确证醒来也就不是"在回TA"。
         # · 对不上（游戏 tick / 老存货）只在 assistant 连着 assistant 且隔够久时
         #   补光秃时间戳，一个字旁白不带——写死措辞会把另一种场景说假。
-        # 不会被读成 TA 说话：TA 的话一律带「{user}：」，框行一律 〔〕。
+        # 不会被读成 TA 说话：框行一律 〔〕，TA 的话是光正文（09-12 起不带「{user}：」
+        # 前缀——和 build_injection 同形，理由见那边的 docstring）。
         trig = (wake_by_ts.get(int(ts))
                 if role == "assistant" and ts else None)
         if trig is not None and last_anchor_ts != int(ts):
@@ -1011,8 +1019,7 @@ def _stamp_times(history: list[dict],
             out.append({"role": "user", "ts": int(ts),
                         "text": f"【{pipeline.stamp_str(int(ts))}】"})
         if role == "user" and ts:
-            out.append({**m, "text": (f"【{pipeline.stamp_str(int(ts))}】\n"
-                                      f"{config.user_name()}：{m['text']}")})
+            out.append({**m, "text": f"【{pipeline.stamp_str(int(ts))}】\n{m['text']}"})
         else:
             out.append(m)
         prev = m

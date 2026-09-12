@@ -213,6 +213,16 @@ class TestInjectionIsPerceptionOnly(StateBase):
         self.assertIn("给安瞬回信", inj)
         self.assertRegex(inj, r"【\d{2}-\d{2} 周. \d{2}:\d{2}】")   # 几点
 
+    def test_current_turn_same_shape_as_history(self):
+        """当前轮和历史轮同形（09-12 学舌修）：没有「回下面这条」、没有「眠眠：」，
+        正文是最后一行；份量规矩在系统提示（turn_frame_hint）。"""
+        import pipeline
+        inj = self._inject()
+        self.assertNotIn("回下面这条", inj)
+        self.assertNotIn("眠眠：", inj)
+        self.assertTrue(inj.endswith("\n在忙什么"), inj)
+        self.assertIn("份量", pipeline.turn_frame_hint())
+
     def test_time_head_has_no_daypart_word(self):
         """时间头用 stamp_str 不用 now_str：和 wake_injection 的抬头、和
         _stamp_times 重铸时补的锚行**天然同形**，他才认得出是同一种东西。"""
