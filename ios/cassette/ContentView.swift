@@ -71,6 +71,9 @@ struct ContentView: View {
 
     /// 一条等待补投的轮：断流时的半截气泡 ids + 登记时间 + 是否已放弃等待（放弃后仍留着兜迟到补投）。
     struct RescueWait {
+        /// 这轮属于哪个角色（发起那一刻快照）。补投/对账落灰字、撤半截都按它走，不看
+        /// currentCharID——那是可变的「当前」，切人之后就是别人（09-12 串台类第四例）。
+        var char: String
         var ids: [UUID]
         var since: Date
         var givenUp: Bool = false
@@ -1093,11 +1096,12 @@ struct ContentView: View {
         var sawDone = false              // 收到过 done——收到就删登记（防僵尸记录挂住三个点）
         var turnIds: [UUID] = []         // 本轮所有正文气泡 id（边产生边同步进登记）
         let reqId = UUID().uuidString    // 断连补投的关联 id（后端 rescue 条目带回）
+        let char = currentCharID         // 身份跟着这轮走（生成中切人被禁，这一刻就是它）
         // **轮一开始就登记**：半开连接下补投可能先于流报错到达（后端跑完投 pending、
         // 这边流还在 600s 空闲超时里干等）——登记晚了 syncPending 关联扑空，
         // 半截+完整双份并存。提前登记后补投任何时刻到都能撤半截。
         // inFlight=流还开着：这条登记先不亮三个点（那是 isWaiting 的活）、也不参与对账判死。
-        rescueWaiting[reqId] = RescueWait(ids: [], since: Date(), inFlight: true)
+        rescueWaiting[reqId] = RescueWait(char: char, ids: [], since: Date(), inFlight: true)
         do {
             let stream = chatService.sendStream(history: history,
                                                 sessionId: sessionId,
@@ -1480,39 +1484,42 @@ struct ContentView: View {
             for p in pending {
                 let ts = Date(timeIntervalSince1970: TimeInterval(p.ts))
                 // 多角色路由：别的角色的消息直接写进对方会话文件 + 未读 +1，不混进当前聊天。
-                // 对方的 error/rescue 记账（rescueWaiting）都是当前会话的 UI 概念，不适用——跳过。
+                // error/补投的登记（rescueWaiting）**按登记里的角色处理，不按当前在看谁**
+                // （09-12 串台修）：以前非当前角色直接 continue，A 生成中掐流 → 切到 B →
+                // A 的补投回来时半截气泡永不撤（A 文件半截+完整双份），60s 后对账把
+                // 「重发试试」灰字写进 B 的聊天。
                 let conv = p.char_id ?? "default"
-                if conv != currentCharID {
-                    if p.error != true {
-                        if !p.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                            chatStore.insertProactive(text: p.text, timestamp: ts,
-                                                      conversation: conv)
-                        }
-                        for sid in p.sticker_ids ?? [] {
-                            if let st = stickerStore.sticker(id: sid) {
-                                chatStore.insertProactiveSticker(
-                                    url: stickerStore.imageURL(for: st),
-                                    description: st.description,
-                                    timestamp: ts, conversation: conv)
-                            }
-                        }
-                    }
-                    continue
-                }
                 // error 标记条目＝那轮没产出（claude 挂了）：清等待熄点+提示重发；
                 // 半截气泡**不撤**——那是他真说过的话。
                 // 提示只在真清掉了等待条目时追加一次：ack 失败重拉时条目已不在，不再重复灰字。
                 if p.error == true {
                     if let rid = p.req_id, !rid.isEmpty,
-                       rescueWaiting.removeValue(forKey: rid) != nil {
-                        chatStore.appendSystemMessage("刚才那条没生成出来，重发试试")
+                       let wait = rescueWaiting.removeValue(forKey: rid) {
+                        chatStore.appendSystemMessage("刚才那条没生成出来，重发试试",
+                                                      conversation: wait.char)
                     }
                     continue
                 }
-                // 断连补投条目：先撤当时留下的半截气泡，再上完整回复（req_id 关联）。
+                // 断连补投条目：先撤当时留下的半截气泡（在登记的那个角色的文件里），
+                // 再上完整回复（req_id 关联）。
                 if let rid = p.req_id, !rid.isEmpty, let wait = rescueWaiting[rid] {
-                    for id in wait.ids { chatStore.remove(id: id) }
+                    for id in wait.ids { chatStore.remove(id: id, conversation: wait.char) }
                     rescueWaiting.removeValue(forKey: rid)
+                }
+                if conv != currentCharID {
+                    if !p.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        chatStore.insertProactive(text: p.text, timestamp: ts,
+                                                  conversation: conv)
+                    }
+                    for sid in p.sticker_ids ?? [] {
+                        if let st = stickerStore.sticker(id: sid) {
+                            chatStore.insertProactiveSticker(
+                                url: stickerStore.imageURL(for: st),
+                                description: st.description,
+                                timestamp: ts, conversation: conv)
+                        }
+                    }
+                    continue
                 }
                 if !p.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     chatStore.insertProactive(text: p.text, timestamp: ts)
@@ -1553,7 +1560,8 @@ struct ContentView: View {
             if !wait.inFlight, !wait.givenUp, !active.contains(rid),
                now.timeIntervalSince(wait.since) > 60 {
                 rescueWaiting[rid]?.givenUp = true
-                chatStore.appendSystemMessage("刚才那条可能没送到后端，重发试试")
+                chatStore.appendSystemMessage("刚才那条可能没送到后端，重发试试",
+                                              conversation: wait.char)
             }
         }
     }
@@ -1632,8 +1640,13 @@ struct ContentView: View {
             let (imagesData, filesData) = collectAdjacentAttachments(before: message.id)
             chatStore.truncateAfter(id: message.id)   // 删掉这条之后的旧对话
             backToNowTick += 1                        // 回底，等着看重答的那条
-            Task { await generateReply(history: chatStore.messages,
-                                       imagesData: imagesData, filesData: filesData) }
+            // 走 outbox 泵而不是直接 generateReply（09-12）：09-05「生成中不禁发」把
+            // 「同一时刻只有一条流」的保证交给了泵（send 只看 pumping），这条旧路绕开泵
+            // 起流，pumping 还是 false → 重答期间再发一条就是两条 SSE 流并发互踩。
+            // 泵会把这条气泡沉底重打 ts（和重发一条新消息同形），快照剔掉排队的后续单。
+            outbox.append(OutboxItem(bubbleIds: [message.id],
+                                     images: imagesData, files: filesData))
+            Task { await pumpOutbox() }
         } else {
             // 「仅修改」没有后续请求，窗口得自己去对齐；「编辑并重新回复」不用管——
             // 后面紧跟的 /chat 会整体覆盖窗口。

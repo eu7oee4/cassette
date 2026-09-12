@@ -106,8 +106,15 @@ final class ChatStore: ObservableObject {
     /// 追加一条系统提示消息（居中灰字）。统一入口。
     /// 纯 UI：显示按 kind 走居中样式，发给后端时整条过滤掉（见 ChatService 的 isSystem）——
     /// 它是 app 说给人看的话，混进历史就成了以 role:user 冒充用户说过的。
-    func appendSystemMessage(_ text: String) {
-        append(ChatMessage(sender: .me, kind: .system(text), timestamp: Date()))
+    /// conversation 不传 = 当前会话；传了别的角色 = 写进对方文件、不加未读（是 app 的提示不是 TA 说话）。
+    func appendSystemMessage(_ text: String, conversation: String? = nil) {
+        let conv = conversation ?? conversationID
+        let msg = ChatMessage(sender: .me, kind: .system(text), timestamp: Date())
+        if conv == conversationID {
+            append(msg)
+        } else {
+            insertIntoFile(stamped(msg, conv: conv), conv: conv, bumpUnread: false) { _ in false }
+        }
     }
 
     /// 追加一条小字提醒（§3.4：靠左、logo 前缀、固定灰）。纯 UI：显示在聊天里，不发回后端。
@@ -147,10 +154,22 @@ final class ChatStore: ObservableObject {
                                   senderID: old.senderID, channel: old.channel)
     }
 
-    /// 删除某条消息。
-    func remove(id: UUID) {
-        messages.removeAll { $0.id == id }
-        save()
+    /// 删除某条消息。conversation 不传 = 当前会话；传了别的角色 = 改对方文件（断连补投撤半截
+    /// 气泡时登记的是哪个角色就删哪个文件，不看当前在看谁——09-12 串台修）。
+    func remove(id: UUID, conversation: String? = nil) {
+        let conv = conversation ?? conversationID
+        if conv == conversationID {
+            messages.removeAll { $0.id == id }
+            save()
+        } else {
+            let url = fileURL(for: conv)
+            var msgs = Self.loadMessages(from: url, fileManager: fileManager)
+            let before = msgs.count
+            msgs.removeAll { $0.id == id }
+            guard msgs.count != before else { return }
+            Self.saveMessages(msgs, to: url, fileManager: fileManager)
+            updatePreview(conv, messages: msgs)
+        }
     }
 
     /// 删掉某条消息【之后】的所有消息（保留它本身）。
@@ -216,7 +235,7 @@ final class ChatStore: ObservableObject {
     }
 
     /// 非当前会话：读对方文件 → 查重插位 → 写回 + 未读 +1 + 刷预览。不碰内存里的当前会话。
-    private func insertIntoFile(_ msg: ChatMessage, conv: String,
+    private func insertIntoFile(_ msg: ChatMessage, conv: String, bumpUnread bump: Bool = true,
                                 isDuplicate: (ChatMessage) -> Bool) {
         let url = fileURL(for: conv)
         var msgs = Self.loadMessages(from: url, fileManager: fileManager)
@@ -228,7 +247,7 @@ final class ChatStore: ObservableObject {
         }
         Self.saveMessages(msgs, to: url, fileManager: fileManager)
         updatePreview(conv, messages: msgs)
-        bumpUnread(conv)
+        if bump { bumpUnread(conv) }
     }
 
     // MARK: - 持久化

@@ -669,3 +669,37 @@ hold/grow/trace/I/webpage_write/code_start/task_run/game_start/mail_send。
   无取消源、ProactiveSettings:147、RoomPage:111、PluginsPage:331）。
 - 竖翻 git：槽位复用类第二犯（前科 8d533c0）；吞取消类无前科。
 - 验证状态：模拟器构建过；**真机未验**（属 §9.1 真机验收欠账同一批）。
+
+## 12. 复盘：09-12 体检修的两处（读代码推的，模拟器编译过、真机未验）
+
+### 12.1 断连补投登记 `rescueWaiting` 不分角色（串台类第四例）
+
+- **根因**（三条同时成立）：① 登记（发起时刻）没记这轮属于哪个角色；② `syncPending` 对非当前
+  角色的条目直接 `continue`，登记不清；③ `reconcileRescues` 落灰字走 `appendSystemMessage`，
+  只写当前会话。生成中切人被禁，所以出事要经过「掐流 → isGenerating 放开 → 切人」这一步，
+  不常见但每次锁屏都在走前半段。
+- **归类**：同 [[cassette-charswitch-bug-class]]，一字不差——**异步动作在发起那一刻没把
+  (值, 身份) 成对快照，落地时问的是可变的「当前」**。多角色化那次（08-15）把消息路由改了，
+  rescue 登记这块漏了。
+- **修**：`RescueWait.char`（发起时快照）；error/补投按登记的角色处理；`ChatStore.remove`/
+  `appendSystemMessage` 加 `conversation:` 参数写对方文件（系统灰字不加未读）。
+- **扫同类**：`syncQuestions`/`syncPermits`（`ContentView:1419/1459`）await 之后不核对角色，
+  卡片可漂到另一角色——同类，**这次没修**（要顺带改 switchCharacter 里的 removeAll 竞态，
+  单独做）。draft/设置/头像三处都有发起时刻快照，干净。
+
+### 12.2 「编辑并重新回复」绕过 outbox 泵
+
+- **根因**：09-05「生成中不禁发」把「同一时刻只有一条流」的保证从 `isGenerating` 挪到了泵
+  （`send` 只看 `pumping`）；`saveEdit(regenerate:)` 这条旧路直接 `Task { generateReply }`，
+  不置 `pumping` → 重答期间再发一条就是两条 SSE 流并发互踩，先结束的 defer 把
+  `isGenerating` 清掉。
+- **归类**：**把不变量的守卫换了地方，旧的入口没跟着搬**。改「谁来保证串行」时要列出所有
+  起流的入口，不是只改主路。
+- **修**：regenerate 塞一个 OutboxItem 走泵（沉底重打 ts，和重发一条新消息同形）。
+- **扫同类**：全仓起流的入口只有 `pumpOutbox` 和 `saveEdit` 两处（grep `generateReply(`），
+  现在都过泵。
+
+### 12.3 待验
+
+装新包后：A 生成中锁屏掐流 → 切到 B → 等补投 → A 里半截撤掉、B 里没有灰字；
+重答期间立刻再发一条 → 第二条排队等第一条流结束。
