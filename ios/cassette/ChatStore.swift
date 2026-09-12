@@ -50,14 +50,99 @@ final class ChatStore: ObservableObject {
     // MARK: - 会话切换
 
     /// 切到另一个角色的会话：当前落盘 → 换 id → 载入 → 清未读。
-    /// ⚠️ 调用方自己保证不在流式生成中切（流式的 NoSave 消息还没落盘）。
+    /// 流式生成中也能切（09-12）：在飞的那个气泡是 live（见下面 live* 一组），切走前从内存
+    /// 摘掉不落盘、切回来再挂上；流本身不看当前会话，只认自己的 conv。
     func switchConversation(_ id: String) {
         guard id != conversationID else { return }
+        if let live = live, live.conv == conversationID {
+            messages.removeAll { $0.id == live.msg.id }   // 半截不进文件
+        }
         save()
         conversationID = id
         UserDefaults.standard.set(id, forKey: CurrentCharacter.key)
         messages = Self.loadMessages(from: fileURL, fileManager: fileManager)
+        if let live = live, live.conv == id {
+            messages.append(live.msg)                      // 切回来：半截接着长
+        }
         clearUnread(id)
+    }
+
+    // MARK: - 按会话读写（轮绑角色不绑当前视图，09-12）
+
+    /// 读某个会话的全部消息：当前会话给内存里的，别的会话读文件。
+    func messages(for conv: String) -> [ChatMessage] {
+        conv == conversationID ? messages
+            : Self.loadMessages(from: fileURL(for: conv), fileManager: fileManager)
+    }
+
+    /// 对某个会话做一次读-改-写。当前会话改内存（save 可选）；别的会话读文件改完写回。
+    /// 流式那条路上的每一笔写都走这里：流属于哪个角色就写哪个角色，不问「现在看着谁」
+    /// （[[cassette-charswitch-bug-class]]：身份跟着值走不跟着「现在」走）。
+    func mutate(conversation conv: String, save: Bool = true,
+                _ body: (inout [ChatMessage]) -> Void) {
+        if conv == conversationID {
+            body(&messages)
+            if save { self.save() }
+        } else {
+            let url = fileURL(for: conv)
+            var msgs = Self.loadMessages(from: url, fileManager: fileManager)
+            body(&msgs)
+            Self.saveMessages(msgs, to: url, fileManager: fileManager)
+            updatePreview(conv, messages: msgs)
+        }
+    }
+
+    /// 追加一条消息到指定会话（stamped 按那个会话补身份）。
+    func append(_ message: ChatMessage, conversation conv: String) {
+        let m = stamped(message, conv: conv)
+        mutate(conversation: conv) { $0.append(m) }
+    }
+
+    /// 小字提醒到指定会话。
+    func appendMemoryNote(_ text: String, senderID: String? = nil, conversation conv: String) {
+        append(ChatMessage(sender: .other, kind: .memoryNote(text), timestamp: Date(),
+                           senderID: senderID), conversation: conv)
+    }
+
+    /// 在飞的流式气泡：一个 app 同一时刻只有一条流（outbox 泵串行），所以只有一个槽。
+    /// 它**不落盘**直到 liveEnd——切走时从内存摘掉、切回来再挂上；当前会话不是它的就只在
+    /// 这儿长，谁也看不见，liveEnd 时整条写进它自己的文件。
+    private(set) var live: (conv: String, msg: ChatMessage)? = nil
+
+    /// 新起一个流式气泡（NoSave）。
+    func liveBegin(_ message: ChatMessage, conversation conv: String) {
+        let m = stamped(message, conv: conv)
+        live = (conv, m)
+        if conv == conversationID { messages.append(m) }
+    }
+
+    /// 流式气泡长了一截（NoSave，isStreaming 保持）。
+    func liveUpdate(text: String) {
+        guard var live = live else { return }
+        let old = live.msg
+        live.msg = ChatMessage(id: old.id, sender: old.sender, kind: .text(text),
+                               timestamp: old.timestamp, isStreaming: true,
+                               senderID: old.senderID, channel: old.channel)
+        self.live = live
+        if live.conv == conversationID { updateTextNoSave(id: old.id, newText: text) }
+    }
+
+    /// 流式气泡定稿：text 空/nil ＝ 撤掉（当前会话删内存，别的会话本来就没进文件）；
+    /// 有内容 ＝ 当前会话 editText 落盘，别的会话整条追加进它的文件。
+    func liveEnd(text: String?) {
+        guard let live = live else { return }
+        self.live = nil
+        let clean = (text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        if live.conv == conversationID {
+            if clean.isEmpty { remove(id: live.msg.id) }
+            else { editText(id: live.msg.id, newText: text ?? "") }
+        } else if !clean.isEmpty {
+            let old = live.msg
+            let final = ChatMessage(id: old.id, sender: old.sender, kind: .text(text ?? ""),
+                                    timestamp: old.timestamp, senderID: old.senderID,
+                                    channel: old.channel)
+            mutate(conversation: live.conv) { $0.append(final) }
+        }
     }
 
     /// 会话列表行的预览（最后一条非灰字消息）。存 UserDefaults，别为画列表解码整份历史。

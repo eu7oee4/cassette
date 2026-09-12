@@ -703,3 +703,38 @@ hold/grow/trace/I/webpage_write/code_start/task_run/game_start/mail_send。
 
 装新包后：A 生成中锁屏掐流 → 切到 B → 等补投 → A 里半截撤掉、B 里没有灰字；
 重答期间立刻再发一条 → 第二条排队等第一条流结束。
+
+### 12.4 卡片轮询 await 之后不核对角色（串台类，读代码推的）
+
+- **根因**：`syncQuestions`/`syncPermits` 请求带 `char: currentCharID`，`await` 回来直接 `append`；
+  `switchCharacter` 里 `removeAll()` 又同步起一个 sync，和轮询里在飞的旧请求赛跑。A→B 快切时为 A 发出的
+  请求后到 → A 的卡挂到 B 的输入栏，染 B 的色、答案小字进 B 的记录。
+- **归类**：同 12.1，「发起时刻的身份没带到落地时刻」。同文件 `refreshDraftCount` 早就有
+  `guard char == currentCharID`，两处 sync 是 U4 之后新写的，没照抄。
+- **修**：发起时快照 `char`，await 后 guard；pending 拉回的卡 `char == nil` 时补上快照值。
+- **扫同类**：全仓 `await chatService.` 之后写 `@State` 的地方——`syncPending` 按条目 `char_id` 路由（已对）、
+  `syncCodeMode`/`proactiveStore.reload` 是按当前角色的派生状态、切人时重跑（可接受）。
+
+### 12.5 流式期间整个 app 被锁：切人禁、空闲超时 600s（读代码推的；方案按机主 09-12 改判）
+
+- **根因**：流式那条路上的每一笔写（appendNoSave/updateTextNoSave/editText/appendMemoryNote/finalize）
+  都写「当前会话」，所以只能靠 `isGenerating` 禁掉切人来保证流不串台；`timeoutInterval=600`。
+  半开连接（Mac 睡了/Tailscale 掉了但没 RST）时没心跳也没错误 → 干等 10 分钟，期间切人禁、会话列表锁。
+- **归类**：**用「禁止用户动」来掩护「状态没绑身份」**。禁令是补丁，病根是流的写入没指名会话——
+  和 [[cassette-charswitch-bug-class]] 是同一个根，只是这次用锁把它藏住了。
+- **第一版（停止按钮）被机主否掉**：停止只是让人能逃出锁，锁还在。改判成**轮绑角色不绑当前视图**：
+  ① `OutboxItem.char` 入队时快照，泵按它沉底/取快照/发请求（`ChatService` 请求体带 `char_id`，不读全局）；
+  ② `ChatStore.mutate(conversation:)`/`append(conversation:)`/`appendMemoryNote(conversation:)`：当前会话改内存、
+  别的会话读文件改完写回；流上每一笔写都指名 `char`；
+  ③ 半截气泡由 `ChatStore.live` 托管：不落盘，切走时从内存摘掉、切回来再挂上，liveEnd 才定稿
+  （当前会话 editText，别的会话整条追加进它的文件）；
+  ④ `sessionIds` 按角色；三个点只在流所属会话亮（`streamingChar`）；`rescueActive` 只看当前角色的登记；
+  切人/循环切/会话列表的 `isGenerating` 禁令全部拆掉；重答只看 `pumping`。
+  ⑤ 空闲超时 600→120s（后端心跳 25s）；超时和掐流同路等补投，不报错删登记；
+  Task cancel 时 URLSession 抛 `URLError(.cancelled)` 单独接住。
+- **规则**：新加任何「X 期间禁止 Y」的守卫前，先问一句：是不是因为 X 的状态没带身份？带上身份，禁令就不需要。
+- **评估后不做**：后端加取消口（打断 SDK 一轮要 interrupt + 账要处理半截 assistant）——单独立项；
+  `appendDoneOnlyStored` 顺手去掉了 `?? list.first` 兜底（P3 挂错页那条）。
+- **待验**（装新包）：A 生成中切到 B 再切回 → 半截气泡还在长、B 里什么都没多；A 生成中在 B 发一条 →
+  排队、A 说完后 B 那条才发、回复进 B；A 生成中在 B 看到的三个点不亮；
+  Mac 睡眠时发一条 → 2 分钟内三个点转成对账提示而不是锁 10 分钟。

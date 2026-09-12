@@ -52,11 +52,12 @@ struct ContentView: View {
     @State private var quickLookURL: URL? = nil      // 点文件卡片 → QuickLook 预览
 
     // 后端联动状态
-    @State private var sessionId: String? = nil   // 后端返回的会话 id（无状态后端仅用于记账）
+    @State private var sessionIds: [String: String] = [:]   // 后端返回的会话 id，按角色（无状态后端仅用于记账）
     @State private var isWaiting: Bool = false    // 等待对方回复中（"正在输入"指示；首个正文 chunk 到即熄）
-    @State private var isGenerating = false       // 整轮生成中（从发出到流结束）：禁用发送——
-                                                  // 只看 isWaiting 会在正文开始流出后放开按钮，
-                                                  // 再发一条就是两个 SSE 流并发互踩（气泡交错/记账混乱）
+    @State private var streamingChar: String? = nil   // 在飞那条流属于谁：三个点只在它的会话里亮（09-12）
+    @State private var isGenerating = false       // 整轮生成中（从发出到流结束）。09-12 起**不再禁任何东西**：
+                                                  // 串行由 outbox 泵保证（再发一条进队列），切人由
+                                                  // ChatStore.live 托管半截气泡；这个旗只剩记账用途。
     @State private var errorText: String? = nil   // 发送失败提示
     // 问答卡队列（PLAN_chatui §3.5/U4）：队头亮在输入栏上方，答完/跳过出队。
     // SSE question 事件实时进（去重），回前台/轮询靠 syncQuestions 对齐。
@@ -88,7 +89,9 @@ struct ContentView: View {
     @State private var rescueWaiting: [String: RescueWait] = [:]
 
     /// 有没有还在等的补投（驱动"正在输入"三个点；发送禁用仍只看 isWaiting）。
-    private var rescueActive: Bool { rescueWaiting.values.contains { !$0.givenUp && !$0.inFlight } }
+    private var rescueActive: Bool {
+        rescueWaiting.values.contains { !$0.givenUp && !$0.inFlight && $0.char == currentCharID }
+    }
 
     // Code 模式：消息改道 tmux 交互会话（那边手上有整台电脑），回复走待送达盒子回来。
     // codeMode 的真相在后端（会话活着 = 模式开着），@AppStorage 只是冷启动前的乐观值，
@@ -234,7 +237,7 @@ struct ContentView: View {
         case .conversations:
             ConversationsPage(charStore: charListStore, chatStore: chatStore,
                               currentID: currentCharID,
-                              switchDisabled: isGenerating) { c in
+                              switchDisabled: false) { c in
                 switchCharacter(to: c.id)
                 navPath.removeAll()
             }
@@ -286,7 +289,6 @@ struct ContentView: View {
                                 .font(.caption2.weight(.semibold))
                         }
                     }
-                    .disabled(isGenerating)
                 }
             }
     }
@@ -330,7 +332,8 @@ struct ContentView: View {
         ChatView(messages: chatStore.messages,
                  charID: currentCharID,                  // 头像认这个，不认 ProfileStore 里的缓存
                  charName: topTitle,                     // 「正在思考…」小字念名字用
-                 isWaiting: isWaiting || rescueActive,   // 后台生成期间小字不灭，补投到达才熄
+                 isWaiting: (isWaiting && streamingChar == currentCharID) || rescueActive,
+                 // 三个点只在流所属的会话里亮；后台生成期间小字不灭，补投到达才熄
                  onEdit: startEdit,
                  onDelete: { msg in deleteCandidates = [msg] },
                  onTapChatArea: { if showStickers { showStickers = false } },
@@ -588,11 +591,11 @@ struct ContentView: View {
         return charListStore.name(for: currentCharID) ?? "cassette"
     }
 
-    /// 切到另一个角色的会话。流式生成中不切（NoSave 气泡没落盘）；调用方按钮已禁用，这里双保险。
+    /// 切到另一个角色的会话。流式生成中也能切（09-12）：流绑它自己的角色，半截气泡由
+    /// ChatStore.live 托管，切走摘掉、切回挂上。
     /// 点中的就是当前会话时不空转：照样换一次气泡区身份（见 chatBody 的 .id）——
     /// 那是显示层错乱时唯一能手动复位的动作，卡死了还能自己点回来。
     private func switchCharacter(to id: String) {
-        guard !isGenerating else { return }
         chatViewNonce &+= 1
         guard id != currentCharID else { return }
         // 换人前先把「属于上一位」的两样东西落地，带的都是**它原本那位**：
@@ -604,7 +607,6 @@ struct ContentView: View {
         // 头像不在这儿刷：它现在跟着 charID 一路传到 AvatarView，没有需要通知的缓存了。
         // 老版本在这行调 profileStore.switchCharacter(id)，而它蹲在上面那道 guard 后面
         // ——guard 一提前 return，别人都换了人、头像还停在上一位身上（08-30 实锤）。
-        sessionId = nil
         // 问答卡/权限卡是署名的：换人清队，sync 马上按新角色补齐
         questionCards.removeAll()
         permitCards.removeAll()
@@ -1000,7 +1002,7 @@ struct ContentView: View {
         DispatchQueue.main.async { draft = "" }
         draftStore.clear(currentCharID)
 
-        outbox.append(OutboxItem(bubbleIds: bubbleIds,
+        outbox.append(OutboxItem(char: currentCharID, bubbleIds: bubbleIds,
                                  images: imagesToSend, files: filesToSend))
         if !pumping {
             Task { await pumpOutbox() }
@@ -1028,19 +1030,23 @@ struct ContentView: View {
         }
         while !outbox.isEmpty {
             let item = outbox.removeFirst()
+            // 这单属于哪个角色由入队时说了算（09-12）：排队期间 TA 可能切去别人那儿了，
+            // 沉底/快照/请求全按 item.char 的会话来，不看 chatStore 现在载着谁。
             var movedAny = false
-            for id in item.bubbleIds {
-                // 排队期间被 TA 删掉的气泡：跳过（这单剩下的照发）
-                guard let old = chatStore.messages.first(where: { $0.id == id }) else { continue }
-                chatStore.remove(id: id)
-                chatStore.append(ChatMessage(sender: .me, kind: old.kind,
-                                             timestamp: Date(), senderID: old.senderID))
-                movedAny = true
+            chatStore.mutate(conversation: item.char) { msgs in
+                for id in item.bubbleIds {
+                    // 排队期间被 TA 删掉的气泡：跳过（这单剩下的照发）
+                    guard let i = msgs.firstIndex(where: { $0.id == id }) else { continue }
+                    let old = msgs.remove(at: i)
+                    msgs.append(ChatMessage(sender: .me, kind: old.kind,
+                                            timestamp: Date(), senderID: old.senderID))
+                    movedAny = true
+                }
             }
             guard movedAny else { continue }   // 整单都被删了＝TA 反悔，不发
             let queuedIds = Set(outbox.flatMap(\.bubbleIds))
-            let snapshot = chatStore.messages.filter { !queuedIds.contains($0.id) }
-            await generateReply(history: snapshot,
+            let snapshot = chatStore.messages(for: item.char).filter { !queuedIds.contains($0.id) }
+            await generateReply(char: item.char, history: snapshot,
                                 imagesData: item.images, filesData: item.files)
         }
     }
@@ -1085,18 +1091,20 @@ struct ContentView: View {
     /// 把 history 快照发给后端（流式），回复逐字上屏；失败则弹提示。
     /// 约定 history 以用户的新消息结尾（pumpOutbox 出队时剔掉了还在排队的后续单）。
     @MainActor
-    private func generateReply(history: [ChatMessage],
+    private func generateReply(char: String, history: [ChatMessage],
                                imagesData: [Data] = [], filesData: [OutgoingFile] = []) async {
+        // 这一轮从头到尾只认 char（09-12）：切人不影响它，它也不碰「当前」——每一笔写都
+        // 指名 conversation: char，半截气泡由 chatStore.live 托管。
         isGenerating = true
         isWaiting = true
-        defer { isWaiting = false; isGenerating = false }
+        streamingChar = char
+        defer { isWaiting = false; isGenerating = false; streamingChar = nil }
         var streamingId: UUID? = nil     // 当前正在流式增长的气泡 id（nil=还没冒正文）
         var streamedText = ""            // 当前气泡已流出的文字（break 后清零）
         var sawBreak = false             // 这轮是否发生过工具切段（多气泡 → done 时不用 reply 覆盖）
         var sawDone = false              // 收到过 done——收到就删登记（防僵尸记录挂住三个点）
         var turnIds: [UUID] = []         // 本轮所有正文气泡 id（边产生边同步进登记）
         let reqId = UUID().uuidString    // 断连补投的关联 id（后端 rescue 条目带回）
-        let char = currentCharID         // 身份跟着这轮走（生成中切人被禁，这一刻就是它）
         // **轮一开始就登记**：半开连接下补投可能先于流报错到达（后端跑完投 pending、
         // 这边流还在 600s 空闲超时里干等）——登记晚了 syncPending 关联扑空，
         // 半截+完整双份并存。提前登记后补投任何时刻到都能撤半截。
@@ -1104,16 +1112,17 @@ struct ContentView: View {
         rescueWaiting[reqId] = RescueWait(char: char, ids: [], since: Date(), inFlight: true)
         do {
             let stream = chatService.sendStream(history: history,
-                                                sessionId: sessionId,
+                                                sessionId: sessionIds[char],
                                                 stickers: stickerStore.stickers, reqId: reqId,
-                                                imagesData: imagesData, filesData: filesData)
+                                                imagesData: imagesData, filesData: filesData,
+                                                char: char)
             for try await ev in stream {
                 switch ev {
                 case .text(let chunk):
                     isWaiting = false     // 正文开始冒 → 收起"正在输入"
-                    if let id = streamingId {
+                    if streamingId != nil {
                         streamedText += chunk
-                        chatStore.updateTextNoSave(id: id, newText: streamedText)
+                        chatStore.liveUpdate(text: streamedText)
                     } else {
                         let msg = ChatMessage(sender: .other, kind: .text(chunk),
                                               timestamp: Date(), isStreaming: true)
@@ -1121,16 +1130,12 @@ struct ContentView: View {
                         streamedText = chunk
                         turnIds.append(msg.id)
                         rescueWaiting[reqId]?.ids = turnIds   // 气泡 id 边产生边同步进登记
-                        chatStore.appendNoSave(msg)
+                        chatStore.liveBegin(msg, conversation: char)
                     }
                 case .textBreak:
                     // 工具调用切段：这一段是正经说过的话 → 定稿保留（落盘），下一段另起气泡
-                    if let id = streamingId {
-                        if streamedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                            chatStore.remove(id: id)
-                        } else {
-                            chatStore.editText(id: id, newText: streamedText)
-                        }
+                    if streamingId != nil {
+                        chatStore.liveEnd(text: streamedText)
                     }
                     streamingId = nil
                     streamedText = ""
@@ -1142,12 +1147,12 @@ struct ContentView: View {
                     // 中途工具操作 → 就地内联小字（成功的网页除外：finalize 会补一张可点的卡片）
                     if let note = toolNoteText(tool: tool, name: name, text: text,
                                                ok: ok, reason: reason) {
-                        chatStore.appendMemoryNote(note)
+                        chatStore.appendMemoryNote(note, conversation: char)
                     }
                 case .question(let card):
-                    // 问答卡（U4）：随流实时到。SSE 的卡不带 char＝当前会话角色。
+                    // 问答卡（U4）：随流实时到。SSE 的卡不带 char＝这轮的角色。
                     var c = card
-                    c.char = currentCharID
+                    c.char = char
                     if !questionCards.contains(where: { $0.id == c.id }) {
                         withAnimation { questionCards.append(c) }
                     }
@@ -1155,7 +1160,7 @@ struct ContentView: View {
                     // 权限卡（U4/native §6）：同款通道。幽灵卡（路径闸拒的）靠
                     // syncPermits 收走，拍板撞 409 也有声。
                     var pc = card
-                    pc.char = currentCharID
+                    pc.char = char
                     if !permitCards.contains(where: { $0.id == pc.id }) {
                         withAnimation { permitCards.append(pc) }
                     }
@@ -1163,7 +1168,7 @@ struct ContentView: View {
                     errorText = msg
                 case .done(let resp):
                     sawDone = true
-                    finalizeStreamedReply(resp, streamingId: streamingId,
+                    finalizeStreamedReply(resp, char: char, streamingId: streamingId,
                                           streamedTail: sawBreak ? streamedText : nil)
                     streamingId = nil
                 }
@@ -1173,8 +1178,8 @@ struct ContentView: View {
             // 后端活着 → 补投带 req_id 回来，syncPending 撤半截换完整版；
             // 后端没在跑这轮 → reconcileRescues 对账后熄点提示重发。
             if let id = streamingId {
-                if streamedText.isEmpty { chatStore.remove(id: id); turnIds.removeAll { $0 == id } }
-                else { chatStore.editText(id: id, newText: streamedText) }
+                if streamedText.isEmpty { turnIds.removeAll { $0 == id } }
+                chatStore.liveEnd(text: streamedText)
             }
             if sawDone {
                 rescueWaiting.removeValue(forKey: reqId)
@@ -1186,12 +1191,21 @@ struct ContentView: View {
             }
         } catch {
             if let id = streamingId {
-                if streamedText.isEmpty { chatStore.remove(id: id); turnIds.removeAll { $0 == id } }
-                else { chatStore.editText(id: id, newText: streamedText) }
+                if streamedText.isEmpty { turnIds.removeAll { $0 == id } }
+                chatStore.liveEnd(text: streamedText)
             }
             // 中途断连（切后台/锁屏被掐流）不弹错：后端照跑，补投机制会把完整回复送回来，
-            // 弹窗纯属误报。其余错误（连不上/4xx…）是明确失败：弹提示 + 删登记，不再空等。
-            if case ChatServiceError.connectionLost = error {
+            // 弹窗纯属误报。空闲超时（09-12 起 120s）同路：半开连接时后端多半还在跑，
+            // 登记留着让对账/补投说了算，不在这儿判死。其余错误（连不上/4xx…）是明确失败：
+            // 弹提示 + 删登记，不再空等。
+            var keepWaiting = false
+            if let e = error as? ChatServiceError {
+                switch e {
+                case .connectionLost, .timedOut: keepWaiting = true
+                default: break
+                }
+            }
+            if keepWaiting {
                 // 静默：半截保留，登记等补投（哪怕一段正文都没冒——不然三个点一灭就死寂）。
                 rescueWaiting[reqId]?.ids = turnIds
                 rescueWaiting[reqId]?.inFlight = false
@@ -1206,31 +1220,25 @@ struct ContentView: View {
     /// resp=nil（空/错）时只清半截气泡。streamedTail ≠ nil ＝这轮被工具切成了多段（sawBreak）：
     /// 前面的气泡已各自定稿，resp.reply 是全段拼接（覆盖最后气泡会把前面的话重复一遍）
     /// → 最后气泡用流出的原文定稿。
-    private func finalizeStreamedReply(_ resp: ChatResponse?, streamingId: UUID?,
+    private func finalizeStreamedReply(_ resp: ChatResponse?, char: String, streamingId: UUID?,
                                        streamedTail: String? = nil) {
         isWaiting = false
         guard let resp = resp else {
-            if let id = streamingId { chatStore.remove(id: id) }
+            if streamingId != nil { chatStore.liveEnd(text: nil) }
             return
         }
-        sessionId = resp.session_id
+        sessionIds[char] = resp.session_id
         if let tail = streamedTail {
             // 多段：只定稿最后一段（空就删掉半截气泡），不动前面已定稿的。
-            if let id = streamingId {
-                if tail.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    chatStore.remove(id: id)
-                } else {
-                    chatStore.editText(id: id, newText: tail)
-                }
-            }
+            if streamingId != nil { chatStore.liveEnd(text: tail) }
         } else {
             // 单段：流出的是"临时"的，done 带权威 reply → 替换气泡内容 + 落盘。
             let clean = resp.reply.trimmingCharacters(in: .whitespacesAndNewlines)
-            if let id = streamingId {
-                if clean.isEmpty { chatStore.remove(id: id) }
-                else { chatStore.editText(id: id, newText: resp.reply) }
+            if streamingId != nil {
+                chatStore.liveEnd(text: clean.isEmpty ? nil : resp.reply)
             } else if !clean.isEmpty {
-                chatStore.append(ChatMessage(sender: .other, kind: .text(resp.reply), timestamp: Date()))
+                chatStore.append(ChatMessage(sender: .other, kind: .text(resp.reply), timestamp: Date()),
+                                 conversation: char)
             }
         }
         // 他挑着发来的表情 → 作为对方表情消息上屏。
@@ -1238,36 +1246,37 @@ struct ContentView: View {
             if let st = stickerStore.sticker(id: id) {
                 chatStore.append(ChatMessage(sender: .other,
                                              kind: .sticker(stickerStore.imageURL(for: st), st.description),
-                                             timestamp: Date()))
+                                             timestamp: Date()), conversation: char)
             }
         }
         // 他改了某些表情的描述 → 应用 + 灰字提示。
         if let updates = resp.desc_updates, !updates.isEmpty {
             for u in updates { stickerStore.updateDescription(id: u.id, u.description) }
             chatStore.appendMemoryNote(updates.count == 1
-                ? "更新了一个表情的描述" : "更新了 \(updates.count) 个表情的描述")
+                ? "更新了一个表情的描述" : "更新了 \(updates.count) 个表情的描述", conversation: char)
         }
         // 他这轮顺手定了下次醒来 → 小字提醒（§3.4：`✦ Cassius 决定下次21:13醒来`；
-        // 后端文案从「决定」说起，名字在这儿接上）。
+        // 后端文案从「决定」说起，名字在这儿接上——名字是这轮角色的，不是正看着的那位）。
         if let hint = resp.next_wake_hint, !hint.isEmpty {
-            chatStore.appendMemoryNote("\(topTitle) \(hint)")
+            let name = charListStore.name(for: char) ?? topTitle
+            chatStore.appendMemoryNote("\(name) \(hint)", conversation: char)
         }
         // 他这轮自己切进了 Code 模式（调了 code_start 工具）→ 翻开关，后续消息改道会话。
         if resp.code_started == true, !codeMode {
             codeMode = true
             codeAvailable = true
-            sessionChar = currentCharID   // 这轮是跟我说话时切的，会话就归我（同 toggleCodeMode）
-            chatStore.appendSystemMessage("已切进 Code 模式")
+            sessionChar = char   // 会话归这轮的角色（同 toggleCodeMode）
+            chatStore.appendSystemMessage("已切进 Code 模式", conversation: char)
         }
         // 他这轮自己切去玩游戏了（调了 game_start）→ 终端面板亮起，后续消息改道会话。
         if resp.game_started == true, !gameSessionActive {
             gameSessionActive = true
-            sessionChar = currentCharID
-            chatStore.appendSystemMessage("去玩游戏了")
+            sessionChar = char
+            chatStore.appendSystemMessage("去玩游戏了", conversation: char)
         }
         // 他这轮做/改的网页 → 网页卡片消息（stored 只有标题，从后端反查 id）。
         // 只认真做成了的（ok=false 的那次页面根本没生成，反查 id 只会挂错一张卡片）。
-        appendDoneOnlyStored(resp.stored)
+        appendDoneOnlyStored(resp.stored, conversation: char)
     }
 
     /// done 独有的 stored 产物上屏：网页卡片 + 浏览灰字（后端已聚合成一条，text=网址列表）。
@@ -1275,23 +1284,26 @@ struct ContentView: View {
     /// 条目里补（实锤：08-10 二轮测试浏览灰字蒸发）。记忆灰字不在此列：流式中途就地发过。
     /// 同秒+同内容去重：ack 失败重拉 pending 时别插重复（finalize 路 timestamp=now，不会撞）。
     @MainActor
-    private func appendDoneOnlyStored(_ stored: [StoredMemory]?, timestamp: Date = Date()) {
+    private func appendDoneOnlyStored(_ stored: [StoredMemory]?, timestamp: Date = Date(),
+                                      conversation conv: String? = nil) {
+        let conv = conv ?? currentCharID
         let ts = Int(timestamp.timeIntervalSince1970)
         let pages = (stored ?? []).filter { $0.tool == "webpage" && $0.ok != false }
         if !pages.isEmpty {
             Task { @MainActor in
                 guard let list = try? await chatService.getWebpages() else { return }
                 for p in pages {
-                    if let item = list.first(where: { $0.title == p.text }) ?? list.first {
-                        let dup = chatStore.messages.contains { m in
-                            guard Int(m.timestamp.timeIntervalSince1970) == ts,
-                                  case .webpage(let pid, _) = m.kind else { return false }
-                            return pid == item.id
-                        }
-                        if !dup {
-                            chatStore.append(ChatMessage(sender: .other,
-                                                         kind: .webpage(item.id, item.title),
-                                                         timestamp: timestamp))
+                    // 只认标题对得上的；对不上宁可不出卡（09-12：以前兜底 list.first 会挂错页）
+                    if let item = list.first(where: { $0.title == p.text }) {
+                        let card = ChatMessage(sender: .other, kind: .webpage(item.id, item.title),
+                                               timestamp: timestamp)
+                        chatStore.mutate(conversation: conv) { msgs in
+                            let dup = msgs.contains { m in
+                                guard Int(m.timestamp.timeIntervalSince1970) == ts,
+                                      case .webpage(let pid, _) = m.kind else { return false }
+                                return pid == item.id
+                            }
+                            if !dup { msgs.append(card) }
                         }
                     }
                 }
@@ -1301,14 +1313,14 @@ struct ContentView: View {
             let urls = b.text.split(separator: "\n").map(String.init)
                 .filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
             guard !urls.isEmpty else { continue }
-            let dup = chatStore.messages.contains { m in
-                guard Int(m.timestamp.timeIntervalSince1970) == ts,
-                      case .browseNote(let u) = m.kind else { return false }
-                return u == urls
-            }
-            if !dup {
-                chatStore.append(ChatMessage(sender: .other, kind: .browseNote(urls),
-                                             timestamp: timestamp))
+            let note = ChatMessage(sender: .other, kind: .browseNote(urls), timestamp: timestamp)
+            chatStore.mutate(conversation: conv) { msgs in
+                let dup = msgs.contains { m in
+                    guard Int(m.timestamp.timeIntervalSince1970) == ts,
+                          case .browseNote(let u) = m.kind else { return false }
+                    return u == urls
+                }
+                if !dup { msgs.append(note) }
             }
         }
     }
@@ -1421,11 +1433,16 @@ struct ContentView: View {
     /// 卡收走——刚超时的留着，卡自己置灰标「已超时」等机主收（§5.3）。
     @MainActor
     private func syncQuestions() async {
-        guard let cards = try? await chatService.pendingQuestions(char: currentCharID)
+        let char = currentCharID
+        guard let cards = try? await chatService.pendingQuestions(char: char)
         else { return }
+        // 在飞期间切了人（09-12 串台修）：这份是上一位的卡，挂上去就是 A 的问题染 B 的色、
+        // 答案的小字进 B 的记录。口径同 refreshDraftCount。
+        guard char == currentCharID else { return }
         let now = Int(Date().timeIntervalSince1970)
         withAnimation {
-            for c in cards where !questionCards.contains(where: { $0.id == c.id }) {
+            for var c in cards where !questionCards.contains(where: { $0.id == c.id }) {
+                if c.char == nil { c.char = char }
                 questionCards.append(c)
             }
             questionCards.removeAll { qc in
@@ -1461,11 +1478,14 @@ struct ContentView: View {
     /// 收），刚超时的留着置灰等机主收起。
     @MainActor
     private func syncPermits() async {
-        guard let cards = try? await chatService.pendingPermits(char: currentCharID)
+        let char = currentCharID
+        guard let cards = try? await chatService.pendingPermits(char: char)
         else { return }
+        guard char == currentCharID else { return }   // 同 syncQuestions（09-12）
         let now = Int(Date().timeIntervalSince1970)
         withAnimation {
-            for c in cards where !permitCards.contains(where: { $0.id == c.id }) {
+            for var c in cards where !permitCards.contains(where: { $0.id == c.id }) {
+                if c.char == nil { c.char = char }
                 permitCards.append(c)
             }
             permitCards.removeAll { pc in
@@ -1633,7 +1653,7 @@ struct ContentView: View {
         // 「编辑并重新回复」＝相当于重发，刷新时间；「仅修改」保留原时间。
         chatStore.editText(id: message.id, newText: newText, updateTimestamp: regenerate)
         editRefreshTick += 1   // 亲手编辑立即上屏（离底冻结快照做手术式合并）
-        if regenerate, !isGenerating, !pumping {
+        if regenerate, !pumping {
             // 附件找回（mianmian 实踩 bug）：图/文件只在原发送轮注入，历史里只剩
             // [图片]/[文件:名] 占位——直接重答模型就看不到了。从这条往前收集紧邻的
             // 同回合附件（发送时图/文件都排在文字前面），从沙盒把数据重建出来随重发带上。
@@ -1644,7 +1664,7 @@ struct ContentView: View {
             // 「同一时刻只有一条流」的保证交给了泵（send 只看 pumping），这条旧路绕开泵
             // 起流，pumping 还是 false → 重答期间再发一条就是两条 SSE 流并发互踩。
             // 泵会把这条气泡沉底重打 ts（和重发一条新消息同形），快照剔掉排队的后续单。
-            outbox.append(OutboxItem(bubbleIds: [message.id],
+            outbox.append(OutboxItem(char: currentCharID, bubbleIds: [message.id],
                                      images: imagesData, files: filesData))
             Task { await pumpOutbox() }
         } else {

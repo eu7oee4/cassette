@@ -73,6 +73,7 @@ struct OutgoingFile {
 /// pumpOutbox 串行补发。排队必须在 app 不在引擎——判脏比对要求每轮快照
 /// 含上一轮回复，并发发送会逼后端每条插话都全量重铸。
 struct OutboxItem {
+    let char: String          // 这单属于哪个角色（入队时快照；排队期间 TA 可能切走了，09-12）
     let bubbleIds: [UUID]     // 已上屏的气泡；出队时搬到列表末尾＝真正送出时刻
     let images: [Data]
     let files: [OutgoingFile]
@@ -170,6 +171,7 @@ struct ChatService {
     /// 构造发给后端 /chat 或 /chat/stream 的请求。
     /// history 应以用户的新消息结尾。memoryNote 是纯 UI 灰字、不发回后端；历史裁到最近 sendHistoryCap 条。
     private func buildChatRequest(path: String, history: [ChatMessage], sessionId: String?,
+                                  char: String? = nil,
                                   stickers: [Sticker] = [], reqId: String? = nil,
                                   imagesData: [Data] = [],
                                   filesData: [OutgoingFile] = []) throws -> URLRequest {
@@ -189,15 +191,18 @@ struct ChatService {
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue(BackendConfig.authKey, forHTTPHeaderField: "X-Auth")
-        request.timeoutInterval = 600   // 空闲计时（收到数据就重置）：流式有后端心跳撑着，
-                                        // 这里只兜"后端整个没响应"
+        request.timeoutInterval = 120   // 空闲计时（收到数据就重置）：后端每 25s 一个心跳
+                                        // （STREAM_PING_SEC），120s 没动静就是半开连接
+                                        // （Mac 睡了/Tailscale 掉了但没 RST）——以前 600s，
+                                        // 整个 app 锁十分钟（09-12 体检）。超时走 timedOut，
+                                        // 半截保留、登记等补投，口径同 connectionLost。
         let images: [ImageOut]? = imagesData.isEmpty ? nil :
             imagesData.map { ImageOut(data: $0.base64EncodedString(), media_type: "image/jpeg") }
         let files: [FileOut]? = filesData.isEmpty ? nil :
             filesData.map { FileOut(data: $0.data.base64EncodedString(),
                                     media_type: $0.mime, name: $0.name) }
         request.httpBody = try JSONEncoder().encode(
-            ChatRequestBody(messages: outMessages, char_id: CurrentCharacter.id,
+            ChatRequestBody(messages: outMessages, char_id: char ?? CurrentCharacter.id,
                             session_id: sessionId,
                             stickers: stickers.isEmpty ? nil : stickers,
                             client_req_id: reqId, images: images, files: files)
@@ -252,12 +257,16 @@ struct ChatService {
     func sendStream(history: [ChatMessage], sessionId: String?,
                     stickers: [Sticker] = [], reqId: String? = nil,
                     imagesData: [Data] = [],
-                    filesData: [OutgoingFile] = []) -> AsyncThrowingStream<StreamEvent, Error> {
+                    filesData: [OutgoingFile] = [],
+                    char: String? = nil) -> AsyncThrowingStream<StreamEvent, Error> {
         AsyncThrowingStream { continuation in
             let task = Task {
                 do {
+                    // char 显式带（09-12）：这轮属于哪个角色由出队的那单说了算，
+                    // 不读全局 CurrentCharacter——流式期间可以切人了。
                     let request = try buildChatRequest(path: "/chat/stream", history: history,
-                                                       sessionId: sessionId, stickers: stickers,
+                                                       sessionId: sessionId, char: char,
+                                                       stickers: stickers,
                                                        reqId: reqId, imagesData: imagesData,
                                                        filesData: filesData)
                     let (bytes, response) = try await URLSession.shared.bytes(for: request)
@@ -279,6 +288,10 @@ struct ChatService {
                     }
                     continuation.finish()
                 } catch is CancellationError {
+                    continuation.finish()
+                } catch let error as URLError where error.code == .cancelled {
+                    // Task 被 cancel 时 URLSession 抛的是 URLError(.cancelled) 不是
+                    // CancellationError（09-12 实读）：不算错，正常收流。
                     continuation.finish()
                 } catch let error as URLError {
                     continuation.finish(throwing: mapURLError(error))
