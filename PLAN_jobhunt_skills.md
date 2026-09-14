@@ -233,3 +233,32 @@ server/state/jobhunt/          ← 已存在，12 个 MCP 工具在管
 - **模拟面试的开局**：必须先选两个维度（风格：友好复盘 / 高压追问 × 类型：BQ / JD 面 / 混合），
   明写「不要直接开始提问」；一次一题；高压模式追模糊词（例句：「你说『推动了落地』，
   具体是怎么推动的？」）；结束出复盘：亮点 2–3 / 待加强 2–3 / **最弱那题的改善版本**。
+
+---
+
+## 九、施工记录
+
+### 2026-09-14 · 四篇待写 + 两篇新流程 + 三份框架，从外部仓改写填满
+
+机主原话「现在的 jobhunt 我感觉不太好用」。原因：路由表七个流程只落了三个，四篇「待写」
+文件不存在。第六节「别先写规范后干活」这条**这次让路**（机主 09-14 拍板）：一个月过去四篇
+还是空的，先从成熟仓改写填满，跑真岗再修。
+
+落的文件（全在 `server/skills/jobhunt/`）：
+- `prompts/jd-decode.md`（← offer-toolkit jd-decoder + should-i-apply 合一）
+- `prompts/resume-tailor.md`（← offer-toolkit resume-tailor，三版本砍成一版，加自陷检查）
+- `prompts/project-writeup.md`（新，「个人项目撰写」← resume-skill resume-project）
+- `prompts/mock-interview.md`（← career-ops interview/practice + chengzicv 追问阶梯与门禁）
+- `prompts/outreach.md`（← resume-skill cover-letter + career-ops followup 节奏）
+- `prompts/interview-debrief.md`（新，第八流程，机主拍板加 ← career-ops interview/debrief）
+- `frameworks/jd-signals.md`、`competency-tags.md`、`star-car.md`（← offer-toolkit）
+- `SOURCES.md` 记出处与许可（四仓全 MIT）
+- `SKILL.md` 路由表全「可用（草稿）」，新增两行，数据层补 questions / retracted / sessions
+- 不建 `company-profiles.md`（第八节已判）、不建 `manual-spec.md`（手册深度未拍）
+
+数据层新增三样约定（文件由流程首次跑时建，本次没动 `state/`）：
+`questions.md` 真题库、`retracted.md` 撤回声明、`sessions/` 会话记录。
+`stories/_index.md` 的「能答哪几类题」改用十二标签打——存量两条待机主看过再补。
+
+来源仓比对、各仓内部写了什么、为什么排除 BossHunter / ai-job-search 等：
+Notion「cassette 求职方法层：流程架构与来源」（09-14）。
