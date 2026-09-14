@@ -198,3 +198,18 @@ def galatea_conf(char_id: Optional[str] = None) -> dict:
         v = "" if v is None else str(v).strip()
         out[k] = v or (os.environ.get(f"GALATEA_MCP_{k}") or "").strip()
     return out
+
+
+# char.json 的 notion 段（一人一个 Notion 集成，2026-09-14）：
+#     {"token": "ntn_..."}
+def notion_conf(char_id: Optional[str] = None) -> dict:
+    """角色的 Notion 接线：{TOKEN}。**没有 env 兜底，只认 char.json**——
+    口径同 browser_conf 而不是 galatea_conf，因为兜底在这儿是有害的：
+    Notion 的内部集成 token 决定「能看见哪些页面、在 Notion 的编辑记录里是谁」，
+    两个角色吃同一个全局值 = 静默共用同一个身份，正是 PLAN 里那条串台 bug 类。
+    宁可这个角色没有 Notion（插件不挂载，见 plugins.PLUGIN_GATE），也别让它
+    悄悄用别人的集成。
+
+    取不到就是空串；空串不是错误，是「这个角色没配 Notion」。"""
+    n = meta(char_id).get("notion") or {}
+    return {"TOKEN": "" if n.get("token") is None else str(n.get("token")).strip()}

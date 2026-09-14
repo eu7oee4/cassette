@@ -391,6 +391,12 @@ REGISTRY: dict[str, dict] = {
     # （server/plugins/galatea/，手放的目录商店里照样列出、开关和挂载都正常，只是
     # 装不了也更新不了）。跑稳了再开仓、进 registry 钉 commit 发版。
     # 宿主侧该配的都配好了：WAKE_TOGGLEABLE / WAKE_TOOL_EXCLUDE / PLUGIN_ENV / 能力菜单。
+    #
+    # ⚠️ notion（Notion 读写）**故意还不在这儿**：2026-09-14 先以本地开发副本跑
+    # （server/plugins/notion/）。跑稳了再开仓、进 registry 钉 commit 发版。
+    # 宿主侧接线：characters.notion_conf（**只认 char.json 的 notion.token，没有 env
+    # 兜底**）+ PLUGIN_ENV / PLUGIN_GATE（没 token 的角色整个不挂）+ 两份能力菜单。
+    # 醒来那条路照挂、且能写（机主拍板）：不进 NO_WAKE_PLUGINS / WAKE_TOGGLEABLE。
 }
 
 _NAME_RE = re.compile(r"^[a-z0-9_-]{1,40}$")
@@ -650,6 +656,11 @@ def _browser_env(cid: str) -> dict:
     return {"CASSETTE_BROWSER_MCP_URL": characters.browser_conf(cid)["MCP_URL"]}
 
 
+def _notion_env(cid: str) -> dict:
+    import characters
+    return {"CASSETTE_NOTION_TOKEN": characters.notion_conf(cid)["TOKEN"]}
+
+
 # 插件专属接线：按角色下发给它的 stdio 子进程（插件名 → 一个 cid ↦ env 的函数）。
 #
 # 什么该进这儿：**账号/身份类的接线**——同一个插件替不同角色干活时，用的是不同的号。
@@ -659,14 +670,18 @@ def _browser_env(cid: str) -> dict:
 # ⚠️ **值为空也要照发**：config 里的 env 是**合并且盖得过**继承值（2026-08-15 实测两轮），
 # 而 .env 会被 dotenv 灌进后端进程环境、一路继承给每个插件子进程。不发空串的话，
 # 一个没配花园的角色会**静默继承 .env 里别人的 token** —— 那正是这个钩子要防的事。
-PLUGIN_ENV: dict = {"galatea": _galatea_env, "browser": _browser_env}
+PLUGIN_ENV: dict = {"galatea": _galatea_env, "browser": _browser_env,
+                    "notion": _notion_env}
 
 # 插件的按角色**挂载前提**（比归属更细的一道门）：钩子返回 False 就整个不挂。
 # browser：接线是空串的角色（char.json 没写 browser.mcp_url 的非默认角色）不挂——
 # 壳拿到空 env 会退到它自己的默认 3002，那等于**静默用别人的浏览器身份**上网，
 # 正是一人一个要拆掉的事故面。宁可工具不出现（商店开关开着也不挂，同独占插件
 # 不归属时的行为），也别让它带着别人的登录态出门。
-PLUGIN_GATE: dict = {"browser": lambda cid: bool(_browser_env(cid)["CASSETTE_BROWSER_MCP_URL"])}
+# notion：同理——集成 token 决定「看得见哪些页面、Notion 的编辑记录里是谁」，
+# 没配 token 的角色不挂（characters.notion_conf 也不给 env 兜底，两道一起）。
+PLUGIN_GATE: dict = {"browser": lambda cid: bool(_browser_env(cid)["CASSETTE_BROWSER_MCP_URL"]),
+                     "notion": lambda cid: bool(_notion_env(cid)["CASSETTE_NOTION_TOKEN"])}
 
 
 def mounted(context: str = "chat", char_id=None) -> tuple[Optional[str], list[str]]:
