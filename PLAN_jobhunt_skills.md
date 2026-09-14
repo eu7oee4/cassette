@@ -178,7 +178,7 @@ server/state/jobhunt/          ← 已存在，12 个 MCP 工具在管
 2. **skill 住哪**：仓内软链 a / gitignore 开例外 b / 独立仓 c？ —— 我推 b（最省事，且方法层确实该进 git）。
 3. **第一个跑通的岗**：拓端（唯一真会有面试，能拿真面试验手册）还是 ALLTIME（80 分、最想去、但还没探活）？
    —— 我推拓端。这条从 08-27 16:45 问到现在还没答。
-4. **手册成品深度**：一页能打印带进考场的，还是可以慢慢啃的长文档？—— 08-27 16:54 问过，未答。
+4. ~~**手册成品深度**~~ ✅ **09-14 拍板：可以慢慢啃的长文档**。（08-27 16:54 首问，09-14 答。）
    （工作台是承载形态，深度是另一回事，两个都得定。）
 5. **工作台跟手册是不是同一个东西**？我的理解：工作台 = 手册的成品形态，八个岗一个页面分目录。
    —— 未确认。
@@ -254,7 +254,8 @@ server/state/jobhunt/          ← 已存在，12 个 MCP 工具在管
 - `frameworks/jd-signals.md`、`competency-tags.md`、`star-car.md`（← offer-toolkit）
 - `SOURCES.md` 记出处与许可（四仓全 MIT）
 - `SKILL.md` 路由表全「可用（草稿）」，新增两行，数据层补 questions / retracted / sessions
-- 不建 `company-profiles.md`（第八节已判）、不建 `manual-spec.md`（手册深度未拍）
+- 不建 `company-profiles.md`（第八节已判）、`manual-spec.md` 暂不建（手册深度同日拍了长文档，
+  验收标准等 ALLTIME 跑完真面从产物倒推）
 
 数据层新增三样约定（文件由流程首次跑时建，本次没动 `state/`）：
 `questions.md` 真题库、`retracted.md` 撤回声明、`sessions/` 会话记录。
