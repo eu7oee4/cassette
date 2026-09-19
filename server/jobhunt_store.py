@@ -321,15 +321,17 @@ _DEFAULT_TEMPLATE = """<!DOCTYPE html>
   img.photo { position: absolute; top: 0; right: 0; width: 22mm; height: 29.3mm;
               object-fit: cover; border: .3mm solid #d6e0ea; }
 
-  h2 { font-size: 11pt; font-weight: 600; letter-spacing: 1.5px; color: #1f4e79;
-       border-left: 3px solid #1f4e79; border-bottom: 1px solid #d6e0ea;
-       padding: 0 0 1.4mm 2.5mm; margin: 6.5mm 0 3mm; }
+  h2 { font-size: 12.5pt; font-weight: 700; letter-spacing: 2px; color: #16324f;
+       background: #e8eff7; border-left: 4px solid #1f4e79;
+       padding: 1.2mm 0 1.2mm 3mm; margin: 6mm 0 3mm; }
   h3 { font-size: 10.5pt; margin: 3mm 0 1mm; }
   p { margin: 1.6mm 0 .8mm; }
 
   /* 标题行：正文靠左、行尾日期靠右（md_to_html 拆出 .t / .d） */
   p.row { display: flex; justify-content: space-between; align-items: baseline; gap: 6mm; }
-  p.row .t strong { color: #16324f; font-weight: 600; }
+  /* 条目小标题：比正文大一号。PingFang 最粗只到 Semibold；别用 -webkit-text-stroke 压粗——
+     Chrome 会把描边当第二遍文字写进 PDF，复制/HR 系统解析出来每个字都重复（09-19 踩到） */
+  p.row .t strong { color: #16324f; font-weight: 600; font-size: 11.5pt; }
   p.row .d { white-space: nowrap; font-variant-numeric: tabular-nums;
              font-size: 9pt; color: #7a8b9c; }
 
