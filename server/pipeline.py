@@ -834,6 +834,34 @@ def _pet_mcp_config(char_id: Optional[str] = None) -> Path:
     return path
 
 
+# PR 工具（PLAN_prs §3）：醒来改代码只提 PR。内置不走插件商店（同宠物 MCP）。
+# 挂载条件三样全要：WAKE_PRS 闸开、WRITE_TOOLS 开（在工作副本里干活靠 Edit/Write）、
+# 这个角色走 sdk 聊天（门和工作副本放行都在 chat_loop 里）。
+PRS_MCP_TOOLS = [f"mcp__prs__{t}" for t in
+                 ("pr_start", "pr_test", "pr_open", "pr_close", "pr_list", "pr_view")]
+
+
+def _prs_mounted(char_id: Optional[str] = None) -> bool:
+    import characters
+    return bool(config.WAKE_PRS_ENABLED and config.WRITE_TOOLS_ENABLED
+                and config.chat_engine(characters.resolve(char_id)) == "sdk")
+
+
+def _prs_mcp_config(char_id: Optional[str] = None) -> Path:
+    """渲染 PR MCP 的 mcp-config（口径同 _pet_mcp_config）。"""
+    me = (char_id or state_store.DEFAULT_CHAR_ID)
+    path = state_store.char_state_dir(char_id) / "prs.mcp.json"
+    payload = json.dumps({"mcpServers": {"prs": {
+        "type": "stdio", "command": sys.executable,
+        "args": [str(config.BASE_DIR / "prs_mcp.py")],
+        "env": {"CASSETTE_CHAR_ID": me}}}})
+    if not path.exists() or path.read_text("utf-8") != payload:
+        tmp = path.with_name(f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+        tmp.write_text(payload, "utf-8")
+        tmp.replace(path)
+    return path
+
+
 BASICS_MCP_TOOLS = ["mcp__basics__now", "mcp__basics__fetch",
                     "mcp__basics__next_wake"]
 
@@ -966,6 +994,8 @@ def mounted_tool_names(context: str = "chat", char_id: Optional[str] = None) -> 
     if _skills_mounted(context, char_id):
         import skills
         names += skills.SKILLS_MCP_TOOLS
+    if _prs_mounted(char_id):
+        names += PRS_MCP_TOOLS
     # ToolSearch 也得算进来，条件跟 base_claude_args 一模一样——菜单头那句「用法默认
     # 没加载，先去取」正是按它在不在场决定说不说的。漏了它＝延迟开着却不告诉 TA 要先
     # 取用法，他直接调必失败（静默失效，只能靠肉眼看菜单头才发现）。
@@ -1139,6 +1169,10 @@ def base_claude_args(persona_file: Optional[Path] = None,
         import skills
         mcp_configs.append(str(skills.mcp_config(char_id)))
         tools += skills.SKILLS_MCP_TOOLS
+    if _prs_mounted(char_id):
+        # sdk 角色降级到 -p 时也挂：口径跟 mounted_tool_names 对齐，菜单不提不在场的工具
+        mcp_configs.append(str(_prs_mcp_config(char_id)))
+        tools += PRS_MCP_TOOLS
     # 工具延迟：上下文里只留工具名，用法（schema）等 TA 自己按名字取。工具一多，
     # 光 schema 就是大头——实测醒来那条路 52 个工具时 20,076 token，开了延迟 3,509（−83%）。
     # ToolSearch 必须**进白名单**才算数：它是内置工具，而这里的 --tools 是精确白名单，
@@ -1408,20 +1442,31 @@ READ_ROOTS: tuple[tuple[str, Path], ...] = (
 _GUARD_PATH_KEYS = ("file_path", "path", "notebook_path")
 
 
+def tool_paths(tool_input: Optional[dict]) -> list[Optional[Path]]:
+    """工具参数里点名的路径，resolve 好（解析不了的给 None）。相对路径按恒空 cwd
+    （neutral_cwd）解析——路径闸和写类的工作副本判定共用这一个口径。"""
+    out: list[Optional[Path]] = []
+    for k in _GUARD_PATH_KEYS:
+        v = (tool_input or {}).get(k)
+        if not (isinstance(v, str) and v.strip()):
+            continue
+        p = Path(v.strip())
+        if not p.is_absolute():
+            p = Path(neutral_cwd()) / p
+        try:
+            out.append(p.resolve())
+        except Exception:
+            out.append(None)
+    return out
+
+
 def readonly_path_guard(tool_input: Optional[dict],
                         char_id: Optional[str]) -> Optional[str]:
     """只读工具的路径闸：None=放行；str=拒绝原话（PreToolUse 门直接用）。
     相对路径按恒空 cwd（neutral_cwd）解析再查——「../」从空目录一步就能爬进
     state/，不解析就查等于没查。没点名路径（Grep 全局搜）＝落在空 cwd，无害。"""
-    raws = [v for k in _GUARD_PATH_KEYS
-            if isinstance(v := (tool_input or {}).get(k), str) and v.strip()]
-    for raw in raws:
-        p = Path(raw.strip())
-        if not p.is_absolute():
-            p = Path(neutral_cwd()) / p
-        try:
-            rp = p.resolve()
-        except Exception:
+    for rp in tool_paths(tool_input):
+        if rp is None:
             return "这条路径看不懂——换条正经路径"
         if not any(rp.is_relative_to(r) for _, r in READ_ROOTS):
             scope = "、".join(f"{label}（{r}）" for label, r in READ_ROOTS)

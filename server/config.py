@@ -116,6 +116,12 @@ READONLY_TOOLS_ENABLED = os.environ.get("READONLY_TOOLS", "0") == "1"
 # 实测 schema token，稳了再拨这个（上电硬前置：iOS 权限卡先做出来，§6）。
 WRITE_TOOLS_ENABLED = os.environ.get("WRITE_TOOLS", "0") == "1"
 
+# 醒来改代码只提 PR（PLAN_prs）：拨开=PR 工具（prs_mcp）挂进 sdk 聊天 session、
+# 本角色工作副本（.worktrees/<char>/）里的写类直接放行不弹卡。前提是 WRITE_TOOLS
+# 也开着（在副本里干活用的就是 Edit/Write）。默认关；**关着时 wake 轮写类照样拒**
+# ——wake 轮不再有卡，这条跟这个闸无关（§9.6）。
+WAKE_PRS_ENABLED = os.environ.get("WAKE_PRS", "0") == "1"
+
 # 问答卡（PLAN_chatui §3.5/U4）：AskUserQuestion 挂进 sdk 聊天 session（不进
 # allowed_tools → 每问一卡，can_use_tool 挂起等机主作答，updated_input 回填）。
 # 默认关，上电硬前置：iOS 问答卡先做出来——卡没人答只会白等一阵超时拒。

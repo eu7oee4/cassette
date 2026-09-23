@@ -127,16 +127,6 @@ class AskDecideTest(PermitBase):
             shutil.rmtree(tmp, ignore_errors=True)
 
 
-class TimeoutPolicyTest(unittest.TestCase):
-    """§1.3：超时分轮来源——聊天轮机主大概率在场给长些，wake 轮快拒。"""
-
-    def test_wake_faster_than_chat(self):
-        self.assertLess(permits.WAKE_TIMEOUT_SEC, permits.CHAT_TIMEOUT_SEC)
-        self.assertEqual(permits.timeout_for("wake"), permits.WAKE_TIMEOUT_SEC)
-        self.assertEqual(permits.timeout_for("chat"), permits.CHAT_TIMEOUT_SEC)
-        self.assertEqual(permits.timeout_for(""), permits.CHAT_TIMEOUT_SEC)
-
-
 class WriteGateTest(unittest.IsolatedAsyncioTestCase):
     """PreToolUse 门的写类分支（§1.4）：只过路径闸，别的判断一概不做——
     放过（{}）就落进 ask → can_use_tool。没有互斥、没有带外记录可查。"""
@@ -174,13 +164,12 @@ class WriteGateTest(unittest.IsolatedAsyncioTestCase):
                                      "tool_input": {"command": "git status"}},
                                     "t", None), {})
 
-    async def test_wake_turn_write_also_reaches_ask(self):
-        """§1.3：wake 轮也能申请（快拒档在超时里，不在 hook）——写类分支
-        先于醒来禁用面。"""
+    async def test_wake_turn_bash_denied(self):
+        """PLAN_prs §4：醒来轮没有卡——Bash 在门里就拒（原来是落 ask 走 2 分钟快拒）。"""
         gate = self._gate(turn="wake")
-        self.assertEqual(await gate({"tool_name": "Bash",
-                                     "tool_input": {"command": "ls"}},
-                                    "t", None), {})
+        out = await gate({"tool_name": "Bash", "tool_input": {"command": "ls"}},
+                         "t", None)
+        self.assertEqual(out["hookSpecificOutput"]["permissionDecision"], "deny")
 
     async def test_other_char_can_also_ask(self):
         """互斥退役（§2）：谁都能申请写，hook 不看资源归属。"""
@@ -237,17 +226,15 @@ class PermitCallbackTest(PermitBase):
         finally:
             permits.CHAT_TIMEOUT_SEC = orig
 
-    async def test_wake_turn_uses_wake_timeout(self):
+    async def test_wake_turn_never_hangs_a_card(self):
+        """PLAN_prs §4 兜底：写类万一漏过门进了回调，醒来轮直接拒，不挂卡。"""
         from claude_agent_sdk import PermissionResultDeny
-        orig = permits.WAKE_TIMEOUT_SEC
-        permits.WAKE_TIMEOUT_SEC = 0.01
-        try:
-            cb = self._cb(turn="wake")
-            out = await cb("Bash", {"command": "ls"},
-                           SimpleNamespace(title="", tool_use_id="t1"))
-            self.assertIsInstance(out, PermissionResultDeny)
-        finally:
-            permits.WAKE_TIMEOUT_SEC = orig
+        cb = self._cb(turn="wake")
+        out = await cb("Bash", {"command": "ls"},
+                       SimpleNamespace(title="", tool_use_id="t1"))
+        self.assertIsInstance(out, PermissionResultDeny)
+        self.assertTrue(out.message)
+        self.assertEqual(permits.pending(), [])
 
 
 class CapsuleTest(unittest.TestCase):

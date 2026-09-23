@@ -146,6 +146,16 @@ def worktree_path(char_id: str) -> Path:
     return REPO_ROOT / ".worktrees" / _check_char(char_id)
 
 
+def worktree_owner(p: Path) -> Optional[str]:
+    """一条**已 resolve** 的路径落在谁的工作副本里：角色 id（或 "_baseline"）；
+    落在 .worktrees/ 本身算 ""；不在任何副本里 → None。门（chat_loop._wake_gate）用。"""
+    root = (REPO_ROOT / ".worktrees").resolve()
+    if not p.is_relative_to(root):
+        return None
+    parts = p.relative_to(root).parts
+    return parts[0] if parts else ""
+
+
 def _ensure_worktree(char_id: str) -> Path:
     wt = worktree_path(char_id)
     if (wt / ".git").exists():

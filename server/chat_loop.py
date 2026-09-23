@@ -284,6 +284,43 @@ def _wake_contract() -> str:
             f"待着，别硬找话。】")
 
 
+def _write_route(handle: session_mgr.LoopHandle, tool: str,
+                 tool_input: dict) -> tuple[str, str]:
+    """写类调用走哪条路（PLAN_prs §4）：("allow"|"ask"|"deny", 原话)。路径闸已经过了。
+    判据挂在**路径**上：本角色工作副本里的东西没合并之前碰不到线上，哪一轮改都不用卡；
+    轮只决定「工作副本以外能不能碰」——醒来轮没有卡（没人在看），一律拒。
+    门里的拒只是兜底：主路是系统提示把两条路讲清楚，让他一开始就走对。"""
+    import pipeline
+    import prs
+    u = config.user_name()
+    wake = handle.meta.get("turn_kind") == "wake"
+    prs_on = pipeline._prs_mounted(handle.char_id)
+    if tool == "Bash":
+        if not wake:
+            return "ask", ""
+        if prs_on:
+            return "deny", ("醒着的时候不跑命令。要改代码：pr_start 拿到你自己的工作副本，"
+                            "在里面用 Edit/Write 改，pr_test 跑测试，pr_open 提 PR。")
+        return "deny", f"醒着的时候不跑命令——留到{u}跟你说话的时候。"
+    paths = [p for p in pipeline.tool_paths(tool_input) if p is not None]
+    owners = {prs.worktree_owner(p) for p in paths}
+    if owners and owners != {None}:
+        if owners != {handle.char_id}:
+            return "deny", ("那是别人的工作副本，只能改你自己的"
+                            "（pr_start 会告诉你路径）。")
+        root = prs.worktree_path(handle.char_id).resolve()
+        if any(".git" in p.relative_to(root).parts for p in paths):
+            return "deny", "工作副本里的 .git 不能动——切分支、提交这些交给 PR 工具。"
+        if prs_on:
+            return "allow", "本角色工作副本（PLAN_prs）"
+    if not wake:
+        return "ask", ""
+    if prs_on:
+        return "deny", ("醒着的时候不改正在跑的代码。用 pr_start 在你自己的工作副本里改，"
+                        f"改完 pr_open 提一个 PR，合不合并由{u}决定。")
+    return "deny", f"醒着的时候不改东西——留到{u}跟你说话的时候。"
+
+
 def _wake_gate(handle: session_mgr.LoopHandle):
     """PreToolUse 门：与审批无关的三件事（PLAN_native §1.4）。hook 先于权限
     判定跑；hook 放过（{}）的写类因为不进 allowed_tools 会落 CLI 的 ask，
@@ -291,6 +328,8 @@ def _wake_gate(handle: session_mgr.LoopHandle):
 
     1. 路径闸：Read/Grep/Glob 和 Edit/Write 都过（限仓根+黑名单）。Bash 没有
        路径参数，闸对它放空——机主看得到命令原文，拍板本身就是闸。
+       写类过了路径闸再按路径分路（_write_route，PLAN_prs §4）：本角色工作副本
+       直接 allow 不弹卡；工作副本以外 chat 轮落 ask 弹卡、wake 轮拒；Bash 醒来轮拒。
     2. wake 禁用面照 PR12：turn_kind=wake 查 wake_tools。
     3. game 泵门：mcp__game__* 只在泵开着时放行；泵没开一律拒——任务引擎
        互斥由此顺带成立（拿不到锁就开不了泵）。
@@ -312,10 +351,18 @@ def _wake_gate(handle: session_mgr.LoopHandle):
             why = pipeline.readonly_path_guard(tool_input, handle.char_id)
             return {} if why is None else _deny(why)
         if tool in pipeline.WRITE_BUILTINS:
-            # 写类（§1.4）：hook 只过路径闸，别的判断一概不做——放过就落 ask
-            # → can_use_tool 弹卡原地挂起，批不批在机主指头上（§1.2）。
+            # 写类（PLAN_native §1.4 + PLAN_prs §4）：先过路径闸，再按路径分三类——
+            # 本角色工作副本 → 直接放行不弹卡（没合并之前碰不到线上）；别人的副本 /
+            # 副本里的 .git → 拒；其余（主目录等）→ chat 轮放进 ask 弹卡，wake 轮拒。
             why = pipeline.readonly_path_guard(tool_input, handle.char_id)
-            return {} if why is None else _deny(why)
+            if why is not None:
+                return _deny(why)
+            verdict, why = _write_route(handle, tool, tool_input)
+            if verdict == "allow":
+                return {"hookSpecificOutput": {"hookEventName": "PreToolUse",
+                                               "permissionDecision": "allow",
+                                               "permissionDecisionReason": why}}
+            return {} if verdict == "ask" else _deny(why)
         if tool.startswith("mcp__game__"):
             if handle.meta.get("game_pump"):
                 return {}
@@ -334,7 +381,7 @@ def _permit_gate(handle: session_mgr.LoopHandle):
     ask 路由到这儿——那次调用原地挂起，permits 弹卡给机主。批了返回 Allow，
     工具原地执行、同一轮继续；拒了/超时返回 Deny(理由)，模型接着说话。
     安全面（路径闸/wake 面/泵门）在 PreToolUse 门里，先于这儿跑；这儿只管
-    「机主批不批」一件事。超时分轮来源（§1.3）。"""
+    「机主批不批」一件事。醒来轮没有卡（PLAN_prs §4，旧的 wake 快拒超时退役）。"""
     async def can_use(tool: str, tool_input: dict, ctx) -> "PermissionResultAllow | PermissionResultDeny":
         import permits
         u2 = config.user_name()
@@ -358,8 +405,19 @@ def _permit_gate(handle: session_mgr.LoopHandle):
                     message=f"{u2}这会儿没答" + (f"：{note}" if note else "。"))
             return PermissionResultAllow(
                 updated_input={**(tool_input or {}), "answers": answers})
-        turn = handle.meta.get("turn_kind") or "chat"
-        timeout = permits.timeout_for(turn)
+        import pipeline
+        # 兜底（PLAN_prs §4）：门判「放行」的工作副本写类万一还是落到这儿（CLI 没认
+        # hook 的 allow），照样放行不弹卡；醒来轮没有卡——剩下的漏网之鱼直接拒。
+        verdict, why = (_write_route(handle, tool, tool_input or {})
+                        if tool in pipeline.WRITE_BUILTINS else ("ask", ""))
+        if verdict == "allow":
+            return PermissionResultAllow()
+        if verdict == "deny":
+            return PermissionResultDeny(message=why)
+        if handle.meta.get("turn_kind") == "wake":
+            return PermissionResultDeny(
+                message=why or "醒着的时候没有卡可弹，这一下没做。")
+        timeout = permits.CHAT_TIMEOUT_SEC
         verdict = await permits.ask(
             handle.char_id, tool=tool,
             summary=_tool_summary(tool, tool_input or {}),
@@ -426,6 +484,26 @@ def _shot_sink(handle: session_mgr.LoopHandle):
     return sink
 
 
+def _write_paths_text(char_id: str) -> str:
+    """改东西那段系统提示（PLAN_prs §4.1）：chat/wake 是同一条 session，一段话把两种
+    情形都写清——门（_write_route）只是兜底，主路是让他一开始就走对。
+    措辞照 him-facing 三规：只说权限来去，不说场所；用「工具」。"""
+    import pipeline
+    u = config.user_name()
+    card = ("每动一下（改文件、跑命令）都会先弹一张卡到TA手机上，批了就接着做，"
+            "拒了或没等到，你会收到一句原因。")
+    if not pipeline._prs_mounted(char_id):
+        return (f"改东西的工具（Edit/Write/Bash）也在手边，但只在{u}跟你说话的时候能用："
+                f"{card}你自己醒着、TA没在跟你说话的时候不改东西——想改的记下来，"
+                "等聊天时再说。")
+    return ("改代码有两条路：\n"
+            f"- {u}在跟你说话的时候，可以直接改：{card}\n"
+            "- 你自己醒着、TA没在跟你说话的时候，正在跑的代码不直接动，命令也不跑："
+            "用 pr_start 在你自己的工作副本里改（改副本不用等批），改完 pr_open 提一个 PR，"
+            "描述写给不读代码的人看。合不合并、什么时候生效，由TA决定。\n"
+            "- 改动大、要动很多下的，聊天时也用 PR，省得TA一张张批。")
+
+
 def build_options(char_id: str, catalog: Optional[list] = None,
                   handle: Optional[session_mgr.LoopHandle] = None) -> ClaudeAgentOptions:
     """口径对齐 pipeline.base_claude_args（chat 路）：人设+菜单+叮嘱进系统提示，
@@ -477,6 +555,11 @@ def build_options(char_id: str, catalog: Optional[list] = None,
         import skills
         _merge_mcp_file(servers, str(skills.mcp_config(char_id)))
         tools += skills.SKILLS_MCP_TOOLS
+    if handle is not None and pipeline._prs_mounted(char_id):
+        # PR 工具（PLAN_prs §3）：全轮次挂（醒来轮的允许集 wake_tools 也来自
+        # mounted_tool_names，那边同判据，不用另开口子）。
+        _merge_mcp_file(servers, str(pipeline._prs_mcp_config(char_id)))
+        tools += pipeline.PRS_MCP_TOOLS
     if handle is not None and _game_capable(char_id):
         # game 并入意识流（设计稿三）：进程内 game MCP 常驻 + 节奏骨架进系统提示。
         # 工具能不能用由 _wake_gate 按泵状态判，schema 恒在（换 client 只在重铸）。
@@ -504,10 +587,7 @@ def build_options(char_id: str, catalog: Optional[list] = None,
                         "state 房间不在范围里。")
         if config.WRITE_TOOLS_ENABLED:
             tools += sorted(pipeline.WRITE_BUILTINS)
-            segs.append(f"改东西的工具（Edit/Write/Bash）也在手边。每次动手，"
-                        f"那一下会先弹到{config.user_name()}手机上等TA批：批了"
-                        "就原地继续做；拒了或没等到，你会收到一句原因，接着"
-                        "说你的就好。")
+            segs.append(_write_paths_text(char_id))
         else:
             segs.append("改文件的工具这会儿不在手边。")
         system += "\n\n【" + "".join(segs) + "】"

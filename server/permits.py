@@ -23,19 +23,13 @@ import time
 import uuid
 from typing import Optional
 
-# 超时分轮来源（§1.3）：聊天轮机主大概率在场，给长些；wake 轮机主多半不在，
-# 快拒——模型这轮放下、以后想做再申请。具体分钟数机主还没拍（PLAN_native
-# §10 待拍①），这两个默认值是能用的起点，拍了板改 env 就行。
+# 卡只在聊天轮弹（PLAN_prs §4，09-23）：醒来轮不再有卡——工作副本里改不用卡、
+# 工作副本以外一律拒——旧的 wake 快拒超时（PERMIT_TIMEOUT_WAKE_SEC）随之退役。
 CHAT_TIMEOUT_SEC = int(os.environ.get("PERMIT_TIMEOUT_CHAT_SEC", "600"))
-WAKE_TIMEOUT_SEC = int(os.environ.get("PERMIT_TIMEOUT_WAKE_SEC", "120"))
 
 _pending: dict[str, dict] = {}   # 单号 → 卡（含 future/loop；REST 读时剥掉）
 
 _CARD_KEYS = ("id", "char", "tool", "title", "summary", "ts", "deadline")
-
-
-def timeout_for(turn_kind: str) -> int:
-    return WAKE_TIMEOUT_SEC if turn_kind == "wake" else CHAT_TIMEOUT_SEC
 
 
 def _live(r: dict) -> bool:
