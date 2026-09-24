@@ -29,7 +29,7 @@ CHAT_TIMEOUT_SEC = int(os.environ.get("PERMIT_TIMEOUT_CHAT_SEC", "600"))
 
 _pending: dict[str, dict] = {}   # 单号 → 卡（含 future/loop；REST 读时剥掉）
 
-_CARD_KEYS = ("id", "char", "tool", "title", "summary", "ts", "deadline")
+_CARD_KEYS = ("id", "char", "tool", "title", "summary", "said", "note", "ts", "deadline")
 
 
 def _live(r: dict) -> bool:
@@ -73,6 +73,7 @@ def decide(permit_id: str, allow: bool, reason: str = "") -> dict:
 
 
 async def ask(char_id: str, *, tool: str, summary: str, title: str = "",
+              said: str = "", note: str = "",
               permit_id: Optional[str] = None,
               timeout: Optional[float] = None) -> Optional[tuple[bool, str]]:
     """登记一张卡并原地等机主拍板。返回 (批没批, 理由)；None＝超时。
@@ -85,9 +86,12 @@ async def ask(char_id: str, *, tool: str, summary: str, title: str = "",
     _pending[pid] = {"id": pid, "char": char_id, "tool": tool,
                      "title": (title or "").strip()[:300],
                      "summary": (summary or "").strip()[:500],
+                     # 他动手前说的人话（PLAN_prs §4.2，卡片最上面）；Bash 的 description
+                     "said": (said or "").strip()[:1000],
+                     "note": (note or "").strip()[:300],
                      "ts": now, "deadline": now + int(t),
                      "future": fut, "loop": loop}
-    _push_card(char_id, tool, summary)
+    _push_card(char_id, tool, said or summary)
     try:
         return await asyncio.wait_for(fut, t)
     except asyncio.TimeoutError:

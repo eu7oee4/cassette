@@ -417,12 +417,17 @@ def _permit_gate(handle: session_mgr.LoopHandle):
         if handle.meta.get("turn_kind") == "wake":
             return PermissionResultDeny(
                 message=why or "醒着的时候没有卡可弹，这一下没做。")
+        said = await _await_said(handle, getattr(ctx, "tool_use_id", None))
+        if said == "":
+            return PermissionResultDeny(message=NO_SAID_MSG.format(u=u2))
         timeout = permits.CHAT_TIMEOUT_SEC
         verdict = await permits.ask(
             handle.char_id, tool=tool,
             summary=_tool_summary(tool, tool_input or {}),
             title=(getattr(ctx, "title", None) or ""),
             permit_id=getattr(ctx, "tool_use_id", None),
+            said=said or "",
+            note=str((tool_input or {}).get("description") or "") if tool == "Bash" else "",
             timeout=timeout)
         u = config.user_name()
         if verdict is None:
@@ -491,7 +496,9 @@ def _write_paths_text(char_id: str) -> str:
     import pipeline
     u = config.user_name()
     card = ("每动一下（改文件、跑命令）都会先弹一张卡到TA手机上，批了就接着做，"
-            "拒了或没等到，你会收到一句原因。")
+            "拒了或没等到，你会收到一句原因。每次弹卡之前，先用一两句大白话告诉TA"
+            "你要动什么、为什么、TA会感觉到什么变化——这段话会印在卡上，TA看着它拍板；"
+            "没说就调，会被退回来让你先说。")
     if not pipeline._prs_mounted(char_id):
         return (f"改东西的工具（Edit/Write/Bash）也在手边，但只在{u}跟你说话的时候能用："
                 f"{card}你自己醒着、TA没在跟你说话的时候不改东西——想改的记下来，"
@@ -704,6 +711,66 @@ def _user_dict(msg: UserMessage) -> dict:
     return {"type": "user", "message": {"content": blocks}}
 
 
+# ---------- 卡上印他动手前说的人话（PLAN_prs §4.2）----------
+# 按块顺序喂：文字记成「最近说的那段」；要弹卡的写类调用把那段认领走（认领后清空）。
+# 两个出口读同一份：SSE 推卡（事件 dict 上的 permit_said）和 can_use_tool 登记
+# （handle.meta["said_for"]）。上一张卡之后没再说过话 = 认领到空串 → 门拒、不推卡。
+# 纪律长在接口上，不靠他自觉；也不找另一个模型替他翻译意图。
+
+def _said_reset(handle: session_mgr.LoopHandle) -> None:
+    """轮开头调：上一轮说的话不算这一轮动手前的交代。"""
+    handle.meta["said_buf"] = ""
+
+
+def _said_feed(handle: session_mgr.LoopHandle, msg: AssistantMessage) -> dict:
+    """吃一条 assistant 消息，回 {tool_use_id: 人话}（只含要弹卡的调用）。"""
+    import pipeline
+    out: dict = {}
+    if handle.meta.get("turn_kind") == "wake":
+        return out                         # 醒来轮没有卡
+    for b in msg.content:
+        if isinstance(b, TextBlock):
+            t = pipeline.strip_markers(b.text or "").strip()
+            if t:
+                handle.meta["said_buf"] = t
+        elif isinstance(b, ToolUseBlock) and b.name in pipeline.WRITE_BUILTINS:
+            try:
+                verdict, _ = _write_route(handle, b.name, b.input or {})
+            except Exception:
+                verdict = "ask"
+            if verdict != "ask" or pipeline.readonly_path_guard(
+                    b.input or {}, handle.char_id, b.name) is not None:
+                continue                   # 门会直接放行 / 直接拒：没有卡
+            said = handle.meta.get("said_buf") or ""
+            handle.meta["said_buf"] = ""
+            out[b.id] = said
+            said_for = handle.meta.setdefault("said_for", {})
+            said_for[b.id] = said
+            while len(said_for) > 50:        # 被别的门拒掉的没人来取，别越攒越多
+                said_for.pop(next(iter(said_for)))
+    return out
+
+
+SAID_WAIT_SEC = 3.0
+NO_SAID_MSG = ("先用一两句大白话跟{u}说你要动什么、为什么、TA会感觉到什么变化——"
+               "这段话会印在卡上，TA看着它拍板。说完再调一次。")
+
+
+async def _await_said(handle: session_mgr.LoopHandle, tool_use_id: Optional[str]) -> Optional[str]:
+    """can_use_tool 那头取这次调用认领到的人话。权限请求跟消息流是两条路，消费端可能
+    慢半拍——等它读到这次调用（最多 3 秒）。等不到回 None：不拒，卡照弹，只是没有人话。"""
+    if not tool_use_id:
+        return None
+    deadline = time.monotonic() + SAID_WAIT_SEC
+    while True:
+        said_for = handle.meta.get("said_for") or {}
+        if tool_use_id in said_for:
+            return said_for.pop(tool_use_id)
+        if time.monotonic() >= deadline:
+            return None
+        await asyncio.sleep(0.05)
+
+
 def _capture_capsules(char_id: str, text: str, turn: str = "chat") -> None:
     """收场白 capsule（PLAN_native §4：结论跨重铸过桥的唯一结构化通道）。
     他气泡里「◆ 结论 ← 出处」打头的行落进**行为账**——证据原文在账里永存，
@@ -851,6 +918,7 @@ async def _turn_events(client, handle: session_mgr.LoopHandle,
     空闲超时/流断都产 __idle_timeout__ 哨兵（translate 会以 error+done 收尾），
     并在 flags 里留痕给泵决定 session 生死。"""
     trace = _ToolTrace(handle)
+    _said_reset(handle)
     agen = client.receive_messages().__aiter__()
     while True:
         try:
@@ -881,7 +949,9 @@ async def _turn_events(client, handle: session_mgr.LoopHandle,
             for b in msg.content:
                 if isinstance(b, ToolUseBlock):
                     trace.use(b.id, b.name, b.input)
-            yield _assistant_dict(msg)
+            d = _assistant_dict(msg)
+            d["permit_said"] = _said_feed(handle, msg)   # SSE 只给这些推卡（§4.2）
+            yield d
         elif isinstance(msg, UserMessage):
             for b in (msg.content if isinstance(msg.content, list) else []):
                 if isinstance(b, ToolResultBlock):
@@ -1494,6 +1564,7 @@ async def run(handle: session_mgr.LoopHandle, *,
         不算死）。False=超时/流断——调用方按 chat_loop 保守纪律关 session。"""
         pending: Optional[str] = None
         trace = _ToolTrace(handle)
+        _said_reset(handle)
         agen = client.receive_messages().__aiter__()
         while True:
             try:
@@ -1509,6 +1580,7 @@ async def run(handle: session_mgr.LoopHandle, *,
                 handle.touch()
                 if getattr(msg, "usage", None):
                     handle.meta["ctx_est"] = _ctx_from_usage(msg.usage)
+                _said_feed(handle, msg)      # 泵里插话轮也可能弹卡（§4.2）
                 for block in msg.content:
                     if isinstance(block, TextBlock) and block.text.strip():
                         if pending is not None:

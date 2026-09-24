@@ -147,14 +147,26 @@ def _permit_events(ev: dict):
     ⚠️ 这儿在权限判定**之前**：被 PreToolUse 路径闸拒掉的调用到不了 permits，
     会推出一张「幽灵卡」——app 侧靠 pending 轮询收走（没超时又不在册＝作废），
     拍板撞上 409 也有声。路径闸拒是罕见路，实时性换这个代价划算。
-    老 -p 路没挂写类工具，此函数天然空转。"""
+    老 -p 路没挂写类工具，此函数天然空转。
+    permit_said（chat_loop._said_feed 标的，PLAN_prs §4.2）：真要弹卡的调用 → 他动手前
+    说的人话。有这张表时只给表里的推：工作副本的写（门直接放行）不推；认领到空串的
+    （上一张卡之后没说过话，门会拒）也不推——两种以前都会变成批不了的幽灵卡。"""
+    said_map = ev.get("permit_said")
     for b in (ev.get("message", {}).get("content") or []):
         if (isinstance(b, dict) and b.get("type") == "tool_use"
                 and b.get("name") in _PERMIT_TOOLS):
+            said = ""
+            if said_map is not None:
+                said = said_map.get(b.get("id", ""), "")
+                if not said:
+                    continue
             import permits
-            summary, detail = _permit_detail(b["name"], b.get("input") or {})
+            inp = b.get("input") or {}
+            summary, detail = _permit_detail(b["name"], inp)
             yield sse({"type": "permit", "id": b.get("id", ""),
                        "tool": b["name"], "summary": summary, "detail": detail,
+                       "said": said,
+                       "note": str(inp.get("description") or "") if b["name"] == "Bash" else "",
                        "deadline": int(time.time()) + permits.CHAT_TIMEOUT_SEC})
 
 

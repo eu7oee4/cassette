@@ -189,7 +189,12 @@ class PermitCallbackTest(PermitBase):
         handle = sm.LoopHandle(char_id=cid, scene="chat")
         if turn:
             handle.meta["turn_kind"] = turn
+        self.h = handle
         return chat_loop._permit_gate(handle)
+
+    def said(self, tool_use_id, text):
+        """消费端读到这次调用时认领的人话（chat_loop._said_feed 干的事）。"""
+        self.h.meta.setdefault("said_for", {})[tool_use_id] = text
 
     async def test_allow_then_deny_with_reason(self):
         from claude_agent_sdk import (PermissionResultAllow,
@@ -197,14 +202,17 @@ class PermitCallbackTest(PermitBase):
         cb = self._cb()
         ctx = SimpleNamespace(title="Claude wants to edit x.py",
                               tool_use_id="toolu_9")
+        self.said("toolu_9", "我把 x.py 里那个默认值改成 2，你那边的提醒会晚一分钟。")
         task = asyncio.ensure_future(cb("Edit", {"file_path": "x.py"}, ctx))
         await asyncio.sleep(0)
         card = permits.pending()[0]
         self.assertEqual(card["id"], "toolu_9")        # 单号=那次调用本身
         self.assertEqual(card["title"], "Claude wants to edit x.py")
+        self.assertIn("晚一分钟", card["said"])         # §4.2：卡上印他动手前说的话
         permits.decide("toolu_9", True)
         self.assertIsInstance(await task, PermissionResultAllow)
 
+        self.said("toolu_9", "再改一次。")
         task = asyncio.ensure_future(cb("Edit", {"file_path": "x.py"}, ctx))
         await asyncio.sleep(0)
         permits.decide("toolu_9", False, "先不动它")
@@ -213,12 +221,41 @@ class PermitCallbackTest(PermitBase):
         self.assertIn("先不动它", out.message)
         self.assertFalse(out.interrupt)                # 常规拒不掐轮
 
+    async def test_no_words_since_last_card_denied_without_card(self):
+        """§4.2：上一张卡之后没再说过话 → 拒，原话教他先说，不挂卡。"""
+        from claude_agent_sdk import PermissionResultDeny
+        cb = self._cb()
+        self.said("t_quiet", "")
+        out = await cb("Edit", {"file_path": "x.py"},
+                       SimpleNamespace(title="", tool_use_id="t_quiet"))
+        self.assertIsInstance(out, PermissionResultDeny)
+        self.assertIn("印在卡上", out.message)
+        self.assertEqual(permits.pending(), [])
+
+    async def test_consumer_lagging_still_asks(self):
+        """消费端没读到这次调用（等不到）：不拒，卡照弹，只是没有人话。"""
+        import chat_loop
+        orig = chat_loop.SAID_WAIT_SEC
+        chat_loop.SAID_WAIT_SEC = 0.05
+        try:
+            cb = self._cb()
+            task = asyncio.ensure_future(cb("Bash", {"command": "ls", "description": "列目录"},
+                                            SimpleNamespace(title="", tool_use_id="t_lag")))
+            await asyncio.sleep(0.2)
+            card = permits.pending()[0]
+            self.assertEqual((card["said"], card["note"]), ("", "列目录"))
+            permits.decide("t_lag", False)
+            await task
+        finally:
+            chat_loop.SAID_WAIT_SEC = orig
+
     async def test_timeout_denies_with_message(self):
         from claude_agent_sdk import PermissionResultDeny
         orig = permits.CHAT_TIMEOUT_SEC
         permits.CHAT_TIMEOUT_SEC = 0.01
         try:
             cb = self._cb()
+            self.said("t0", "看一眼目录。")
             out = await cb("Bash", {"command": "ls"},
                            SimpleNamespace(title="", tool_use_id="t0"))
             self.assertIsInstance(out, PermissionResultDeny)
@@ -280,6 +317,53 @@ class CapsuleTest(unittest.TestCase):
         self.assertEqual(self.al.recent_acts("cass"), [])
 
 
+class SaidFeedTest(unittest.TestCase):
+    """chat_loop._said_feed（§4.2）：按块顺序记「最近说的那段」，要弹卡的写类认领走。"""
+
+    def setUp(self):
+        import session_mgr as sm
+        self.h = sm.LoopHandle(char_id="cass", scene="chat")
+        self.h.meta["turn_kind"] = "chat"
+
+    def feed(self, *blocks):
+        import chat_loop
+        from claude_agent_sdk import AssistantMessage
+        return chat_loop._said_feed(self.h, AssistantMessage(content=list(blocks),
+                                                             model="m"))
+
+    def test_claim_then_empty(self):
+        import pipeline
+        from claude_agent_sdk import TextBlock, ToolUseBlock
+        main = str(pipeline.CODE_ROOT / "README.md")
+        out = self.feed(TextBlock(text="我改一下 README 的安装步骤。[[next:30]]"),
+                        ToolUseBlock(id="e1", name="Edit", input={"file_path": main}),
+                        ToolUseBlock(id="e2", name="Edit", input={"file_path": main}))
+        self.assertEqual(out, {"e1": "我改一下 README 的安装步骤。", "e2": ""})
+        self.assertEqual(self.h.meta["said_for"], out)
+        # 新说一句 → 下一张卡又有话了；Read 不认领
+        out = self.feed(TextBlock(text="再跑一下测试。"),
+                        ToolUseBlock(id="r", name="Read", input={"file_path": main}),
+                        ToolUseBlock(id="b1", name="Bash", input={"command": "ls"}))
+        self.assertEqual(out, {"b1": "再跑一下测试。"})
+
+    def test_own_worktree_and_denied_paths_have_no_card(self):
+        import prs
+        from claude_agent_sdk import TextBlock, ToolUseBlock
+        wt = str(prs.worktree_path("cass") / "server" / "x.py")
+        out = self.feed(TextBlock(text="在副本里改。"),
+                        ToolUseBlock(id="w", name="Edit", input={"file_path": wt}),
+                        ToolUseBlock(id="d", name="Edit", input={"file_path": "/etc/hosts"}))
+        self.assertEqual(out, {})
+        self.assertEqual(self.h.meta["said_buf"], "在副本里改。")   # 没被白白认领掉
+
+    def test_wake_turn_no_cards(self):
+        import pipeline
+        from claude_agent_sdk import TextBlock, ToolUseBlock
+        self.h.meta["turn_kind"] = "wake"
+        self.assertEqual(self.feed(TextBlock(text="x"), ToolUseBlock(
+            id="e", name="Edit", input={"file_path": str(pipeline.CODE_ROOT / "a")})), {})
+
+
 class SsePermitEventTest(unittest.TestCase):
     """sse._permit_events：写类 tool_use → 一条 permit SSE（单号=tool_use_id，
     带参数原文）；只读工具不触发。幽灵卡（路径闸拒）由 app 轮询收走，不在此测。"""
@@ -313,6 +397,18 @@ class SsePermitEventTest(unittest.TestCase):
         ]}})
         self.assertEqual(out[0]["summary"], "git add x.py")
         self.assertIn("git commit -m ok", out[0]["detail"])
+
+    def test_said_map_filters_and_prints_words(self):
+        # §4.2：有 permit_said 表时只推表里有人话的；工作副本的写 / 没说话的都不推（以前是幽灵卡）
+        out = self._payload({"type": "assistant", "permit_said": {"a": "改个默认值。", "b": ""},
+                             "message": {"content": [
+            {"type": "tool_use", "id": "a", "name": "Bash",
+             "input": {"command": "sed -i x", "description": "改默认值"}},
+            {"type": "tool_use", "id": "b", "name": "Edit", "input": {"file_path": "x"}},
+            {"type": "tool_use", "id": "c", "name": "Edit", "input": {"file_path": "wt"}},
+        ]}})
+        self.assertEqual([(p["id"], p["said"], p["note"]) for p in out],
+                         [("a", "改个默认值。", "改默认值")])
 
     def test_readonly_does_not_emit(self):
         out = self._payload({"type": "assistant", "message": {"content": [

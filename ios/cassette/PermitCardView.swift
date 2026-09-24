@@ -1,8 +1,8 @@
 import SwiftUI
 
 /// 权限卡（PLAN_native §6 / chatui U4）：TA 的一次写类调用原地挂起，等机主拍板。
-/// 染色走 §1.2 唯一口径（角色人物色 + 反色字）；卡上是 SDK 那句整话（有的话）
-/// + 参数原文（Bash 命令全文 / Edit 的文件和改动），批准/拒绝两个按钮横排，
+/// 染色走 §1.2 唯一口径（角色人物色 + 反色字）；卡上最上面是他动手前说的人话
+/// （PLAN_prs §4.2；老后端没有这字段时回落 SDK 那句整话）+ 参数原文（Bash 命令全文 / Edit 的文件和改动），批准/拒绝两个按钮横排，
 /// 拒绝可附一句理由；批准免二次确认（§6：挂起有超时兜底，误触的代价是一次
 /// 可撤销的写）。超时整卡置灰标「已超时」（§5.3）。
 struct PermitCardView: View {
@@ -35,12 +35,26 @@ struct PermitCardView: View {
                         .buttonStyle(.plain)
                 }
             }
-            if let t = card.title, !t.isEmpty {
+            if let said = card.said, !said.isEmpty {
+                // §4.2：最上面是他动手前说的人话（门里强制过：没说就调会被退回），
+                // 机主看着它拍板；路径 / 命令原文缩成小字放下面
+                Text(said).font(.subheadline)
+                    .fixedSize(horizontal: false, vertical: true)
+                if let s = card.summary, !s.isEmpty {
+                    Text(s).font(.caption.monospaced())
+                        .opacity(0.75)
+                        .lineLimit(2).truncationMode(.middle)
+                }
+            } else if let t = card.title, !t.isEmpty {
                 Text(t).font(.subheadline.weight(.semibold))
                     .fixedSize(horizontal: false, vertical: true)
             } else if let s = card.summary, !s.isEmpty {
                 Text(s).font(.subheadline.weight(.semibold))
                     .lineLimit(2).truncationMode(.middle)
+            }
+            if let n = card.note, !n.isEmpty {
+                Text(n).font(.caption).opacity(0.75)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             if let d = card.detail, !d.isEmpty {
                 // 参数原文：等宽小字，太长在卡内自己滚（§6：机主批的就是这些字节）

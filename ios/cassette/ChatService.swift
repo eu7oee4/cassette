@@ -143,6 +143,8 @@ struct PermitCard: Codable, Identifiable, Equatable {
     let summary: String?                     // 一行摘要（文件路径/命令首行）
     let detail: String?                      // 参数原文（Bash 命令全文、Edit 的改动）
     let title: String?                       // SDK 生成的整句（pending 拉回来的有）
+    let said: String?                        // 他动手前说的人话（PLAN_prs §4.2，卡片最上面）
+    let note: String?                        // Bash 自带的 description
     let deadline: Int?
     var char: String?
 }
