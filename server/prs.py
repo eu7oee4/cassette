@@ -6,7 +6,9 @@
 - 角色串台纪律（cassette-charswitch-bug-class）：每个函数显式收 char_id，没有任何
   「当前 PR / 当前工作副本」全局。
 - 只有 pr_open 会往分支上提交 → 没有 PR 记录的分支一定没有提交（草稿），切走时可以直接删。
-- 合并 / 机主关闭在这儿（§6.1，REST 调）；退回重建 / 重启不在（§6.2，第 4 步）。
+- 合并 / 机主关闭在这儿（§6.1，REST 调）；重启后端的看守在 restart.py + tools/restart_guard.sh，
+  这儿管它前后两头：交给它「起不来要退哪几个合并」、新后端启动时认领它的退回标记（§6.2）。
+- 被退回的 PR 由 pr_start 同名重建：从最新 main 拉 `<分支>-r<N>`，把合并带进来的改动重新叠上（§3）。
 
 MCP 壳是 prs_mcp.py；所有拒绝都抛 PRError，原话直接给他看，要写清楚该走哪条路。
 """
@@ -136,6 +138,13 @@ def _record_for_branch(char_id: str, branch: str) -> Optional[dict]:
     return max(hits, key=lambda r: r["id"]) if hits else None
 
 
+def _record_for_slug(char_id: str, slug: str) -> Optional[dict]:
+    """按 pr_start 的名字找 PR：分支是 wake/<char>/<slug>，或被退回重建后的 …-r<N>。"""
+    pat = re.compile(re.escape(f"wake/{char_id}/{slug}") + r"(?:-r\d+)?")
+    hits = [r for r in _all_records() if r["char"] == char_id and pat.fullmatch(r["branch"])]
+    return max(hits, key=lambda r: r["id"]) if hits else None
+
+
 def _unfinished_of(char_id: str) -> list[dict]:
     return [r for r in _all_records() if r["char"] == char_id and r["status"] in UNFINISHED]
 
@@ -256,6 +265,39 @@ def _replay_onto_main(wt: Path, char_id: str, branch: str) -> str:
     return "main 动过，已经把你的改动叠到最新 main 上（还没提交，pr_open 时一起提）。"
 
 
+def _rebuild_reverted(wt: Path, char_id: str, rec: dict) -> str:
+    """被退回的 PR 重新开工（§3「已退回」）。不能把旧分支再合一次：git 认为那些提交已经合过了，
+    只带新提交进来，被 revert 掉的那部分会悄悄丢。所以从当前 main 拉新分支 …-r<N>，
+    把当初合并带进来的完整改动（merge_commit 对它第一个父提交的 diff）重新叠上去。
+    PR 编号不变，记录里换 branch；状态留在「已退回」，他 pr_open 时回到「待合并」。"""
+    if _dirty_paths(wt):
+        raise PRError(f"#{rec['id']} 被退回了，要在最新 main 上重建，但工作副本里还有没提交的改动。"
+                      "pr_start 带 discard=true 再调一次（被退回的改动会从合并记录里原样找回来）。")
+    m = re.fullmatch(r"(.*?)(?:-r(\d+))?", rec["branch"])
+    new = f"{m.group(1)}-r{int(m.group(2) or 0) + 1}"
+    patch = _git_run("diff", "--binary", f"{rec['merge_commit']}^1", rec["merge_commit"]).stdout
+    _git("checkout", "-q", "-B", new, MAIN, cwd=wt)
+    _git_run("apply", "--3way", cwd=wt, input=patch)
+    conflicted = _conflict_marked(wt, _dirty_paths(wt))
+    if conflicted:
+        note = ("已经把 #%d 被退回的改动叠到最新 main 上，但跟 main 后来的改动打架，这几个文件里留了 "
+                "<<<<<<< 冲突标记，改好后连同修复一起 pr_open：%s" % (rec["id"], "、".join(conflicted)))
+    else:
+        dirty = _dirty_paths(wt)
+        if dirty:
+            _git("add", "-A", "--", *dirty, cwd=wt)
+            _git("commit", "-q", "-m", f"重建 #{rec['id']}：{rec['title']}（被退回的改动）",
+                 cwd=wt, char_id=char_id)
+        note = ("已经把 #%d 被退回的改动原样重新叠到最新 main 上了。看 pr_view 里的 revert_reason"
+                "（后端起不来时的日志），修好后 pr_open 更新这个 PR。" % rec["id"])
+    old = rec["branch"]
+    if old != new and _branch_exists(old):
+        _git_run("branch", "-D", old)
+    rec.update(branch=new, rebuilt_for=rec.get("revert_commit"), updated_at=_now())
+    _save(rec)
+    return note
+
+
 # ---------- 跑测试 ----------
 
 _FAIL_RE = re.compile(r"^(?:FAIL|ERROR): \S+ \((\S+)\)", re.M)
@@ -347,18 +389,21 @@ def start(char_id: str, slug: str, discard: bool = False) -> dict:
         dirty = _dirty_paths(wt)
         if dirty and discard:
             _discard(wt)
-        elif dirty and cur != branch:
+        rec = _record_for_slug(char_id, slug)
+        if rec:
+            branch = rec["branch"]      # 被退回重建过的 PR 分支名带 -r<N>
+        if dirty and not discard and cur != branch:
             raise PRError(
                 f"工作副本里还有没提交的改动（在 {cur or '无分支'} 上：{'、'.join(dirty[:5])}）。"
                 "要留就先 pr_open 提成 PR；不要了就 pr_start 时带 discard=true 丢掉。")
-        rec = _record_for_branch(char_id, branch)
         note = ""
         if rec and rec["status"] in ("merged", "closed"):
             raise PRError(f"{slug} 这个名字用过了（#{rec['id']} 已"
                           f"{'合并' if rec['status'] == 'merged' else '关闭'}），换一个。")
-        if rec and rec["status"] == "reverted":
-            raise PRError(f"#{rec['id']} 被退回了；退回后重修的流程还没上线，先跟机主说一声。")
-        if rec:
+        if rec and rec["status"] == "reverted" and rec.get("rebuilt_for") != rec.get("revert_commit"):
+            note = _rebuild_reverted(wt, char_id, rec)
+            branch = rec["branch"]
+        elif rec:
             if cur != branch:
                 _git("checkout", "-q", branch, cwd=wt)
             note = _replay_onto_main(wt, char_id, branch)
@@ -466,7 +511,9 @@ _STATUS_ORDER = {"open": 0, "reverted": 0, "merged": 1, "closed": 1}
 # 自己加载的是哪个提交（_live_head），合并提交在它的祖先里 = 正在跑的代码里有它。
 
 def record_live_head() -> None:
-    """后端启动时调（app._lifespan）：记下这次进程加载的代码是哪个提交。"""
+    """后端启动做完时调（app._lifespan 的 yield 前）：记下这次进程加载的代码是哪个提交。
+    写在启动最后一步，所以它同时就是「上一次正常起来的代码」（§6.2 的 last_good）：
+    起不来的进程走不到这儿，不会把坏提交记成好的。"""
     try:
         head = _git("rev-parse", "HEAD").strip()
         PRS_DIR.mkdir(parents=True, exist_ok=True)
@@ -638,3 +685,86 @@ def view(pr_id: int) -> dict:
     if len(diff) > DIFF_MAX_CHARS:
         diff = diff[:DIFF_MAX_CHARS] + f"\n……（截断，全长 {len(diff)} 字）"
     return rec | {"diff": diff, "effective": effective(rec)}
+
+
+# ---------- 重启前后（§6.2；看守本体在 restart.py / tools/restart_guard.sh）----------
+
+def pending_merges() -> list[tuple[int, str]]:
+    """合并了、还没在跑着的代码里生效过的 PR：[(id, merge_commit)]，按合并先后。
+    重启起不来时看守把它们一起退回（分不出是谁弄坏的）。只算还在主目录 HEAD 里的合并。"""
+    out = []
+    for r in sorted(_all_records(), key=lambda r: (r.get("merged_at") or "", r["id"])):
+        if effective(r) is False and \
+                _git_run("merge-base", "--is-ancestor", r["merge_commit"], "HEAD").returncode == 0:
+            out.append((r["id"], r["merge_commit"]))
+    return out
+
+
+def settle_rollback() -> list[int]:
+    """认领看守留下的退回标记（新后端启动时调，在 record_live_head 之前）：这些 PR 标「已退回」、
+    写 revert_reason（起不来时的日志尾巴）、通知提的角色去修。回认领了哪些 PR。"""
+    marker = PRS_DIR / "_rollback"
+    if not marker.exists():
+        return []
+    try:
+        tail = (PRS_DIR / "_rollback_log").read_text().strip()
+    except FileNotFoundError:
+        tail = ""
+    rows = []
+    for ln in marker.read_text().splitlines():
+        parts = ln.split()
+        if len(parts) == 3 and parts[0].isdigit():
+            rows.append((int(parts[0]), parts[2]))
+    batch = "、".join(f"#{i}" for i, _ in sorted(rows))
+    done = []
+    with _flock("_lock"):
+        for pr_id, revert_sha in rows:
+            try:
+                rec = get(pr_id)
+            except PRError:
+                continue
+            if rec["status"] != "merged":
+                continue
+            now = _now()
+            others = len(rows) > 1
+            reason = ("合进主目录后重启，后端起不来，看守脚本自动退回了"
+                      + (f"（同一批一共退了 {batch}，分不出是谁的问题，不一定是你这个）" if others else "")
+                      + "。起不来时的日志：\n" + (tail or "（没截到）"))
+            rec.update(status="reverted", reverted_at=now, updated_at=now,
+                       revert_commit=revert_sha, revert_reason=reason)
+            _save(rec)
+            _event(rec["char"], f"#{pr_id}「{rec['title']}」合进去之后后端起不来，已被自动退回"
+                                + (f"（同一批还退了别的：{batch}，不一定是你这个的问题）" if others else "")
+                                + "。pr_view 看起不来时的日志；要修就 pr_start 同一个名字（会在最新 main 上"
+                                  "重建你的改动），修好 pr_open；不修就 pr_close。")
+            done.append(pr_id)
+    marker.unlink(missing_ok=True)
+    (PRS_DIR / "_rollback_log").unlink(missing_ok=True)
+    return done
+
+
+CLOSED_BRANCH_KEEP_DAYS = 7
+
+
+def cleanup_branches() -> list[str]:
+    """清分支（§10.4）：合并了且已经在跑着的代码里生效（=重启验过活）的，删；关掉 7 天的，删。
+    合了但还没生效的不删——重启起不来要退回给他修，分支还得在。记录永远留着。
+    分支正被工作副本检出着删不掉，跳过，下次再说。"""
+    gone = []
+    now = datetime.now().astimezone()
+    for r in _all_records():
+        if not _branch_exists(r["branch"]):
+            continue
+        if r["status"] == "merged":
+            drop = effective(r) is True
+        elif r["status"] == "closed":
+            try:
+                at = datetime.fromisoformat(r.get("closed_at") or r["updated_at"])
+            except (KeyError, ValueError):
+                continue
+            drop = (now - at).days >= CLOSED_BRANCH_KEEP_DAYS
+        else:
+            drop = False
+        if drop and _git_run("branch", "-D", r["branch"]).returncode == 0:
+            gone.append(r["branch"])
+    return gone

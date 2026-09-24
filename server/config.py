@@ -6,6 +6,9 @@ from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
 
 BASE_DIR = Path(__file__).resolve().parent
+# 读 .env 之前的环境快照：app 上按「重启后端」时新进程用它起（PLAN_prs §6.2）。
+# load_dotenv 不覆盖已有变量——新进程要是继承这个进程的 env，改过的 .env 重启了也不生效。
+BOOT_ENV = dict(os.environ)
 load_dotenv(BASE_DIR / ".env")
 
 # X-Auth 共享密钥：app 与后端各持一份。不配则后端拒绝所有请求（fail closed）。

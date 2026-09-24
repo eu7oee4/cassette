@@ -39,7 +39,7 @@ from typing import Optional
 for _k in ("MM_CODE_SEGMENTS", "CCC_HOOK_ENABLE", "CCC_SERVER_URL", "CCC_AUTH_TOKEN"):
     os.environ.pop(_k, None)
 
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -209,7 +209,7 @@ async def _lifespan(_app: FastAPI):
     characters.ensure_layout()   # 默认角色目录补齐（state 侧旧布局迁移在 state_store import 时已做）
     world.ensure_world()         # 大房子：注册表 + world.json 补齐（幂等，存在不覆盖）
     import prs
-    prs.record_live_head()       # PR「生效没有」的锚：这次进程加载的是哪个提交（PLAN_prs）
+    prs.settle_rollback()        # 上一次重启起不来、看守退回了哪些 PR：标「已退回」+通知提的人（PLAN_prs §6.2）
     if config.COHABIT_ENABLED:
         # 同居世界上电（C4 之前默认关）：事件钩子 + 单 worker（醒来并发=1 的执行锁）。
         cohabit_queue.install()
@@ -230,6 +230,10 @@ async def _lifespan(_app: FastAPI):
     threading.Thread(target=_mail_watcher, daemon=True, name="mail-watcher").start()
     threading.Thread(target=_forge_ops_probe, daemon=True, name="forge-ops-probe").start()
     threading.Thread(target=_activity_sweep, daemon=True, name="activity-sweep").start()
+    # 启动的最后一步：记下这次加载的提交——既是 PR「生效没有」的锚，也是「上一次正常起来的
+    # 代码」（起不来的进程走不到这儿）。然后清掉已经验过活的合并分支（PLAN_prs §6.2/§10.4）。
+    prs.record_live_head()
+    threading.Thread(target=prs.cleanup_branches, daemon=True, name="pr-branch-cleanup").start()
     yield
     for t in tasks:
         t.cancel()
@@ -609,7 +613,8 @@ def finalize_chat_reply(reply: str, stored: list[dict], req: ChatRequest,
 # ---------- 路由 ----------
 @app.get("/health")
 def health():
-    return {"ok": True, "forge_ops_ok": not _FORGE_OPS}
+    # pid：重启看守认的是「我起的那个进程在答」，旧进程没死透还占着端口时答的不算（PLAN_prs §6.2）
+    return {"ok": True, "forge_ops_ok": not _FORGE_OPS, "pid": os.getpid()}
 
 
 @app.get("/characters")
@@ -1604,6 +1609,64 @@ def prs_close(pr_id: int, inp: PRCloseIn,
         return prs.close_by_owner(pr_id, inp.reason)
     except prs.PRError as e:
         raise HTTPException(status_code=409, detail={"error": str(e)})
+
+
+def _running_now() -> list[str]:
+    """重启会掐断的东西（确认弹窗里列给机主看）。每项各自兜错：探不到就不列，别挡重启。"""
+    import characters
+    import permits
+    import questions
+    out = []
+    for cid in characters.ids():
+        name = characters.display_name(cid)
+        probes = (
+            (lambda: wake.chat_turn_active(cid), f"{name}正在回你的消息"),
+            (lambda: cohabit_queue.executing() == cid, f"{name}正醒着在做事"),
+            (lambda: permits.pending(cid), f"{name}有一张审批卡在等你批"),
+            (lambda: questions.pending(cid), f"{name}有一张问答卡在等你答"),
+            (lambda: (cohabit.game_char() or ("",))[0] == cid, f"{name}在玩游戏（游戏会断，进度在笔记本里）"),
+        )
+        for probe, text in probes:
+            try:
+                if probe():
+                    out.append(text)
+            except Exception:
+                continue
+    return out
+
+
+class RestartIn(BaseModel):
+    confirm: bool = False        # app 弹过「会掐断这些」的确认才带 true
+
+
+@app.get("/admin/restart")
+def admin_restart_preview(x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
+    """重启前的确认弹窗数据（PLAN_prs §6.2②）：会掐断什么、哪些合并了的 PR 会随这次生效
+    （起不来就一起退回）、现在能不能按。"""
+    verify_auth(x_auth)
+    import prs
+    import restart
+    pend = prs.pending_merges()
+    return {"running": _running_now(),
+            "pending": [{"id": i, "title": prs.get(i).get("title", "")} for i, _ in pend],
+            "blockers": restart.blockers()}
+
+
+@app.post("/admin/restart", status_code=202)
+def admin_restart(inp: RestartIn, request: Request,
+                  x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
+    """重启后端（PLAN_prs §6.2）：预检 import → 起脱离的看守脚本 → 回 202，随后被看守杀掉换新。
+    起不来看守会自动退回这批还没生效的 PR 合并、用退回后的代码再起，结果走 Bark。
+    app 收到 202 后轮询 /health，pid 变了 = 换好了。"""
+    verify_auth(x_auth)
+    import restart
+    if not inp.confirm:
+        raise HTTPException(status_code=400, detail={"error": "先确认（confirm=true）"})
+    try:
+        out = restart.spawn(port=request.scope["server"][1], old_pid=os.getpid())
+    except restart.RestartError as e:
+        raise HTTPException(status_code=409, detail={"error": str(e)})
+    return {"ok": True, "old_pid": os.getpid()} | out
 
 
 @app.get("/questions/pending")

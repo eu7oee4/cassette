@@ -206,7 +206,10 @@ POST /admin/restart
   机主可以单独把没问题的那个再合一次、再重启（这时的「再合」走 §3 那条重建分支的路，不会丢改动）。
 - 回滚用 `git revert`，**不用 `reset --hard`**：主目录里常有别人没提交的改动，reset 会一起抹掉。
   §6.1 第 2 道检查已经保证 PR 的文件跟脏文件不相交，revert 不会碰到它们。
-- `last_good_commit` 落 `server/state/prs/_last_good`；后端每次正常启动健康后写一次。
+- ~~`last_good_commit` 落 `server/state/prs/_last_good`~~ → **不另设文件**（第 4 步施工改）：`_live_head`
+  挪到启动的最后一步（lifespan 的 yield 前）才写，起不来的进程走不到那儿，所以它就是「上一次正常起来的
+  代码」。起不来时要退的 = 合并了、`merge_commit` 不在 `_live_head` 祖先里的 PR（`prs.pending_merges`），
+  手动重启过的也自动算数。
 - 看守脚本自己挂了怎么办：脚本极短、只依赖 shell + curl + git；最坏情况跟今天手动重启一样，
   要人回到 Mac 前——但不会比今天更差。
 
@@ -249,3 +252,31 @@ POST /admin/restart
    ⚠️ 「合并后删」要等**重启验活之后**才删，不是按下合并就删——起不来要退回给他修，分支还得在。
 5. ~~chat 轮大改动走不走 PR~~ → **鼓励**，写进提示词（09-23，§4.1）。
 6. ~~列表状态的视觉~~ → 细条 + 墨色浓淡（09-23）。
+
+## 11. 施工记录
+
+### 第 4 步（09-24）：重启看守 + /admin/restart + /health
+
+- `server/tools/restart_guard.sh`（bash+curl+git+lsof）：TERM 旧进程等 15s 不走就 KILL → 端口空了才起
+  （被别的进程占着 = 不是代码的错，不拿 PR 开刀，Bark 要人）→ 验活 60s，**认 pid**（`/health` 现在带 `pid`，
+  旧进程没死透时答的不算），进程一死当场判，不干等 → 起不来：主目录不在 main 不退；倒序 `git revert -m 1`，
+  哪个失败就 `--abort` + Bark 要人 → 写 `_rollback` 标记（id / merge / revert 提交）+ `_rollback_log`（日志尾巴，
+  滤掉看守自己的行）→ 用退回后的代码再起。每句 Bark 也进 nohup.out（`[guard] →` 前缀）。
+- `server/restart.py`：预检 = server/ 下每个 .py 编译一遍（抓懒 import 模块的语法错）+ `import app`；
+  锁 `_restarting`（看守收尾删，5 分钟算死锁）；脱离起看守（`start_new_session`）。
+- **新进程的 env 用 `config.BOOT_ENV`**（读 .env 之前的快照）：`load_dotenv` 不覆盖已有变量，继承旧进程
+  env 的话改过的 `.env` 重启了也不生效——按钮重启会悄悄吃掉开关改动。
+- REST：`GET /admin/restart` = 确认弹窗的数据（`running` 会掐断什么、`pending` 随这次生效的 PR、`blockers`）；
+  `POST /admin/restart {confirm:true}` → 202 `{old_pid, reverts_if_fail}`，预检不过 409。app 之后轮询 `/health`
+  等 pid 变。
+- 新后端启动：`prs.settle_rollback()`（标 reverted、revert_reason=日志尾巴+同批说明、通知他）→ …… →
+  `record_live_head()` → 后台 `cleanup_branches()`（合并且已生效的删、关闭满 7 天的删；正被工作副本检出的跳过）。
+- 被退回的 PR 重修（§3）顺手做了：`pr_start` 同名 → 从最新 main 拉 `…-r<N>`，把 `merge_commit^1..merge_commit`
+  的改动 3-way 叠上并提交（打架就留标记不提交），旧分支删；`rebuilt_for` 防重复重建；pr_open 回到「待合并」。
+- 演练 `tests/test_restart_guard.py`：临时仓 + 真 uvicorn 起假后端（随机端口、只听 127.0.0.1、不推 Bark），
+  好 PR / lifespan 里炸的坏 PR（预检拦不住那类）/ 主目录自己坏了没 PR 可退，三条全过，外加预检三条。
+- 踩坑：macOS 自带 bash 3.2 会把 `$VAR` 后紧贴的中文字节吃进变量名（`$GUARD_OLD_PID，` → unbound），
+  脚本里贴着中文的变量一律 `${}`。
+
+**还没做**：真后端上从没按过（现跑的进程是 09-19 起的旧代码，**第一次只能手动重启**，之后按钮才在）；
+iOS 那头（第 5 步）：确认弹窗 + 202 后轮询 `/health` 等 pid 变 + 页顶「已合并 N 个还没生效」。
