@@ -77,12 +77,13 @@ class PRBase(unittest.TestCase):
         _g(self.repo, "add", "-A")
         _g(self.repo, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "init")
         _g(self.repo, "update-index", "--skip-worktree", "ios/Info.plist")
-        self._orig = (prs.REPO_ROOT, prs.PRS_DIR)
+        self._orig = (prs.REPO_ROOT, prs.PRS_DIR, prs.BARK_ON_OPEN)
+        prs.BARK_ON_OPEN = False
         prs.REPO_ROOT = self.repo
         prs.PRS_DIR = self.tmp / "prs"
 
     def tearDown(self):
-        prs.REPO_ROOT, prs.PRS_DIR = self._orig
+        prs.REPO_ROOT, prs.PRS_DIR, prs.BARK_ON_OPEN = self._orig
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     def wt(self, char):
@@ -328,6 +329,17 @@ class TestReplay(PRBase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestAppNotices(PRBase):
+    def test_new_pr_queues_one_chat_row_update_does_not(self):
+        pr = self.open_one("default", "one")
+        self.edit("default", "server/notes.txt", "again\n")
+        prs.open_pr("default", "改 one", "再改一下")          # 更新同一个 PR：不再发
+        got = prs.take_app_notices()
+        self.assertEqual([(n["char"], n["pr_id"], n["verb"]) for n in got],
+                         [("default", pr["id"], "提了一个 PR")])
+        self.assertEqual(prs.take_app_notices(), [])          # 取一次即消费
 
 
 class TestMerge(PRBase):

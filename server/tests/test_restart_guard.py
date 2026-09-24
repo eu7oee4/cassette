@@ -122,7 +122,8 @@ class GuardRehearsal(unittest.TestCase):
         _g(self.repo, "init", "-q", "-b", "main")
         _g(self.repo, "add", "-A")
         _g(self.repo, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "init")
-        self._orig = (prs.REPO_ROOT, prs.PRS_DIR)
+        self._orig = (prs.REPO_ROOT, prs.PRS_DIR, prs.BARK_ON_OPEN)
+        prs.BARK_ON_OPEN = False
         prs.REPO_ROOT = self.repo
         prs.PRS_DIR = self.tmp / "prs"
         self.log = self.server / "nohup.out"
@@ -139,7 +140,7 @@ class GuardRehearsal(unittest.TestCase):
                 os.kill(pid, 9)
             except OSError:
                 pass
-        prs.REPO_ROOT, prs.PRS_DIR = self._orig
+        prs.REPO_ROOT, prs.PRS_DIR, prs.BARK_ON_OPEN = self._orig
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     def _boot(self) -> int:

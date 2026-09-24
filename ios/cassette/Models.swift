@@ -32,6 +32,7 @@ struct ChatMessage: Identifiable, Codable, Equatable {
         case system(String)       // 系统提示（居中灰字）
         case memoryNote(String)   // 「存了记忆」等提示（居中灰字，纯 UI，不发回后端）
         case browseNote([String]) // 「浏览了 N 个网页」灰字：点击展开网址列表（纯 UI，不发回后端）
+        case prNote(Int, String)  // 「📝 小卡提了一个 PR：…」系统行：PR 编号 + 文案，点了跳 PR 详情（纯 UI，不发回后端）
     }
 
     init(id: UUID = UUID(), sender: MessageSender, kind: Kind, timestamp: Date,
@@ -62,13 +63,17 @@ struct ChatMessage: Identifiable, Codable, Equatable {
         case .system(let t):     return t
         case .memoryNote(let t): return t
         case .browseNote(let u): return "[浏览了 \(u.count) 个网页]"
+        case .prNote(_, let t):  return t
         }
     }
 
     /// 是否是系统提示消息。
+    /// PR 系统行也算：发历史时一样整条滤掉（PLAN_prs §5「不进模型的消息史」）。
     var isSystem: Bool {
-        if case .system = kind { return true }
-        return false
+        switch kind {
+        case .system, .prNote: return true
+        default:               return false
+        }
     }
 
     /// 是否是「存了记忆」提示（居中灰字渲染、但不发回后端）。

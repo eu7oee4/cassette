@@ -978,7 +978,24 @@ class AckIn(BaseModel):
 @app.get("/pending")
 def get_pending(x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
     verify_auth(x_auth)
+    _drain_pr_notices()
     return {"items": state_store.outbox_pending()}
+
+
+def _drain_pr_notices() -> None:
+    """PR 的聊天页系统行（PLAN_prs §5）：prs 子进程排的队转进 outbox。text 留空——旧版 app
+    只认 text/表情，空的整条跳过，不会把它当成他说的话上屏；新版认 pr_id 画成可点的系统行。
+    不进模型消息史：outbox 只管下发，app 侧系统行发历史时整条滤掉。"""
+    import prs
+    try:
+        for n in prs.take_app_notices():
+            state_store.outbox_append({
+                "id": uuid.uuid4().hex[:12], "ts": n.get("ts") or int(time.time()),
+                "text": "", "sticker_ids": [], "char_id": n["char"], "delivered": False,
+                "origin": "pr", "pr_id": n["pr_id"],
+                "pr_note": f"{characters.display_name(n['char'])}{n['verb']}：{n['title']}"})
+    except Exception as e:
+        logerr(f"PR 系统行转 outbox 失败: {e}")
 
 
 @app.post("/pending/ack")

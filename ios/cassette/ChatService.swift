@@ -40,6 +40,8 @@ struct PendingMessage: Decodable, Identifiable {
     let error: Bool?             // true＝那轮没产出（claude 挂了）：清等待+提示重发，不撤半截
     let stored: [StoredMemory]?  // 那轮的工具产物：补渲染 done 独有的（browse 灰字/网页卡片）
     let char_id: String?         // 这条是谁说的（多角色路由）；老条目 nil = 默认角色
+    let pr_id: Int?              // PR 系统行（PLAN_prs §5）：有它就画成可点的系统行，text 是空的
+    let pr_note: String?
 }
 
 /// 发给后端的一条历史消息。

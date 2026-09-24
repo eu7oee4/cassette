@@ -19,6 +19,7 @@ struct ChatView: View {
     var onTapFile: (URL) -> Void = { _ in }        // 点文件卡片：QuickLook 预览
     var onTapWebpage: (String, String) -> Void = { _, _ in }  // 点网页卡片：打开网页
     var onDeleteStack: ([ChatMessage]) -> Void = { _ in }     // 长按堆叠卡：删整组
+    var onTapPR: (Int) -> Void = { _ in }          // 点 PR 系统行：跳 PR 详情（PLAN_prs §5）
     var editRefreshTick: Int = 0   // 用户亲手编辑/删除的信号：+1 → 手术式合并进冻结快照
     var backToNowTick: Int = 0     // 「编辑并重新回复」的信号：+1 → 解冻回底，等着看新答案
     var scrollTarget: UUID? = nil                  // 外部跳转请求（聊天记录页点行）
@@ -51,6 +52,9 @@ struct ChatView: View {
                                 // 空内容行（如断流残留的空文字消息）整行不渲染——
                                 // 不然会剩一条只有时间戳/纯空白的隐形行占位
                                 EmptyView()
+                            } else if case .prNote(let prID, let text) = message.kind {
+                                PRNoteRow(text: text) { onTapPR(prID) }
+                                    .onLongPressGesture { onDelete(message) }
                             } else if message.isSystem {
                                 SystemMessageRow(text: message.plainText)
                                     .contentShape(Rectangle())
@@ -524,6 +528,27 @@ private struct SystemMessageRow: View {
     }
 }
 
+/// PR 系统行（PLAN_prs §5）：跟系统消息同一档（居中灰字，app 自己说的话），多一个 › 表示能点。
+private struct PRNoteRow: View {
+    let text: String
+    let onTap: () -> Void
+    var body: some View {
+        Button(action: onTap) {
+            HStack(spacing: 3) {
+                Text("📝 \(text)")
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 9, weight: .semibold))
+            }
+            .font(.caption)
+            .foregroundStyle(Color.noteGray)
+            .frame(maxWidth: .infinity, alignment: .center)
+            .padding(.vertical, 2)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+}
+
 /// 浏览灰字：收起=「浏览了 N 个网页 ›」，点击展开网址列表（再点收起），网址点开进 Safari。
 /// 展开状态是行内瞬态（@State）：滚远被 LazyVStack 回收就回到收起——这是提示不是页面，够用。
 /// 长按删除挂在收起头上（外层给的手势）；网址行自己是按钮，不参与长按。
@@ -689,7 +714,7 @@ private struct MessageRow: View {
             .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous)
                 .strokeBorder(Color(.systemGray4), lineWidth: 0.5))
             .onTapGesture { onTapWebpage(pid, title) }
-        case .system, .memoryNote, .browseNote:
+        case .system, .memoryNote, .browseNote, .prNote:
             EmptyView()
         }
     }

@@ -22,6 +22,7 @@ struct ContentView: View {
     @State private var draftLoaded = false           // 首次进前台时把本角色的草稿铺回输入区（只做一次）
     @State private var drawerOpen = false            // 抽屉（猫爪/左缘右滑开，阴影点击/左滑关）
     @State private var navPath: [DrawerPage] = []
+    @State private var prDeepLink: Int? = nil   // 聊天里点 PR 系统行：进 PR 页后直接打开这一个
     @State private var draftCount = 0    // 草稿信箱待寄数（抽屉角标；挂在前台轮询里刷新）    // 抽屉 push 的页面栈
     @State private var chatScrollTarget: UUID? = nil // 聊天记录页点行 → 聊天跳到那条气泡
     /// 气泡区身份的第二个维度（见 chatBody 的 .id）：每次点会话行都 +1，
@@ -264,6 +265,14 @@ struct ContentView: View {
             GamePage()
         case .plugins:
             charSwitchable(PluginsPage())
+        case .prs:
+            // PR 是全机一份的（两个角色的都在一张表里，靠圆点分人）→ 不挂切人按钮
+            PRsPage(openID: $prDeepLink) { charID, text in
+                // 「问问他」：切到提 PR 的那位、回聊天页、输入框预填，不自动发（§5）
+                switchCharacter(to: charID)
+                navPath.removeAll()
+                draft = text
+            }
         case .ownership:
             // 归属是全机一份的资源分配，不分角色 → 不挂切人按钮
             OwnershipPage()
@@ -347,6 +356,12 @@ struct ContentView: View {
                      dismissKeyboard(); viewingWebpage = WebpageItem(id: pid, title: title, ts: 0)
                  },
                  onDeleteStack: { msgs in deleteCandidates = msgs },
+                 onTapPR: { id in
+                     dismissKeyboard()
+                     phoneOpen = false
+                     prDeepLink = id
+                     navPath = [.prs]
+                 },
                  editRefreshTick: editRefreshTick,
                  backToNowTick: backToNowTick,
                  scrollTarget: chatScrollTarget,
@@ -1509,6 +1524,12 @@ struct ContentView: View {
                 // A 的补投回来时半截气泡永不撤（A 文件半截+完整双份），60s 后对账把
                 // 「重发试试」灰字写进 B 的聊天。
                 let conv = p.char_id ?? "default"
+                // PR 系统行（PLAN_prs §5）：进提 PR 那个角色的会话，点了跳详情；text 本来就是空的
+                if let prID = p.pr_id {
+                    chatStore.appendPRNote(prID: prID, text: p.pr_note ?? "提了一个 PR #\(prID)",
+                                           timestamp: ts, conversation: conv)
+                    continue
+                }
                 // error 标记条目＝那轮没产出（claude 挂了）：清等待熄点+提示重发；
                 // 半截气泡**不撤**——那是他真说过的话。
                 // 提示只在真清掉了等待条目时追加一次：ack 失败重拉时条目已不在，不再重复灰字。

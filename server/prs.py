@@ -41,6 +41,7 @@ MAX_UNFINISHED = 3        # 每个角色同时没办完（待合并+已退回）
 TEST_TIMEOUT_SEC = 300
 DIFF_MAX_CHARS = 30000
 UNFINISHED = ("open", "reverted")
+BARK_ON_OPEN = True       # 新 PR 推 Bark；测试里关掉（测试进程读的是真 .env，会推到机主手机上）
 
 _CHAR_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")
 _SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,39}$")
@@ -473,12 +474,15 @@ def open_pr(char_id: str, title: str, description: str) -> dict:
         tests = _test_worktree(wt)
         now = _now()
         new = rec is None
+        was_reverted = bool(rec) and rec["status"] == "reverted"
         rec = rec or {"id": pr_id, "char": char_id, "branch": branch, "created_at": now,
                       "merged_at": None, "merge_commit": None, "revert_reason": None}
         rec.update(title=title, description=description, base=_merge_base(MAIN, branch),
                    files=files, touches_ios=any(f["path"].startswith("ios/") for f in files),
                    tests=tests, status="open", updated_at=now)
         _save(rec)
+        if new or was_reverted:
+            _notify_app(char_id, pr_id, title, "提了一个 PR" if new else "修好了被退回的 PR")
         return {"id": pr_id, "created": new, "tests": tests["summary"], "tests_ok": tests["ok"],
                 "files": [f["path"] for f in files]}
 
@@ -558,6 +562,48 @@ def take_events(char_id: str) -> list[str]:
         try:
             out.append(json.loads(ln)["text"])
         except Exception:
+            continue
+    return out
+
+
+# ---------- 给机主的聊天页系统行（§5「聊天页系统提示」）----------
+# pr_open 跑在 prs MCP 子进程里，outbox 的锁只在后端进程内有效——子进程直接写 outbox 会跟
+# 后端抢文件。所以这儿只往一个 flock 住的小队列里记，后端 /pending 时取走转进 outbox。
+
+def _notify_app(char_id: str, pr_id: int, title: str, verb: str) -> None:
+    try:
+        PRS_DIR.mkdir(parents=True, exist_ok=True)
+        with _flock("_app_notices.lock"), open(PRS_DIR / "_app_notices.jsonl", "a") as f:
+            f.write(json.dumps({"char": char_id, "pr_id": pr_id, "title": title, "verb": verb,
+                                "ts": int(datetime.now().timestamp())}, ensure_ascii=False) + "\n")
+    except OSError:
+        return
+    if not BARK_ON_OPEN:
+        return
+    try:
+        import characters
+        import notify
+        notify.bark_push(f"{verb}：{title}", title=characters.display_name(char_id))
+    except Exception:
+        pass
+
+
+def take_app_notices() -> list[dict]:
+    """取走攒着的聊天页系统行（后端 /pending 调，取一次即消费）。"""
+    p = PRS_DIR / "_app_notices.jsonl"
+    if not p.exists():
+        return []
+    with _flock("_app_notices.lock"):
+        try:
+            lines = p.read_text().splitlines()
+            p.unlink()
+        except FileNotFoundError:
+            return []
+    out = []
+    for ln in lines:
+        try:
+            out.append(json.loads(ln))
+        except ValueError:
             continue
     return out
 
