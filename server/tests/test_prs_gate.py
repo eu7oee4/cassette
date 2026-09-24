@@ -147,6 +147,41 @@ class GateOffTest(FlagsMixin, unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("pr_", out["hookSpecificOutput"]["permissionDecisionReason"])
 
 
+class EventInjectionTest(FlagsMixin, unittest.TestCase):
+    """§7：PR 事件进下一轮开头，取一次即消费；工具不在场时不取（留着）。"""
+
+    def setUp(self):
+        super().setUp()
+        import shutil, tempfile
+        self._dir, prs.PRS_DIR = prs.PRS_DIR, Path(tempfile.mkdtemp())
+        self._cleanup = lambda: shutil.rmtree(prs.PRS_DIR, ignore_errors=True)
+
+    def tearDown(self):
+        self._cleanup()
+        prs.PRS_DIR = self._dir
+        super().tearDown()
+
+    def test_chat_injection_carries_event_once(self):
+        import chat_loop
+        prs._event("default", "#3「x」已合并。")
+        msgs = [SimpleNamespace(role="user", text="在吗", ts=None)]
+        first = chat_loop.build_injection(msgs, "default")
+        self.assertIn("【PR：#3「x」已合并。】", first)
+        self.assertNotIn("PR：", chat_loop.build_injection(msgs, "default"))
+
+    def test_wake_injection_carries_event(self):
+        import wake_sdk
+        prs._event("default", "#4「y」已合并。")
+        self.assertIn("〔PR：#4「y」已合并。〕", wake_sdk.wake_injection("default", "idle"))
+
+    def test_kept_when_tools_off(self):
+        prs._event("default", "#5「z」已合并。")
+        config.WAKE_PRS_ENABLED = False
+        self.assertEqual(pipeline.prs_event_lines("default"), [])
+        config.WAKE_PRS_ENABLED = True
+        self.assertEqual(pipeline.prs_event_lines("default"), ["#5「z」已合并。"])
+
+
 class MountTest(FlagsMixin, unittest.TestCase):
     def setUp(self):
         super().setUp()

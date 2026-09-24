@@ -6,7 +6,7 @@
 - 角色串台纪律（cassette-charswitch-bug-class）：每个函数显式收 char_id，没有任何
   「当前 PR / 当前工作副本」全局。
 - 只有 pr_open 会往分支上提交 → 没有 PR 记录的分支一定没有提交（草稿），切走时可以直接删。
-- 合并 / 退回重建 / 重启不在这儿（PLAN_prs §6，第 3、4 步）。
+- 合并 / 机主关闭在这儿（§6.1，REST 调）；退回重建 / 重启不在（§6.2，第 4 步）。
 
 MCP 壳是 prs_mcp.py；所有拒绝都抛 PRError，原话直接给他看，要写清楚该走哪条路。
 """
@@ -460,13 +460,169 @@ def close(char_id: str, pr_id: int, reason: str) -> dict:
 _STATUS_ORDER = {"open": 0, "reverted": 0, "merged": 1, "closed": 1}
 
 
+# ---------- 生效没有（现算，不进通知）----------
+# 「重启了没有」是会变的状态：写进一条只说一次的通知，重启之后那句话就停在他记忆里骗他。
+# 所以通知只报事件（合并了/被关了/合不进去），生效没有由这里当场算：后端每次启动记下
+# 自己加载的是哪个提交（_live_head），合并提交在它的祖先里 = 正在跑的代码里有它。
+
+def record_live_head() -> None:
+    """后端启动时调（app._lifespan）：记下这次进程加载的代码是哪个提交。"""
+    try:
+        head = _git("rev-parse", "HEAD").strip()
+        PRS_DIR.mkdir(parents=True, exist_ok=True)
+        (PRS_DIR / "_live_head").write_text(head)
+    except Exception:
+        pass
+
+
+def effective(rec: dict) -> Optional[bool]:
+    """合并了的 PR 此刻在不在正在跑的代码里。不是 merged / 不知道（没记过启动）→ None。"""
+    if rec.get("status") != "merged" or not rec.get("merge_commit"):
+        return None
+    try:
+        live = (PRS_DIR / "_live_head").read_text().strip()
+    except FileNotFoundError:
+        return None
+    return _git_run("merge-base", "--is-ancestor", rec["merge_commit"], live).returncode == 0
+
+
+# ---------- 给他的通知（事件，下一轮开头出现一次）----------
+
+def _event(char_id: str, text: str) -> None:
+    d = PRS_DIR / "_events"
+    d.mkdir(parents=True, exist_ok=True)
+    with _flock("_events.lock"), open(d / f"{char_id}.jsonl", "a") as f:
+        f.write(json.dumps({"ts": _now(), "text": text}, ensure_ascii=False) + "\n")
+
+
+def take_events(char_id: str) -> list[str]:
+    """取走这个角色攒着的 PR 事件（取一次即消费）。注入组装时调。"""
+    p = PRS_DIR / "_events" / f"{_check_char(char_id)}.jsonl"
+    if not p.exists():
+        return []
+    with _flock("_events.lock"):
+        try:
+            lines = p.read_text().splitlines()
+            p.unlink()
+        except FileNotFoundError:
+            return []
+    out = []
+    for ln in lines:
+        try:
+            out.append(json.loads(ln)["text"])
+        except Exception:
+            continue
+    return out
+
+
+# ---------- 合并 / 机主关闭（REST 调，PLAN_prs §6.1）----------
+
+class NeedsForce(PRError):
+    """测试没过：机主在 app 上二次确认「强行合并」才合。"""
+
+
+def _main_dirty() -> set[str]:
+    raw = _git("status", "--porcelain", "-z", "--untracked-files=all")
+    parts, out, i = raw.split("\0"), set(), 0
+    while i < len(parts):
+        e = parts[i]
+        i += 1
+        if len(e) < 4:
+            continue
+        out.add(e[3:])
+        if e[0] in "RC":
+            out.add(parts[i])
+            i += 1
+    return out
+
+
+def _blockers(rec: dict) -> tuple[list[str], bool]:
+    """挡住合并的原因（机主看的原话），以及其中有没有「跟 main 打架」（要通知他）。"""
+    if rec["status"] != "open":
+        return [f"这个 PR 现在是「{rec['status']}」，不是待合并"], False
+    if not _branch_exists(rec["branch"]):
+        return ["PR 的分支找不到了"], False
+    out, conflict = [], False
+    cur = _git_run("symbolic-ref", "--short", "-q", "HEAD").stdout.decode().strip()
+    if cur != MAIN:
+        out.append(f"主目录现在在 {cur or '游离的提交'} 上，不在 {MAIN}——切回 {MAIN} 再合")
+    if _git_run("diff", "--cached", "--quiet").returncode != 0:
+        out.append("主目录暂存区里有东西（git add 过没提交）——合并会把它一起带进去，先处理掉")
+    r = _git_run("merge-tree", "--write-tree", "--name-only", "HEAD", rec["branch"])
+    if r.returncode == 1:
+        conflict = True
+        # 输出：第一行树 id，接着冲突文件名，空行之后是说明文字
+        lines = r.stdout.decode().splitlines()[1:]
+        files = lines[:lines.index("")] if "" in lines else lines
+        out.append("跟主目录的代码打架（main 动过）"
+                   + (f"：{'、'.join(files[:5])}" if files else ""))
+    elif r.returncode != 0:
+        out.append(f"预演合并失败：{r.stderr.decode(errors='replace').strip()[-200:]}")
+    overlap = sorted(_main_dirty() & {f["path"] for f in _branch_files(rec["branch"])})
+    if overlap:
+        out.append(f"主目录里这几个文件有没提交的改动，PR 也改了它们：{'、'.join(overlap)}")
+    return out, conflict
+
+
+def merge_blockers(pr_id: int) -> list[str]:
+    """只读预演：现在能不能合，合不了的原因（详情页一打开就显示）。"""
+    return _blockers(get(pr_id))[0]
+
+
+def merge(pr_id: int, force: bool = False) -> dict:
+    """机主按「合并」：在主目录 git merge --no-ff，只在本地，永不 push。
+    合完不删分支——等第 4 步重启验活，起不来要退回给他修，分支还得在。"""
+    with _flock("_lock"):
+        rec = get(pr_id)
+        blockers, conflict = _blockers(rec)
+        if blockers:
+            if conflict:
+                _event(rec["char"], f"#{pr_id}「{rec['title']}」合不进去：main 动过，跟你的改动打架了。"
+                                    "pr_start 同一个名字重放一下，再 pr_open 更新。")
+            raise PRError("；".join(blockers))
+        tests = rec.get("tests") or {}
+        if not tests.get("ok") and not force:
+            raise NeedsForce(tests.get("summary") or "这个 PR 没有测试结果")
+        msg = f"合并 PR #{pr_id}：{rec['title']}（{rec['char']}）"
+        r = _git_run("merge", "--no-ff", "-q", "-m", msg, rec["branch"])
+        if r.returncode:
+            _git_run("merge", "--abort")
+            err = (r.stderr or r.stdout).decode(errors="replace").strip()
+            raise PRError(f"合并失败，已撤回：{err[-300:]}")
+        now = _now()
+        rec.update(status="merged", merged_at=now, updated_at=now, forced=bool(force),
+                   merge_commit=_git("rev-parse", "HEAD").strip())
+        _save(rec)
+        _event(rec["char"], f"#{pr_id}「{rec['title']}」已合并。")
+        return {"id": pr_id, "status": "merged", "merge_commit": rec["merge_commit"]}
+
+
+def close_by_owner(pr_id: int, reason: str = "") -> dict:
+    """机主关掉一个 PR（谁的都能关）。"""
+    import config
+    reason = (reason or "").strip()
+    with _flock("_lock"):
+        rec = get(pr_id)
+        if rec["status"] not in UNFINISHED:
+            raise PRError(f"#{pr_id} 已经{'合并' if rec['status'] == 'merged' else '关闭'}了")
+        now = _now()
+        rec.update(status="closed", closed_at=now, closed_by="owner",
+                   close_reason=reason, updated_at=now)
+        _save(rec)
+        _event(rec["char"], f"#{pr_id}「{rec['title']}」被{config.user_name()}关了"
+                            + (f"：{reason}" if reason else "。"))
+        return {"id": pr_id, "status": "closed"}
+
+
 def list_prs() -> list[dict]:
-    """全部 PR：没办完的在前、收口的在后，各自按时间倒序（§5）。"""
+    """全部 PR：没办完的在前、收口的在后，各自按时间倒序（§5）。
+    effective：合并了的此刻生没生效（None=不是合并态或不知道）。"""
     recs = sorted(_all_records(), key=lambda r: r.get("updated_at") or "", reverse=True)
     recs.sort(key=lambda r: _STATUS_ORDER.get(r["status"], 1))
     return [{k: r.get(k) for k in ("id", "char", "title", "status", "updated_at",
                                    "touches_ios")}
-            | {"tests_ok": (r.get("tests") or {}).get("ok")} for r in recs]
+            | {"tests_ok": (r.get("tests") or {}).get("ok"), "effective": effective(r)}
+            for r in recs]
 
 
 def view(pr_id: int) -> dict:
@@ -481,4 +637,4 @@ def view(pr_id: int) -> dict:
         else "（分支已经清理，diff 看不到了）"
     if len(diff) > DIFF_MAX_CHARS:
         diff = diff[:DIFF_MAX_CHARS] + f"\n……（截断，全长 {len(diff)} 字）"
-    return rec | {"diff": diff}
+    return rec | {"diff": diff, "effective": effective(rec)}

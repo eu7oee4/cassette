@@ -862,6 +862,21 @@ def _prs_mcp_config(char_id: Optional[str] = None) -> Path:
     return path
 
 
+def prs_event_lines(char_id: Optional[str]) -> list[str]:
+    """攒着的 PR 事件（合并了 / 被关了 / 合不进去），取一次即消费（PLAN_prs §7）。
+    只报事件不报状态——「生效没有」会变，归 pr_list/pr_view 现算。PR 工具不在场就不取
+    （闸关着时留着，免得跟他提不在手边的工具）。读盘失败当没有：提醒块不值得搞崩一轮。"""
+    if not _prs_mounted(char_id):
+        return []
+    try:
+        import characters
+        import prs
+        return prs.take_events(characters.resolve(char_id))
+    except Exception as e:
+        logerr(f"取 PR 事件失败（这轮不报）: {e}")
+        return []
+
+
 BASICS_MCP_TOOLS = ["mcp__basics__now", "mcp__basics__fetch",
                     "mcp__basics__next_wake"]
 

@@ -328,3 +328,140 @@ class TestReplay(PRBase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestMerge(PRBase):
+    """§6.1：合并在主目录本地做；挡住的原因给机主看，跟 main 打架的还要通知他。"""
+
+    def test_merge_ok_and_event_once(self):
+        self.open_one("default", "a", text="merged-text\n")
+        r = prs.merge(1)
+        self.assertEqual(r["status"], "merged")
+        self.assertEqual((self.repo / "server/notes.txt").read_text(), "merged-text\n")
+        parents = _g(self.repo, "log", "-1", "--format=%P").split()
+        self.assertEqual(len(parents), 2)                       # --no-ff
+        self.assertTrue(prs._branch_exists("wake/default/a"))   # 验活之前分支不删
+        self.assertEqual(prs.take_events("default"), ["#1「改 a」已合并。"])
+        self.assertEqual(prs.take_events("default"), [])
+        self.assertEqual(prs.take_events("cass"), [])
+
+    def test_effective_follows_live_head(self):
+        self.open_one("default", "a")
+        self.assertIsNone(prs.effective(prs.get(1)))            # 没合
+        prs.record_live_head()                                   # 后端跑的是合并前
+        prs.merge(1)
+        self.assertIs(prs.effective(prs.get(1)), False)
+        self.assertIs(prs.list_prs()[0]["effective"], False)
+        prs.record_live_head()                                   # 重启过
+        self.assertIs(prs.view(1)["effective"], True)
+
+    def test_conflict_refused_and_char_told(self):
+        self.open_one("default", "a", text="mine\n")
+        self.commit_on_main("server/notes.txt", "theirs\n")
+        self.assertTrue(any("打架" in b for b in prs.merge_blockers(1)))
+        with self.assertRaises(prs.PRError):
+            prs.merge(1)
+        self.assertEqual(prs.get(1)["status"], "open")
+        ev = prs.take_events("default")
+        self.assertEqual(len(ev), 1)
+        self.assertIn("pr_start", ev[0])
+
+    def test_dirty_overlap_refused_disjoint_ok(self):
+        self.open_one("default", "a")
+        (self.repo / "server/notes.txt").write_text("owner wip\n")
+        with self.assertRaises(prs.PRError) as cm:
+            prs.merge(1)
+        self.assertIn("server/notes.txt", str(cm.exception))
+        _g(self.repo, "checkout", "--", "server/notes.txt")
+        (self.repo / "server/mod.py").write_text("VALUE = 1  # owner wip\n")
+        prs.merge(1)
+        self.assertEqual((self.repo / "server/mod.py").read_text(), "VALUE = 1  # owner wip\n")
+        self.assertNotIn("owner wip", _g(self.repo, "show", "HEAD:server/mod.py"))
+
+    def test_staged_or_off_main_refused(self):
+        self.open_one("default", "a")
+        (self.repo / "server/other.txt").write_text("x\n")
+        _g(self.repo, "add", "server/other.txt")
+        self.assertTrue(any("暂存区" in b for b in prs.merge_blockers(1)))
+        _g(self.repo, "reset", "-q")
+        _g(self.repo, "checkout", "-q", "-b", "owner-branch")
+        self.assertTrue(any("不在 main" in b for b in prs.merge_blockers(1)))
+        with self.assertRaises(prs.PRError):
+            prs.merge(1)
+        _g(self.repo, "checkout", "-q", "main")
+        self.assertEqual(prs.merge_blockers(1), [])
+
+    def test_failing_tests_need_force(self):
+        r = self.open_one("default", "a", rel="server/mod.py", text="VALUE = 2\n")
+        self.assertFalse(r["tests_ok"])
+        with self.assertRaises(prs.NeedsForce) as cm:
+            prs.merge(1)
+        self.assertIn("新挂 1 条", str(cm.exception))
+        self.assertEqual(prs.get(1)["status"], "open")
+        prs.merge(1, force=True)
+        self.assertTrue(prs.get(1)["forced"])
+
+    def test_merge_only_open(self):
+        self.open_one("default", "a")
+        prs.close("default", 1, "不要了")
+        with self.assertRaises(prs.PRError):
+            prs.merge(1)
+        self.assertEqual(prs.take_events("default"), [])         # 自己关的不通知自己
+
+    def test_owner_close_any_char_and_told(self):
+        self.open_one("cass", "a")
+        prs.close_by_owner(1, "方向不对")
+        rec = prs.get(1)
+        self.assertEqual((rec["status"], rec["closed_by"]), ("closed", "owner"))
+        ev = prs.take_events("cass")
+        self.assertEqual(len(ev), 1)
+        self.assertIn("方向不对", ev[0])
+        with self.assertRaises(prs.PRError):
+            prs.close_by_owner(1)
+
+
+class TestRoutes(PRBase):
+    """REST（app 调）：鉴权、列表 unapplied、详情 blockers、409 形状。"""
+
+    def setUp(self):
+        super().setUp()
+        import config
+        from fastapi.testclient import TestClient
+        import app as app_module
+        self._key = config.AUTH_KEY
+        config.AUTH_KEY = "test-key"
+        self.client = TestClient(app_module.app)
+        self.h = {"X-Auth": "test-key"}
+
+    def tearDown(self):
+        import config
+        config.AUTH_KEY = self._key
+        super().tearDown()
+
+    def test_auth_required(self):
+        self.assertEqual(self.client.get("/prs").status_code, 401)
+
+    def test_list_detail_merge_close(self):
+        self.open_one("default", "a")
+        self.open_one("cass", "b", rel="server/mod.py", text="VALUE = 2\n")
+        prs.record_live_head()
+        rows = self.client.get("/prs", headers=self.h).json()
+        self.assertEqual({r["id"] for r in rows["prs"]}, {1, 2})
+        self.assertTrue(all(r["char_name"] for r in rows["prs"]))
+        d = self.client.get("/prs/1", headers=self.h).json()
+        self.assertEqual(d["blockers"], [])
+        self.assertIn("diff", d)
+        self.assertEqual(self.client.get("/prs/99", headers=self.h).status_code, 404)
+
+        self.assertEqual(self.client.post("/prs/1/merge", json={}, headers=self.h).status_code,
+                         200)
+        self.assertEqual(self.client.get("/prs", headers=self.h).json()["unapplied"], 1)
+
+        r = self.client.post("/prs/2/merge", json={}, headers=self.h)
+        self.assertEqual(r.status_code, 409)
+        self.assertTrue(r.json()["detail"]["needs_force"])
+        r = self.client.post("/prs/2/close", json={"reason": "先不要"}, headers=self.h)
+        self.assertEqual(r.json()["status"], "closed")
+        r = self.client.post("/prs/2/close", json={}, headers=self.h)
+        self.assertEqual(r.status_code, 409)
+        self.assertIn("error", r.json()["detail"])

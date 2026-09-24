@@ -208,6 +208,8 @@ async def _lifespan(_app: FastAPI):
     session_mgr.set_event_loop(asyncio.get_running_loop())   # SDK 常驻 loop 的过桥
     characters.ensure_layout()   # 默认角色目录补齐（state 侧旧布局迁移在 state_store import 时已做）
     world.ensure_world()         # 大房子：注册表 + world.json 补齐（幂等，存在不覆盖）
+    import prs
+    prs.record_live_head()       # PR「生效没有」的锚：这次进程加载的是哪个提交（PLAN_prs）
     if config.COHABIT_ENABLED:
         # 同居世界上电（C4 之前默认关）：事件钩子 + 单 worker（醒来并发=1 的执行锁）。
         cohabit_queue.install()
@@ -1534,6 +1536,74 @@ def permits_decide(inp: PermitDecideIn, char: Optional[str] = None,
     if not r.get("ok"):
         raise HTTPException(status_code=409, detail=r.get("error", "拍板失败"))
     return r
+
+
+class PRMergeIn(BaseModel):
+    force: bool = False          # 测试没过时 app 二次确认「强行合并」才带
+
+
+class PRCloseIn(BaseModel):
+    reason: str = ""
+
+
+def _pr_row(r: dict) -> dict:
+    import characters
+    return r | {"char_name": characters.display_name(r["char"])}
+
+
+@app.get("/prs")
+def prs_list(x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
+    """PR 列表（PLAN_prs §5）：没办完的在前、收口的在后，各按时间倒序。
+    unapplied=合并了但还没在正在跑的代码里生效的个数（页顶「还没重启」那条的数）。"""
+    verify_auth(x_auth)
+    import prs
+    rows = [_pr_row(r) for r in prs.list_prs()]
+    return {"prs": rows,
+            "unapplied": sum(1 for r in rows if r["status"] == "merged"
+                             and r["effective"] is False)}
+
+
+@app.get("/prs/{pr_id}")
+def prs_detail(pr_id: int, x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
+    """PR 详情：描述、测试、文件、diff、生没生效，外加此刻合不合得了（blockers，
+    待合并的才算——详情页一打开就能看到挡着的原因，不用等点了才报）。"""
+    verify_auth(x_auth)
+    import prs
+    try:
+        rec = prs.view(pr_id)
+        rec["blockers"] = prs.merge_blockers(pr_id) if rec["status"] == "open" else []
+    except prs.PRError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    return _pr_row(rec)
+
+
+@app.post("/prs/{pr_id}/merge")
+def prs_merge(pr_id: int, inp: PRMergeIn,
+              x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
+    """合并（本地 git merge --no-ff，永不 push）。挡住了 → 409 {error}；测试没过且没带
+    force → 409 {error, needs_force: true, tests}，app 弹「取消 / 强行合并」二次确认。
+    合完不生效，要重启后端（§6.2）。"""
+    verify_auth(x_auth)
+    import prs
+    try:
+        return prs.merge(pr_id, force=inp.force)
+    except prs.NeedsForce as e:
+        raise HTTPException(status_code=409, detail={
+            "error": "测试没过", "needs_force": True, "tests": str(e)})
+    except prs.PRError as e:
+        raise HTTPException(status_code=409, detail={"error": str(e)})
+
+
+@app.post("/prs/{pr_id}/close")
+def prs_close(pr_id: int, inp: PRCloseIn,
+              x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
+    """机主关掉一个 PR（谁的都能关），提 PR 的角色下一轮开头会知道。"""
+    verify_auth(x_auth)
+    import prs
+    try:
+        return prs.close_by_owner(pr_id, inp.reason)
+    except prs.PRError as e:
+        raise HTTPException(status_code=409, detail={"error": str(e)})
 
 
 @app.get("/questions/pending")

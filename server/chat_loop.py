@@ -675,6 +675,7 @@ def build_injection(messages, char_id: Optional[str],
     pending = pipeline.pending_todo_block(char_id)
     if pending:
         lines.append(pending)
+    lines += [f"【PR：{e}】" for e in pipeline.prs_event_lines(char_id)]
     lines.append(last.text)
     return "\n".join(lines)
 

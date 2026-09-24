@@ -61,14 +61,15 @@ def pr_close(id: int, reason: str) -> dict | str:
 
 @mcp.tool()
 def pr_list() -> list | str:
-    """看所有 PR（谁提的、标题、状态）。没办完的在前。"""
+    """看所有 PR（谁提的、标题、状态）。没办完的在前。合并了的带 effective：
+    true=已经在正在跑的代码里生效，false=合了还没生效（等重启）。"""
     return _call(prs.list_prs)
 
 
 @mcp.tool()
 def pr_view(id: int) -> dict | str:
-    """看一个 PR 的全部：描述、状态、改了哪些文件、测试结果、完整 diff。
-    机主问起「讲讲 #N」时用它查。"""
+    """看一个 PR 的全部：描述、状态、改了哪些文件、测试结果、完整 diff；合并了的
+    带 effective（生没生效，当场算的）。机主问起「讲讲 #N」时用它查。"""
     return _call(prs.view, id)
 
 

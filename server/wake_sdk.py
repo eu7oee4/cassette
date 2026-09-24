@@ -136,6 +136,8 @@ def wake_injection(cid: str, trigger: str, note: str = "") -> str:
         todo = (state_store.read_schedule(cid).get("next_wake_todo") or "").strip()
         if todo:
             line += f"\n〔你自己留下的字条：{todo}〕"
+    for e in pipeline.prs_event_lines(cid):
+        line += f"\n〔PR：{e}〕"
     return line
 
 
