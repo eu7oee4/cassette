@@ -1213,6 +1213,48 @@ class TraceVocabTest(unittest.TestCase):
 class ReadonlyGuardTest(unittest.TestCase):
     """PR14-b：只读常驻的路径闸（限根目录+黑名单，§5.3 安全面）。"""
 
+    def test_state_only_own_room(self):
+        # 09-24：state/ 只放行自己的房间；共用的运行状态（outbox 里有别人醒来说的话）挡掉
+        import pipeline
+        import state_store
+        g = pipeline.readonly_path_guard
+        st = state_store.STATE_DIR
+        self.assertIsNone(g({"file_path": str(st / "characters" / "cass" / "x.json")}, "cass"))
+        self.assertIsNone(g({"path": str(st / "characters" / "cass")}, "cass"))
+        for bad in (st / "outbox.json", st / "activity_log.jsonl", st, st / "prs" / "1.json",
+                    st / "characters", st / "characters" / "default" / "x"):
+            self.assertIsNotNone(g({"file_path": str(bad)}, "cass"), bad)
+        # 共用的求职 / 工作台资料放行（skills 流程第一步就读）
+        for ok in (st / "jobhunt" / "stories" / "_index.md", st / "workbench" / "x" / "PLAN.md",
+                   st / "webpages" / "progress" / "p.json"):
+            self.assertIsNone(g({"file_path": str(ok)}, "cass"), ok)
+        self.assertIsNone(g({"pattern": str(st / "jobhunt") + "/intel/*.md"}, "cass", "Glob"))
+        # 恒空 cwd 在 state/ 里，但没点名路径 / 相对路径落在这儿照样放行
+        self.assertIsNone(g({"file_path": "notes.md"}, "cass"))
+        self.assertIsNone(g({"pattern": "**/*.py"}, "cass", "Glob"))
+        # nohup.out、别人的工作副本：开放（机主要他能帮着查 bug）
+        root = pipeline.CODE_ROOT
+        self.assertIsNone(g({"file_path": str(root / "server" / "nohup.out")}, "cass"))
+        self.assertIsNone(g({"file_path": str(root / ".worktrees" / "default" / "a.py")}, "cass"))
+
+    def test_glob_pattern_prefix_checked(self):
+        # 09-24 实测：Glob 的 pattern 写绝对路径、不带 path，能列出根目录外的文件
+        import pipeline
+        import state_store
+        g = pipeline.readonly_path_guard
+        root = pipeline.CODE_ROOT
+        self.assertIsNotNone(g({"pattern": "/Users/nemu/.ssh/*"}, "cass", "Glob"))
+        self.assertIsNotNone(g({"pattern": "~/.ssh/*"}, "cass", "Glob"))
+        self.assertIsNotNone(g({"pattern": str(state_store.STATE_DIR) + "/*.json"}, "cass", "Glob"))
+        self.assertIsNotNone(g({"pattern": "../../*"}, "cass", "Glob"))
+        self.assertIsNotNone(g({"pattern": str(root) + "/**/../../x"}, "cass", "Glob"))
+        self.assertIsNotNone(g({"path": str(root / "server"), "pattern": "state/*.json"},
+                               "cass", "Glob"))
+        self.assertIsNone(g({"pattern": str(root) + "/server/**/*.py"}, "cass", "Glob"))
+        self.assertIsNone(g({"path": str(root), "pattern": "server/*.py"}, "cass", "Glob"))
+        # Grep 的 pattern 是正则不是路径，不拿它当路径查
+        self.assertIsNone(g({"pattern": "/Users/nemu/.ssh"}, "cass", "Grep"))
+
     def test_paths(self):
         import pipeline
         import state_store

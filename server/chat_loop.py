@@ -348,13 +348,13 @@ def _wake_gate(handle: session_mgr.LoopHandle):
             # 只读常驻（PR14-b）：任何轮来源都能看一眼（§2 核实纪律），
             # 但过路径闸（限根目录+黑名单，§5.3 安全面）——先于醒来禁用面，
             # 只读工具不在 wake 挂载表里，不挡在这儿 wake 轮就全拒了。
-            why = pipeline.readonly_path_guard(tool_input, handle.char_id)
+            why = pipeline.readonly_path_guard(tool_input, handle.char_id, tool)
             return {} if why is None else _deny(why)
         if tool in pipeline.WRITE_BUILTINS:
             # 写类（PLAN_native §1.4 + PLAN_prs §4）：先过路径闸，再按路径分三类——
             # 本角色工作副本 → 直接放行不弹卡（没合并之前碰不到线上）；别人的副本 /
             # 副本里的 .git → 拒；其余（主目录等）→ chat 轮放进 ask 弹卡，wake 轮拒。
-            why = pipeline.readonly_path_guard(tool_input, handle.char_id)
+            why = pipeline.readonly_path_guard(tool_input, handle.char_id, tool)
             if why is not None:
                 return _deny(why)
             verdict, why = _write_route(handle, tool, tool_input)
@@ -583,8 +583,9 @@ def build_options(char_id: str, catalog: Optional[list] = None,
             segs.append("你手边常驻一套只读的文件工具（Read/Grep/Glob），看得到 "
                         f"cassette 仓（{pipeline.CODE_ROOT}）的代码和资料，"
                         f"还有{config.user_name()}的 dossier 仓（{pipeline.DOSSIER_ROOT}）"
-                        "——想核实什么随手翻，别背结论。凭据（.env）和别的角色的 "
-                        "state 房间不在范围里。")
+                        "——想核实什么随手翻，别背结论。凭据（.env）不在范围里；"
+                        "state/ 里只看得到你自己的房间（state/characters/<你>/）和"
+                        "求职 / 工作台的资料（state/jobhunt、workbench、webpages）。")
         if config.WRITE_TOOLS_ENABLED:
             tools += sorted(pipeline.WRITE_BUILTINS)
             segs.append(_write_paths_text(char_id))

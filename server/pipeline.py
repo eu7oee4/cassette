@@ -1475,12 +1475,55 @@ def tool_paths(tool_input: Optional[dict]) -> list[Optional[Path]]:
     return out
 
 
-def readonly_path_guard(tool_input: Optional[dict],
-                        char_id: Optional[str]) -> Optional[str]:
+_GLOB_META = set("*?[{")
+
+# state/ 里房间以外、仍然放行读的共用数据（09-24 机主拍板）：求职流水线和工作台是全机一份、
+# 两个角色共用的资产，skills/jobhunt、skills/workbench 的流程第一步就要读。
+# 其余（outbox / activity_log / world.json / prs …）是运行状态，挡。
+STATE_SHARED_READ = ("jobhunt", "workbench", "webpages")
+
+
+def _glob_base(tool_input: dict) -> Optional[Path]:
+    """Glob 的 pattern 里不带通配符的那截前缀，当成它真正要看的目录。
+    09-24 实测：pattern 写绝对路径、不带 path，Glob 照样列出根目录外的文件——
+    只查 path 参数等于没查。"""
+    pat = (tool_input or {}).get("pattern")
+    if not (isinstance(pat, str) and pat.strip()):
+        return None
+    pat = str(Path(pat.strip()).expanduser())
+    lead = []
+    for part in Path(pat).parts:
+        if _GLOB_META & set(part):
+            break
+        lead.append(part)
+    base = Path(*lead) if lead else Path(".")
+    if not base.is_absolute():
+        root = (tool_input or {}).get("path")
+        root = Path(root.strip()) if isinstance(root, str) and root.strip() \
+            else Path(neutral_cwd())
+        if not root.is_absolute():
+            root = Path(neutral_cwd()) / root
+        base = root / base
+    return base.resolve()
+
+
+def readonly_path_guard(tool_input: Optional[dict], char_id: Optional[str],
+                        tool: str = "") -> Optional[str]:
     """只读工具的路径闸：None=放行；str=拒绝原话（PreToolUse 门直接用）。
     相对路径按恒空 cwd（neutral_cwd）解析再查——「../」从空目录一步就能爬进
-    state/，不解析就查等于没查。没点名路径（Grep 全局搜）＝落在空 cwd，无害。"""
-    for rp in tool_paths(tool_input):
+    state/，不解析就查等于没查。没点名路径（Grep 全局搜）＝落在空 cwd，无害。
+    Glob 另查 pattern 的前缀（见 _glob_base）；pattern 里有 .. 直接拒。
+    Grep 点名目录递归搜，靠的是它跳过 gitignore 的文件（09-24 实测：state/、
+    characters/、.env 都搜不到内容）——这三处要一直在 .gitignore 里。"""
+    paths = tool_paths(tool_input)
+    if tool == "Glob":
+        pat = (tool_input or {}).get("pattern")
+        if isinstance(pat, str) and ".." in Path(pat.strip()).parts:
+            return "Glob 的 pattern 里别用 ..——要看哪个目录，把它写进 path"
+        base = _glob_base(tool_input or {})
+        if base is not None:
+            paths.append(base)
+    for rp in paths:
         if rp is None:
             return "这条路径看不懂——换条正经路径"
         if not any(rp.is_relative_to(r) for _, r in READ_ROOTS):
@@ -1497,12 +1540,25 @@ def readonly_path_guard(tool_input: Optional[dict],
         import characters as _chars
         if rp.is_relative_to(_chars.CHARS_DIR.resolve()):
             return "角色配置目录（server/characters/）里有凭据，不在你可看的范围里"
+        # state/ 只放行自己的房间 state/characters/<自己>/（09-24 机主拍板）：
+        # 房间外的 outbox.json / activity_log / world.json 等是两个角色共用的，
+        # 读了等于看别人醒来说了什么（串台面）。
         croot = state_store.CHAR_STATE_ROOT.resolve()
         if rp.is_relative_to(croot):
             rel = rp.relative_to(croot)
             if rel.parts and rel.parts[0] != (char_id or ""):
                 return ("那是别的角色的房间（state/characters/），"
                         "各自的时间线各自看")
+            if not rel.parts:
+                return "state/characters/ 只看得到你自己的那间（state/characters/<你>/）"
+        elif rp.is_relative_to(Path(neutral_cwd()).resolve()):
+            pass    # 恒空 cwd 本身在 state/ 里：没点名路径 / 相对路径都落这儿，空目录无害
+        elif any(rp.is_relative_to((state_store.STATE_DIR / d).resolve())
+                 for d in STATE_SHARED_READ):
+            pass    # 共用的求职 / 工作台数据
+        elif rp.is_relative_to(state_store.STATE_DIR.resolve()):
+            return ("state/ 里只看得到你自己的房间（state/characters/<你>/）和求职 / 工作台的"
+                    "资料（state/jobhunt、workbench、webpages），其余是运行状态，不在你可看的范围里")
     return None
 
 
