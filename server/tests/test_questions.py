@@ -109,6 +109,7 @@ class QuestionCallbackTest(QuestionBase):
         import chat_loop
         import session_mgr as sm
         handle = sm.LoopHandle(char_id=cid, scene="chat")
+        self.h = handle
         return chat_loop._permit_gate(handle)
 
     async def test_answer_backfills_updated_input(self):
@@ -157,6 +158,7 @@ class QuestionCallbackTest(QuestionBase):
         import permits
         permits._pending.clear()
         cb = self._cb()
+        self.h.meta["said_for"] = {"tw": "改一下 x.py。"}   # 消费端认领的人话（PLAN_prs §4.2）
         task = asyncio.ensure_future(cb(
             "Edit", {"file_path": "x.py"},
             SimpleNamespace(title="", tool_use_id="tw")))
