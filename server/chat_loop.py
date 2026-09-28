@@ -757,8 +757,11 @@ NO_SAID_MSG = ("先用一两句大白话跟{u}说你要动什么、为什么、T
 
 
 async def _await_said(handle: session_mgr.LoopHandle, tool_use_id: Optional[str]) -> Optional[str]:
-    """can_use_tool 那头取这次调用认领到的人话。权限请求跟消息流是两条路，消费端可能
-    慢半拍——等它读到这次调用（最多 3 秒）。等不到回 None：不拒，卡照弹，只是没有人话。"""
+    """can_use_tool 那头取这次调用认领到的人话。SDK 读取循环里，普通消息进缓冲队列、
+    审批请求当场另起任务——两条路。09-28 探针实测（12 次）：带 tool_use 的消息总比审批请求
+    早 1–22ms 到，而消费端不被 SSE 拖（translate 的产物 put_nowait 进无界的 turn.out），
+    所以正常总是认领在前、第一次就查到。等最多 3 秒只兜事件循环被别的事卡住那类异常；
+    等不到回 None：不拒（拒了他再调也还是空，会绕成死循环），卡照弹，只是没有人话。"""
     if not tool_use_id:
         return None
     deadline = time.monotonic() + SAID_WAIT_SEC
