@@ -73,10 +73,10 @@ struct QuestionCardView: View {
 
     private var headerRow: some View {
         HStack {
+            // 纯小字标签，不垫胶囊底（10-08 简洁化）
             Text(q?.header?.isEmpty == false ? q!.header! : "想问你")
-                .font(.caption2.bold())
-                .padding(.horizontal, 8).padding(.vertical, 3)
-                .background(ink.opacity(0.14), in: Capsule())
+                .font(.caption2.weight(.semibold))
+                .opacity(0.6)
             if card.questions.count > 1 {
                 Text("\(min(idx + 1, card.questions.count))/\(card.questions.count)")
                     .font(.caption2).opacity(0.7)
@@ -112,11 +112,13 @@ struct QuestionCardView: View {
             Button {
                 submit(picked.sorted().joined(separator: "、"))
             } label: {
+                // 确认＝主按钮：反色实心（同权限卡的「批准」）；没勾时退成淡底
                 Text("就这些")
                     .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(picked.isEmpty ? ink.opacity(0.5) : fill)
                     .frame(maxWidth: .infinity)
-                    .padding(.vertical, 8)
-                    .background(ink.opacity(picked.isEmpty ? 0.08 : 0.22),
+                    .padding(.vertical, 9)
+                    .background(picked.isEmpty ? ink.opacity(0.08) : ink,
                                 in: RoundedRectangle(cornerRadius: 12, style: .continuous))
             }
             .buttonStyle(.plain)
@@ -151,7 +153,7 @@ struct QuestionCardView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, 10).padding(.vertical, 8)
             // 按钮圆角比容器小一号（§6 待定项，先按 12 走，机主看效果再改）
-            .background(ink.opacity(picked.contains(opt.label) ? 0.26 : 0.14),
+            .background(ink.opacity(picked.contains(opt.label) ? 0.24 : 0.10),
                         in: RoundedRectangle(cornerRadius: 12, style: .continuous))
         }
         .buttonStyle(.plain)

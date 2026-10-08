@@ -34,59 +34,74 @@ struct ChatView: View {
         // （症状：底部气泡露半只、怎么滑都弹回的假贴底卡死）——用下面的
         // onScrollPhaseChange 冻结快照修：手在滚动，布局就绝不动。
         ScrollView {
-            LazyVStack(spacing: 14) {
+            // 行间距不走 spacing，由每行自己的 meta.gap 决定（同一人连发 3、换人/隔时间 14）。
+            LazyVStack(spacing: 0) {
                 // 翻转后代码里越靠前 = 屏幕越靠底。
                 // "正在输入"放最前，消息倒序。可见性走冻结快照（shownIsWaiting）——
                 // 它在列表最底端，滚动/离底期间跟着 isWaiting 插进拔出＝滚动中动布局，
                 // 正是 contentSize 污染的老病根（流式 text_break 会反复翻 isWaiting）。
                 if shownIsWaiting {
                     ThinkingNoteRow(charID: charID, charName: charName)
+                        .padding(.top, 14)
                         .flippedUpsideDown()
                         .transition(.opacity)
                 }
-                ForEach(Array(displayRows.reversed())) { row in
-                    Group {
-                        switch row {
-                        case .single(let message):
-                            if Self.isVisuallyEmpty(message) {
-                                // 空内容行（如断流残留的空文字消息）整行不渲染——
-                                // 不然会剩一条只有时间戳/纯空白的隐形行占位
-                                EmptyView()
-                            } else if case .prNote(let prID, let text) = message.kind {
-                                PRNoteRow(text: text) { onTapPR(prID) }
-                                    .onLongPressGesture { onDelete(message) }
-                            } else if message.isSystem {
-                                SystemMessageRow(text: message.plainText)
+                ForEach(displayEntries.reversed()) { entry in
+                    let row = entry.row
+                    VStack(spacing: 0) {
+                        // 隔 5 分钟以上才出一条居中时间（iMessage 式），不再每条挂时间戳
+                        if let t = entry.meta.timeLabel {
+                            TimeSeparatorRow(text: t)
+                                .padding(.bottom, 10)
+                        }
+                        Group {
+                            switch row {
+                            case .single(let message):
+                                if Self.isVisuallyEmpty(message) {
+                                    // 空内容行（如断流残留的空文字消息）整行不渲染——
+                                    // 不然会剩一条只有时间戳/纯空白的隐形行占位
+                                    EmptyView()
+                                } else if case .prNote(let prID, let text) = message.kind {
+                                    PRNoteRow(text: text) { onTapPR(prID) }
+                                        .onLongPressGesture { onDelete(message) }
+                                } else if message.isSystem {
+                                    SystemMessageRow(text: message.plainText)
+                                        .contentShape(Rectangle())
+                                        .onLongPressGesture { onDelete(message) }
+                                } else if message.isMemoryNote {
+                                    // 小字提醒和系统消息分成两档（§3.4/§3.9）：小字是某个
+                                    // 角色做的事（靠左带 logo），系统消息是 app 自己说的话（居中）。
+                                    NoteRow(text: message.plainText,
+                                            senderID: message.senderID ?? charID)
+                                        .contentShape(Rectangle())
+                                        .onLongPressGesture { onDelete(message) }
+                                } else if case .browseNote(let urls) = message.kind {
+                                    BrowseNoteRow(urls: urls)
+                                        .onLongPressGesture { onDelete(message) }
+                                } else {
+                                    MessageRow(message: message,
+                                               charID: charID,
+                                               showAvatar: entry.meta.showAvatar,
+                                               contentWidth: geo.size.width - 24,
+                                               menuTarget: activeMenu?.ref,
+                                               onMenu: { activeMenu = $0 },
+                                               onSelectText: { selectText = SelectTextItem(text: $0) },
+                                               onEdit: onEdit,
+                                               onDelete: onDelete,
+                                               onTapAvatar: onTapAvatar,
+                                               onTapImage: onTapImage,
+                                               onTapFile: onTapFile,
+                                               onTapWebpage: onTapWebpage)
+                                }
+                            case .imageStack(let group):
+                                ImageStackRow(messages: group,
+                                              charID: charID,
+                                              showAvatar: entry.meta.showAvatar,
+                                              onTapStack: onTapImageStack,
+                                              onTapAvatar: { onTapAvatar(group[0].sender) })
                                     .contentShape(Rectangle())
-                                    .onLongPressGesture { onDelete(message) }
-                            } else if message.isMemoryNote {
-                                // 小字提醒和系统消息分成两档（§3.4/§3.9）：小字是某个
-                                // 角色做的事（靠左带 logo），系统消息是 app 自己说的话（居中）。
-                                NoteRow(text: message.plainText,
-                                        senderID: message.senderID ?? charID)
-                                    .contentShape(Rectangle())
-                                    .onLongPressGesture { onDelete(message) }
-                            } else if case .browseNote(let urls) = message.kind {
-                                BrowseNoteRow(urls: urls)
-                                    .onLongPressGesture { onDelete(message) }
-                            } else {
-                                MessageRow(message: message,
-                                           charID: charID,
-                                           contentWidth: geo.size.width - 24,
-                                           onEdit: onEdit,
-                                           onDelete: onDelete,
-                                           onTapAvatar: onTapAvatar,
-                                           onTapImage: onTapImage,
-                                           onTapFile: onTapFile,
-                                           onTapWebpage: onTapWebpage)
+                                    .onLongPressGesture { onDeleteStack(group) }
                             }
-                        case .imageStack(let group):
-                            ImageStackRow(messages: group,
-                                          charID: charID,
-                                          onTapStack: onTapImageStack,
-                                          onTapAvatar: { onTapAvatar(group[0].sender) })
-                                .contentShape(Rectangle())
-                                .onLongPressGesture { onDeleteStack(group) }
                         }
                     }
                     .background {
@@ -96,6 +111,7 @@ struct ChatView: View {
                                 .padding(.horizontal, -12)
                         }
                     }
+                    .padding(.top, entry.meta.gap)
                     .flippedUpsideDown()
                     .id(row.id)
                 }
@@ -115,6 +131,7 @@ struct ChatView: View {
         .scrollDismissesKeyboard(.immediately)
         // 核心修复：滚动进行中冻结消息快照（布局零变动），松手落定再一次性同步。
         .onScrollPhaseChange { _, newPhase in
+            if newPhase != .idle { activeMenu = nil }   // 一滚就收长按菜单（位置是激活时量的）
             if newPhase == .idle {
                 let fingerScrolled = frozenMessages != nil
                 // 冻结期间内容变没变（和冻结基线比条数+末条长度）——没变就没有"要追的漂移"，
@@ -261,10 +278,10 @@ struct ChatView: View {
                         Text("\(unseenCount) 条新消息")
                     }
                     .font(.footnote.bold())
-                    .foregroundStyle(.white)
+                    .foregroundStyle(Color.onChatInk)
                     .padding(.horizontal, 12)
                     .padding(.vertical, 7)
-                    .background(Capsule().fill(Color.userAccent))
+                    .background(Capsule().fill(Color.chatInk))
                     .shadow(color: .black.opacity(0.15), radius: 4, y: 1)
                 }
                 .padding(.bottom, 8)
@@ -283,12 +300,31 @@ struct ChatView: View {
         // 键盘没开 → 才是"点一下滑到底"。
         .contentShape(Rectangle())
         .onTapGesture {
+            // 长按菜单开着：这一下只收菜单，别的什么都不做
+            if activeMenu != nil {
+                activeMenu = nil
+                return
+            }
             let wasKeyboardVisible = keyboardVisible
             dismissKeyboard()
             onTapChatArea()
             if !wasKeyboardVisible {
                 snapToBottom()
             }
+        }
+        // 长按菜单浮层：画在列表外面（不翻转、不受 LazyVStack 层级影响），按气泡屏幕位置摆
+        .overlay(alignment: .topLeading) {
+            if let menu = activeMenu {
+                BubbleMenuOverlay(menu: menu, viewport: geo.frame(in: .global)) {
+                    activeMenu = nil
+                }
+                .transition(.opacity.combined(with: .scale(scale: 0.94)))
+            }
+        }
+        .animation(.easeOut(duration: 0.15), value: activeMenu?.ref)
+        // 长按菜单「选择」：挂在列表外层弹（行在 LazyVStack 里随时可能被回收）
+        .sheet(item: $selectText) { item in
+            SelectableTextSheet(text: item.text)
         }
         // 外部跳转请求（聊天记录页点行 / 以后引用灰条共用）：跳到那条气泡 + 闪高亮。
         .onChange(of: scrollTarget) { _, target in
@@ -299,6 +335,10 @@ struct ChatView: View {
         }
         }
     }
+
+    // 长按菜单挂在哪个气泡上（全列表同时只有一个）；「选择」弹页要的字。
+    @State private var activeMenu: ActiveBubbleMenu? = nil
+    @State private var selectText: SelectTextItem? = nil
 
     // 跳转落地后闪高亮的行 id（1.5s 自动熄）。
     @State private var flashRowId: UUID? = nil
@@ -383,6 +423,88 @@ struct ChatView: View {
         flushRun()
         return rows
     }
+
+    /// 行的排版信息：头顶要不要出时间、和上一行隔多远、左侧头像露不露。
+    private struct RowMeta {
+        var timeLabel: String? = nil
+        var gap: CGFloat = 0
+        var showAvatar = true
+    }
+
+    private struct DisplayEntry: Identifiable {
+        let row: ChatRowItem
+        let meta: RowMeta
+        var id: UUID { row.id }
+    }
+
+    /// 展示行 + 排版信息一次算完（别在 ForEach 里逐行回头查——长记录会变 O(n²)）。
+    /// 规则：距上一行 >5 分钟出居中时间；同一发送者连发（中间没夹小字/系统行/时间）
+    /// 贴紧 3pt，否则 14pt；TA 的头像只挂在连发的第一条上。
+    private var displayEntries: [DisplayEntry] {
+        var out: [DisplayEntry] = []
+        var prevTime: Date? = nil
+        var prevBubbleSender: MessageSender? = nil   // 上一行是气泡类才有值
+        for row in displayRows {
+            let sender: MessageSender
+            let first: Date, last: Date
+            let isBubble: Bool
+            switch row {
+            case .single(let m):
+                if Self.isVisuallyEmpty(m) {
+                    out.append(DisplayEntry(row: row, meta: RowMeta(showAvatar: false)))
+                    continue
+                }
+                sender = m.sender
+                first = m.timestamp; last = m.timestamp
+                isBubble = !(m.isSystem || m.isMemoryNote || m.isBrowseNote)
+            case .imageStack(let ms):
+                sender = ms[0].sender
+                first = ms[0].timestamp; last = ms[ms.count - 1].timestamp
+                isBubble = true
+            }
+            var meta = RowMeta()
+            if prevTime == nil || first.timeIntervalSince(prevTime!) > 300 {
+                meta.timeLabel = Self.separatorLabel(first)
+            }
+            let continued = meta.timeLabel == nil && isBubble && prevBubbleSender == sender
+            meta.gap = out.isEmpty ? 0 : (continued ? 3 : 14)
+            meta.showAvatar = !continued
+            out.append(DisplayEntry(row: row, meta: meta))
+            prevTime = last
+            prevBubbleSender = isBubble ? sender : nil
+        }
+        return out
+    }
+
+    /// 居中时间的写法：今天 `14:32`、昨天 `昨天 14:32`、一周内 `星期三 14:32`、
+    /// 今年 `10月8日 14:32`、更早带年份。
+    private static func separatorLabel(_ d: Date) -> String {
+        let cal = Calendar.current
+        let now = Date()
+        let hm = hmFormatter.string(from: d)
+        if cal.isDateInToday(d) { return hm }
+        if cal.isDateInYesterday(d) { return "昨天 \(hm)" }
+        if let days = cal.dateComponents([.day], from: cal.startOfDay(for: d),
+                                         to: cal.startOfDay(for: now)).day,
+           days >= 0, days < 7 {
+            return "\(weekdayFormatter.string(from: d)) \(hm)"
+        }
+        if cal.component(.year, from: d) == cal.component(.year, from: now) {
+            return monthDayFormatter.string(from: d)
+        }
+        return fullFormatter.string(from: d)
+    }
+
+    private static func formatter(_ f: String) -> DateFormatter {
+        let df = DateFormatter()
+        df.locale = Locale(identifier: "zh_CN")
+        df.dateFormat = f
+        return df
+    }
+    private static let hmFormatter = formatter("HH:mm")
+    private static let weekdayFormatter = formatter("EEEE")
+    private static let monthDayFormatter = formatter("M月d日 HH:mm")
+    private static let fullFormatter = formatter("yyyy年M月d日 HH:mm")
 
     /// 消息 id → 展示行 id（目标可能被收进堆叠卡，行 id=组首图 id）。跳转用。
     private func rowId(for messageId: UUID) -> UUID? {
@@ -515,12 +637,24 @@ private struct ThinkingNoteRow: View {
     }
 }
 
-/// 系统提示（§3.9）：居中灰字带破折号包裹，无 logo、无头像、无气泡——
+/// 居中时间（每隔 >5 分钟一条）：比系统消息再轻一档。
+private struct TimeSeparatorRow: View {
+    let text: String
+    var body: some View {
+        Text(text)
+            .font(.caption2.weight(.medium))
+            .foregroundStyle(Color.noteGray)
+            .frame(maxWidth: .infinity, alignment: .center)
+    }
+}
+
+/// 系统提示（§3.9）：居中灰字，无 logo、无头像、无气泡——
 /// app 说的话，不属于任何角色（跟靠左带 logo 的小字提醒 NoteRow 的分界就在这）。
 private struct SystemMessageRow: View {
     let text: String
     var body: some View {
-        Text("——\(text)——")
+        Text(text)
+            .multilineTextAlignment(.center)
             .font(.caption)
             .foregroundStyle(Color.noteGray)
             .frame(maxWidth: .infinity, alignment: .center)
@@ -579,7 +713,7 @@ private struct BrowseNoteRow: View {
                         } label: {
                             Text(u)
                                 .font(.caption2)
-                                .foregroundStyle(Color.userAccent)
+                                .foregroundStyle(Color.chatInk.opacity(0.7))
                                 .lineLimit(1)
                                 .truncationMode(.middle)
                         }
@@ -594,12 +728,19 @@ private struct BrowseNoteRow: View {
     }
 }
 
-/// 单行消息：根据发送方决定左右布局与头像位置。
+/// 单行消息：TA 靠左（连发只在第一条挂头像），我靠右不挂头像。
+/// 长按**单个气泡**＝自绘浮动菜单（复制/选择/编辑/删除），时间戳不逐条挂，改由列表出居中时间。
+/// 为什么不用系统 .contextMenu：列表是翻转布局，系统按下/抬起的截图动画拿到的是倒着的视图，
+/// 自定义 preview 只管弹出后那一帧，管不到过程（10-08 真机实锤，字整段倒过来）。
 private struct MessageRow: View {
     @Environment(\.colorScheme) private var scheme
     let message: ChatMessage
     let charID: String                  // 头像认这个，不认「当前是谁」
+    var showAvatar: Bool = true         // 同一人连发的后几条不挂头像（留等宽空位对齐）
     var contentWidth: CGFloat = 320
+    var menuTarget: BubbleRef? = nil    // 长按菜单当前挂在哪个气泡上（全列表唯一）
+    var onMenu: (ActiveBubbleMenu) -> Void = { _ in }
+    var onSelectText: (String) -> Void = { _ in }
     var onEdit: (ChatMessage) -> Void = { _ in }
     var onDelete: (ChatMessage) -> Void = { _ in }
     var onTapAvatar: (MessageSender) -> Void = { _ in }
@@ -609,40 +750,61 @@ private struct MessageRow: View {
 
     private var isMe: Bool { message.sender == .me }
 
-    /// §1.2：机主气泡染机主人物色（实底+反色字）；AI 气泡统一灰底默认字色。
+    /// §1.2：机主气泡走 ChatTint（浅色＝黑底白字）；AI 气泡统一灰底默认字色。
     private var bubbleFill: Color {
         isMe ? ChatTint.fill(IdentityColor.palette(for: "user"), scheme)
              : ChatPalette.current(scheme).bubbleAI
     }
     private var bubbleText: Color? { isMe ? ChatTint.text(scheme) : nil }
 
-    /// 文字消息的原文（非文字返回 nil）。
-    private var rawText: String? {
-        if case .text(let t) = message.kind { return t }
-        return nil
-    }
-
     /// 对白气泡的最大宽度。给个明确宽度，MarkdownUI 才会正常换行。
-    private var bubbleMaxWidth: CGFloat { max(200, contentWidth * 0.72) }
+    /// 我这边不挂头像了，多让出头像那一截给气泡。
+    private var bubbleMaxWidth: CGFloat { max(200, contentWidth * (isMe ? 0.78 : 0.72)) }
 
     var body: some View {
         HStack(alignment: .top, spacing: 8) {
             if !isMe {
-                Button { onTapAvatar(.other) } label: { AvatarView(sender: .other, charID: charID) }
-                    .buttonStyle(.plain)
+                if showAvatar {
+                    Button { onTapAvatar(.other) } label: { AvatarView(sender: .other, charID: charID) }
+                        .buttonStyle(.plain)
+                } else {
+                    Color.clear.frame(width: 34, height: 1)
+                }
             }
-            VStack(alignment: isMe ? .trailing : .leading, spacing: 5) {
-                content
-                    .contentShape(Rectangle())
-                    .onLongPressGesture { onDelete(message) }   // 长按气泡本体删（拖动自动取消识别，不挡滚动）
-                metaRow
-            }
-            .frame(maxWidth: .infinity, alignment: isMe ? .trailing : .leading)
-            if isMe {
-                Button { onTapAvatar(.me) } label: { AvatarView(sender: .me, charID: charID) }
-                    .buttonStyle(.plain)
-            }
+            content
+                .frame(maxWidth: .infinity, alignment: isMe ? .trailing : .leading)
         }
+    }
+
+    /// 给一个气泡挂长按菜单。segment＝这条消息里的第几个气泡；copyText 非 nil＝文字气泡
+    /// （给复制/选择/编辑），nil＝图片表情文件这类（只给删除）。
+    private func withMenu<V: View>(_ v: V, segment: Int, copyText: String?) -> some View {
+        let ref = BubbleRef(messageID: message.id, segment: segment)
+        return v.modifier(BubbleMenuModifier(
+            active: menuTarget == ref,
+            onActivate: { frame in
+                onMenu(ActiveBubbleMenu(ref: ref, frame: frame, trailing: isMe,
+                                        items: menuItems(copyText)))
+            }))
+    }
+
+    private func menuItems(_ copyText: String?) -> [BubbleMenuItem] {
+        var out: [BubbleMenuItem] = []
+        if let t = copyText {
+            out.append(BubbleMenuItem(title: "复制", icon: "doc.on.doc") { UIPasteboard.general.string = t })
+            out.append(BubbleMenuItem(title: "选择", icon: "text.cursor") { onSelectText(t) })
+            out.append(BubbleMenuItem(title: "编辑", icon: "pencil") { onEdit(message) })
+        }
+        // 删除是整条消息（一条消息可能拆成好几个气泡，存储单位是消息）
+        out.append(BubbleMenuItem(title: "删除", icon: "trash", destructive: true) { onDelete(message) })
+        return out
+    }
+
+    /// 选择文本页显示的字：把行内 markdown 记号（** ` 链接等）去掉，复制出来是干净的字。
+    private static func selectableText(_ raw: String) -> String {
+        let opts = AttributedString.MarkdownParsingOptions(interpretedSyntax: .inlineOnlyPreservingWhitespace)
+        guard let attr = try? AttributedString(markdown: raw, options: opts) else { return raw }
+        return String(attr.characters)
     }
 
     /// 消息内容：文字按段渲染（对白气泡 + 代码块卡片）；表情是自适应比例的图。
@@ -656,74 +818,74 @@ private struct MessageRow: View {
             }
         case .sticker(let url, _):
             // 表情保持自适应比例（透明底/长条表情裁成方形会毁）
-            StickerImage(url: url)
-                .frame(maxWidth: 160, maxHeight: 160)
-                .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+            withMenu(StickerImage(url: url)
+                        .frame(maxWidth: 160, maxHeight: 160)
+                        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous)),
+                     segment: 0, copyText: nil)
         case .image(let url):
-            // 和堆叠卡同款：160×160 填充裁切 + 16 圆角，聊天里所有照片观感一致
-            Group {
-                if let img = AppFiles.loadImage(url) {
-                    Image(uiImage: img).resizable().scaledToFill()
-                } else {
-                    Color(.systemGray5)
-                        .overlay(Image(systemName: "photo").foregroundStyle(.secondary))
-                }
-            }
-            .frame(width: 160, height: 160)
-            .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
-            .onTapGesture { onTapImage(url) }
+            // 和堆叠卡同款：160×160 填充裁切 + 18 圆角，聊天里所有照片观感一致
+            withMenu(Group {
+                        if let img = AppFiles.loadImage(url) {
+                            Image(uiImage: img).resizable().scaledToFill()
+                        } else {
+                            Color(.systemGray5)
+                                .overlay(Image(systemName: "photo").foregroundStyle(.secondary))
+                        }
+                    }
+                    .frame(width: 160, height: 160)
+                    .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+                    .onTapGesture { onTapImage(url) },
+                     segment: 0, copyText: nil)
         case .file(let url, let name):
             // 文件卡片：图标 + 文件名，点开 QuickLook 预览
-            HStack(spacing: 10) {
-                Image(systemName: "doc.fill")
-                    .font(.system(size: 26))
-                    .foregroundStyle(Color.userAccent)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(name).font(.callout.weight(.medium)).lineLimit(2)
-                    Text(url.pathExtension.uppercased())
-                        .font(.caption2).foregroundStyle(.secondary)
-                }
-            }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 12)
-            .frame(maxWidth: min(240, bubbleMaxWidth), alignment: .leading)
-            // 实底白卡 + 细描边：聊天背景是 systemGroupedBackground，
-            // secondarySystemBackground 和它几乎同色，看着像透明（真机反馈）
-            .background(Color(.systemBackground),
-                        in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-            .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .strokeBorder(Color(.systemGray4), lineWidth: 0.5))
-            .onTapGesture { onTapFile(url) }
+            withMenu(attachmentCard(icon: "doc.fill", title: name,
+                                    subtitle: url.pathExtension.uppercased())
+                        .onTapGesture { onTapFile(url) },
+                     segment: 0, copyText: nil)
         case .webpage(let pid, let title):
             // TA 做的网页：卡片和文件同款质感，点开就是页面
-            HStack(spacing: 10) {
-                Image(systemName: "doc.richtext.fill")
-                    .font(.system(size: 26))
-                    .foregroundStyle(Color.userAccent)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(title).font(.callout.weight(.medium)).lineLimit(2)
-                    Text("网页 · 点开查看")
-                        .font(.caption2).foregroundStyle(.secondary)
-                }
-            }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 12)
-            .frame(maxWidth: min(240, bubbleMaxWidth), alignment: .leading)
-            .background(Color(.systemBackground),
-                        in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-            .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .strokeBorder(Color(.systemGray4), lineWidth: 0.5))
-            .onTapGesture { onTapWebpage(pid, title) }
+            withMenu(attachmentCard(icon: "doc.richtext.fill", title: title, subtitle: "网页 · 点开查看")
+                        .onTapGesture { onTapWebpage(pid, title) },
+                     segment: 0, copyText: nil)
         case .system, .memoryNote, .browseNote, .prNote:
             EmptyView()
         }
     }
 
+    /// 文件/网页卡：我发的跟气泡同色（黑底白字）；TA 发的白卡 + 细描边
+    /// （聊天背景是 systemGroupedBackground 时 secondarySystemBackground 几乎同色，看着像透明——真机反馈）。
+    private func attachmentCard(icon: String, title: String, subtitle: String) -> some View {
+        let ink: Color = bubbleText ?? .primary
+        return HStack(spacing: 10) {
+            Image(systemName: icon)
+                .font(.system(size: 24))
+                .foregroundStyle(isMe ? ink.opacity(0.85) : Color.secondary)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title).font(.callout.weight(.medium)).lineLimit(2)
+                    .foregroundStyle(ink)
+                Text(subtitle)
+                    .font(.caption2)
+                    .foregroundStyle(isMe ? ink.opacity(0.6) : Color.secondary)
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 12)
+        .frame(maxWidth: min(240, bubbleMaxWidth), alignment: .leading)
+        .background(isMe ? bubbleFill : Color(.systemBackground),
+                    in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .overlay {
+            if !isMe {
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .strokeBorder(Color(.systemGray4), lineWidth: 0.5)
+            }
+        }
+    }
+
     /// 文字消息：按段渲染（对白进气泡，代码块脱出成深色卡片）。
     @ViewBuilder private func textBody(_ raw: String) -> some View {
-        VStack(alignment: isMe ? .trailing : .leading, spacing: 5) {
-            ForEach(Array(messageSegments(raw).enumerated()), id: \.offset) { _, seg in
-                segmentView(seg)
+        VStack(alignment: isMe ? .trailing : .leading, spacing: 3) {
+            ForEach(Array(messageSegments(raw).enumerated()), id: \.offset) { i, seg in
+                segmentView(seg, index: i)
             }
         }
     }
@@ -734,7 +896,7 @@ private struct MessageRow: View {
     /// 尾部呼吸点：只挂最后一段，生成中常亮，定稿即消。
     private func streamingBubble(_ raw: String) -> some View {
         let segs = streamingSegments(raw)
-        return VStack(alignment: isMe ? .trailing : .leading, spacing: 5) {
+        return VStack(alignment: isMe ? .trailing : .leading, spacing: 3) {
             ForEach(Array(segs.enumerated()), id: \.offset) { i, seg in
                 HStack(alignment: .bottom, spacing: 6) {
                     Text(seg)
@@ -755,16 +917,18 @@ private struct MessageRow: View {
         }
     }
 
-    @ViewBuilder private func segmentView(_ seg: MessageSegment) -> some View {
+    @ViewBuilder private func segmentView(_ seg: MessageSegment, index: Int) -> some View {
         switch seg {
         case .bubble(let md):
-            MarkdownMessageView(text: md, textColor: bubbleText)
-                .padding(.horizontal, 14)
-                .padding(.vertical, 10)
-                .background(
-                    RoundedRectangle(cornerRadius: 18, style: .continuous)
-                        .fill(bubbleFill)
-                )
+            // 菜单挂在气泡本体上（frame 之前）：变暗/菜单位置都贴着气泡，不是整列宽
+            withMenu(MarkdownMessageView(text: md, textColor: bubbleText)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 10)
+                        .background(
+                            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                                .fill(bubbleFill)
+                        ),
+                     segment: index, copyText: Self.selectableText(md))
                 .frame(maxWidth: bubbleMaxWidth, alignment: isMe ? .trailing : .leading)
         case .card(let md):
             // 只有代码块进这里：深色块自带背景，宽度取气泡列宽、靠发送者那一侧对齐。
@@ -772,54 +936,186 @@ private struct MessageRow: View {
                 .frame(maxWidth: bubbleMaxWidth, alignment: isMe ? .trailing : .leading)
         }
     }
+}
 
-    /// 时间戳 + 小按钮（我方按钮在时间戳内侧，对方在外侧）。
-    private var metaRow: some View {
-        HStack(spacing: 8) {
-            if isMe {
-                actionButtons
-                timestampText
-            } else {
-                timestampText
-                actionButtons
+/// 长按菜单的落点：哪条消息的第几个气泡。
+struct BubbleRef: Equatable {
+    let messageID: UUID
+    let segment: Int
+}
+
+private struct BubbleMenuItem: Identifiable {
+    let title: String
+    let icon: String
+    var destructive = false
+    let action: () -> Void
+    var id: String { title }
+}
+
+/// 开着的长按菜单：挂在哪个气泡、气泡在屏幕上的位置（激活那一刻量）、靠哪侧、有哪几项。
+struct ActiveBubbleMenu {
+    let ref: BubbleRef
+    let frame: CGRect
+    let trailing: Bool
+    fileprivate let items: [BubbleMenuItem]
+}
+
+/// 气泡长按（微信式浮条）：长按 → 轻震 + 气泡压暗 + 上报位置；菜单本身由 ChatView 画在
+/// 列表外层的浮层上（BubbleMenuOverlay）。
+/// 为什么不画在气泡自己的 overlay 里：LazyVStack 不认 zIndex，上一行会把菜单盖住（10-08 模拟器实锤）。
+private struct BubbleMenuModifier: ViewModifier {
+    let active: Bool
+    let onActivate: (CGRect) -> Void
+
+    @State private var pending = false
+
+    func body(content: Content) -> some View {
+        content
+            .overlay {
+                if active {
+                    RoundedRectangle(cornerRadius: 18, style: .continuous)
+                        .fill(Color.gray.opacity(0.28))
+                        .allowsHitTesting(false)
+                }
+            }
+            // 只在长按那一刻量一次全局位置——别用 onGeometryChange 常驻，滚动时每个气泡每帧都会回调。
+            // .global 拿到的是翻转之后的真实屏幕坐标（同 PhotoStackCard 拖动的口径）。
+            .background {
+                GeometryReader { g in
+                    Color.clear.onChange(of: pending) { _, on in
+                        guard on else { return }
+                        pending = false
+                        onActivate(g.frame(in: .global))
+                    }
+                }
+            }
+            .onLongPressGesture(minimumDuration: 0.35) {
+                UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                pending = true
+            }
+            .animation(.easeOut(duration: 0.15), value: active)
+    }
+}
+
+/// 列表外层的菜单浮层：按气泡的屏幕位置摆。
+/// 竖向：优先浮在气泡上方；上方被顶栏挡住就挂下方；气泡比屏还高就钉在可见区顶部。
+/// 横向：我的贴气泡右沿、TA 的贴气泡左沿，再夹进屏幕内。
+private struct BubbleMenuOverlay: View {
+    let menu: ActiveBubbleMenu
+    let viewport: CGRect          // 聊天区的屏幕范围（浮层自己的坐标原点就是它的左上角）
+    let onDismiss: () -> Void
+
+    var body: some View {
+        BubbleMenuBar(items: menu.items, onDismiss: onDismiss)
+            .offset(x: x - viewport.minX, y: y - viewport.minY)
+    }
+
+    private var size: CGSize { BubbleMenuBar.size(count: menu.items.count) }
+
+    private var x: CGFloat {
+        let raw = menu.trailing ? menu.frame.maxX - size.width : menu.frame.minX
+        return min(max(raw, viewport.minX + 8), viewport.maxX - size.width - 8)
+    }
+
+    private var y: CGFloat {
+        let gap: CGFloat = 8, f = menu.frame
+        let top = viewport.minY + gap, bottom = viewport.maxY - gap
+        if f.minY - gap - size.height >= top { return f.minY - gap - size.height }  // 上方
+        if f.maxY + gap + size.height <= bottom { return f.maxY + gap }             // 下方
+        return max(top, f.minY)                                                    // 钉在可见区顶部
+    }
+}
+
+private struct BubbleMenuBar: View {
+    let items: [BubbleMenuItem]
+    let onDismiss: () -> Void
+
+    static let itemWidth: CGFloat = 54
+    static let height: CGFloat = 52
+    static let hPad: CGFloat = 4
+    /// 尺寸是定死的（每项等宽），浮层摆位直接算，不用量。
+    static func size(count: Int) -> CGSize {
+        CGSize(width: CGFloat(count) * itemWidth + hPad * 2, height: height)
+    }
+
+    var body: some View {
+        HStack(spacing: 0) {
+            ForEach(items) { item in
+                Button {
+                    onDismiss()
+                    item.action()
+                } label: {
+                    VStack(spacing: 4) {
+                        Image(systemName: item.icon)
+                            .font(.system(size: 16, weight: .medium))
+                        Text(item.title)
+                            .font(.system(size: 11, weight: .medium))
+                    }
+                    .foregroundStyle(item.destructive ? Color(hex: 0xFF6B60) : .white)
+                    .frame(width: Self.itemWidth, height: Self.height)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
             }
         }
-        .padding(.horizontal, 4)
+        .padding(.horizontal, Self.hPad)
+        .background(Color(hex: 0x1C1C1E), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .shadow(color: .black.opacity(0.18), radius: 10, y: 4)
     }
+}
 
-    private var timestampText: some View {
-        Text(Self.timeFormatter.string(from: message.timestamp))
-            .font(.caption2)
-            .foregroundStyle(.secondary)
-    }
+/// 「选择」要的那段字：带个 id 好挂 .sheet(item:)。
+struct SelectTextItem: Identifiable {
+    let id = UUID()
+    let text: String
+}
 
-    @ViewBuilder
-    private var actionButtons: some View {
-        HStack(spacing: 6) {
-            // 双方的文字消息：gobackward 进编辑弹窗（弹窗里按钮按发送者不同）+ 复制。
-            if rawText != nil {
-                iconButton("gobackward") { onEdit(message) }
-                iconButton("square.on.square") { UIPasteboard.general.string = message.plainText }
-            }
+/// 「选择文本」页：只读 UITextView，进来全选，拖手柄挑一段——系统菜单的「拷贝」只拷选中的。
+/// （SwiftUI 的 .textSelection 在 iOS 上只能整段拷，做不到部分选择，所以走 UIKit。）
+struct SelectableTextSheet: View {
+    let text: String
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            SelectableTextView(text: text)
+                .padding(.horizontal, 8)
+                .navigationTitle("选择文本")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button("完成") { dismiss() }
+                    }
+                }
         }
+        .presentationDetents([.medium, .large])
+        .tint(Color.chatInk)   // 选区手柄/「完成」跟聊天页功能色走黑白，不吃全局棕 tint
     }
+}
 
-    private func iconButton(_ systemName: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Image(systemName: systemName)
-                .font(.system(size: 13))
-                .foregroundStyle(.secondary)
-                .frame(width: 26, height: 22)
-                .contentShape(Rectangle())
+private struct SelectableTextView: UIViewRepresentable {
+    let text: String
+
+    func makeUIView(context: Context) -> UITextView {
+        let tv = UITextView()
+        tv.isEditable = false
+        tv.isSelectable = true
+        tv.backgroundColor = .clear
+        tv.font = .preferredFont(forTextStyle: .body)
+        tv.adjustsFontForContentSizeCategory = true
+        tv.textContainerInset = UIEdgeInsets(top: 12, left: 8, bottom: 24, right: 8)
+        tv.text = text
+        // 等 sheet 弹完再全选，太早 becomeFirstResponder 不出手柄
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+            tv.becomeFirstResponder()
+            tv.selectedRange = NSRange(location: 0, length: (text as NSString).length)
         }
-        .buttonStyle(.plain)
+        return tv
     }
 
-    private static let timeFormatter: DateFormatter = {
-        let f = DateFormatter()
-        f.dateFormat = "yyyy-MM-dd HH:mm"   // 带年月日（跨年/翻旧记录要认得出）
-        return f
-    }()
+    func updateUIView(_ tv: UITextView, context: Context) {
+        if tv.text != text { tv.text = text }
+    }
 }
 
 /// 从本地文件 URL 加载表情图；加载不出来时显示占位。
@@ -844,6 +1140,7 @@ struct StickerImage: View {
 private struct ImageStackRow: View {
     let messages: [ChatMessage]                       // ≥2，同 sender 的连续图片
     let charID: String                                // 头像认这个，不认「当前是谁」
+    var showAvatar: Bool = true                       // 同一人连发的后几条不挂头像
     var onTapStack: ([URL], Int) -> Void = { _, _ in }
     var onTapAvatar: () -> Void = { }
 
@@ -858,29 +1155,17 @@ private struct ImageStackRow: View {
     var body: some View {
         HStack(alignment: .top, spacing: 8) {
             if !isMe {
-                Button { onTapAvatar() } label: { AvatarView(sender: .other, charID: charID) }
-                    .buttonStyle(.plain)
+                if showAvatar {
+                    Button { onTapAvatar() } label: { AvatarView(sender: .other, charID: charID) }
+                        .buttonStyle(.plain)
+                } else {
+                    Color.clear.frame(width: 34, height: 1)
+                }
             }
-            VStack(alignment: isMe ? .trailing : .leading, spacing: 5) {
-                PhotoStackCard(urls: urls) { i in onTapStack(urls, i) }
-                Text(Self.timeFormatter.string(from: messages.last?.timestamp ?? Date()))
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                    .padding(.horizontal, 4)
-            }
-            .frame(maxWidth: .infinity, alignment: isMe ? .trailing : .leading)
-            if isMe {
-                Button { onTapAvatar() } label: { AvatarView(sender: .me, charID: charID) }
-                    .buttonStyle(.plain)
-            }
+            PhotoStackCard(urls: urls) { i in onTapStack(urls, i) }
+                .frame(maxWidth: .infinity, alignment: isMe ? .trailing : .leading)
         }
     }
-
-    private static let timeFormatter: DateFormatter = {
-        let f = DateFormatter()
-        f.dateFormat = "yyyy-MM-dd HH:mm"   // 带年月日（翻旧记录要认得出）
-        return f
-    }()
 }
 
 /// 微信风堆叠照片卡（PhotoStack 交互的原生独立实现，手感对齐 mianmian 版）：

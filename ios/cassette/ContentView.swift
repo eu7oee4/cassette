@@ -492,22 +492,19 @@ struct ContentView: View {
                 OnboardingView(store: proactiveStore, profile: profileStore,
                                charID: currentCharID) { hasOnboarded = true }
             }
-            // 点头像的选项弹层：改昵称 / 换头像。
+            // 点头像的选项弹层：改昵称 / 换头像。聊天里不再显示自己的头像（10-08），
+            // 「我的」两项也挂在这儿——否则自己的昵称/头像就没处改了。
             .confirmationDialog("", isPresented: Binding(
                 get: { avatarActionTarget != nil },
                 set: { if !$0 { avatarActionTarget = nil } }
             ), titleVisibility: .hidden) {
-                Button("修改昵称") {
-                    if let t = avatarActionTarget {
-                        nameDraft = t == .me ? proactiveStore.settings.userName
-                                             : proactiveStore.settings.agentName
-                        renameTarget = t
-                    }
-                }
-                Button("修改头像") {
-                    if let t = avatarActionTarget {
-                        avatarPickerTarget = t
-                        showAvatarPicker = true
+                if let t = avatarActionTarget {
+                    let showMine = t == .other
+                    Button(showMine ? "修改 TA 的昵称" : "修改昵称") { startRename(t) }
+                    Button(showMine ? "修改 TA 的头像" : "修改头像") { startAvatarPick(t) }
+                    if showMine {
+                        Button("修改我的昵称") { startRename(.me) }
+                        Button("修改我的头像") { startAvatarPick(.me) }
                     }
                 }
                 Button("取消", role: .cancel) { }
@@ -651,6 +648,17 @@ struct ContentView: View {
         .ignoresSafeArea()
     }
 
+    private func startRename(_ t: MessageSender) {
+        nameDraft = t == .me ? proactiveStore.settings.userName
+                             : proactiveStore.settings.agentName
+        renameTarget = t
+    }
+
+    private func startAvatarPick(_ t: MessageSender) {
+        avatarPickerTarget = t
+        showAvatarPicker = true
+    }
+
     // 顶部导航栏：左猫爪开抽屉，居中标题；右侧空占位配平保持标题居中
     // （原右上角设置齿轮已搬进抽屉）。
     private var header: some View {
@@ -662,7 +670,7 @@ struct ContentView: View {
             } label: {
                 Image(systemName: phoneOpen ? "chevron.down" : "pawprint")
                     .font(.system(size: 18, weight: .medium))
-                    .foregroundStyle(Color.userAccent)
+                    .foregroundStyle(Color.chatInk)
                     .frame(width: 40, height: 40)
             }
             // 左侧配平位：右边多出 ⏸ 时补一个等宽空位，标题才不偏
@@ -680,7 +688,7 @@ struct ContentView: View {
                         .lineLimit(1)
                         .truncationMode(.tail)
                     if chatStore.otherUnreadTotal > 0 {
-                        Circle().fill(Color.userAccent).frame(width: 7, height: 7)
+                        Circle().fill(Color.chatInk).frame(width: 7, height: 7)
                     }
                     Image(systemName: "chevron.down")
                         .font(.caption2.weight(.semibold))
@@ -690,7 +698,7 @@ struct ContentView: View {
                 if let line = charListStore.items.first(where: { $0.id == currentCharID })?.statusLine {
                     Text(line)
                         .font(.caption2)
-                        .foregroundStyle(Color.userAccent)
+                        .foregroundStyle(Color.noteGray)
                         .lineLimit(1)
                 }
             }
@@ -718,8 +726,7 @@ struct ContentView: View {
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 4)
-        .background(.bar)
-        .overlay(alignment: .bottom) { Divider() }
+        .background(.bar)   // 只留模糊，不画底部分隔线（10-08 简洁化）
     }
 
     /// 游戏急停 ⏸：开着 = 实心底 + 白图标（和 codeToggle 同一套视觉语言）。
@@ -728,15 +735,15 @@ struct ContentView: View {
         Button(action: toggleGamePause) {
             Group {
                 if gamePauseSwitching {
-                    ProgressView().tint(gamePaused ? .white : Color.userAccent)
+                    ProgressView().tint(gamePaused ? Color.onChatInk : Color.chatInk)
                 } else {
                     Image(systemName: gamePaused ? "pause.circle.fill" : "pause.circle")
                         .font(.system(size: 17, weight: .semibold))
-                        .foregroundStyle(gamePaused ? Color.white : Color.userAccent)
+                        .foregroundStyle(gamePaused ? Color.onChatInk : Color.chatInk)
                 }
             }
             .frame(width: 40, height: 30)
-            .background(Capsule().fill(gamePaused ? Color.userAccent : Color.clear))
+            .background(Capsule().fill(gamePaused ? Color.chatInk : Color.clear))
         }
         .disabled(gamePauseSwitching)
         .accessibilityLabel(gamePaused ? "游戏急停：开（点这里解除）" : "游戏急停")
@@ -777,16 +784,16 @@ struct ContentView: View {
         Button(action: toggleCodeMode) {
             Group {
                 if codeSwitching {
-                    ProgressView().tint(sessionMode ? .white : Color.userAccent)
+                    ProgressView().tint(sessionMode ? Color.onChatInk : Color.chatInk)
                 } else {
                     Image(systemName: gameMine ? "gamecontroller.fill"
                           : "chevron.left.forwardslash.chevron.right")
                         .font(.system(size: 15, weight: .semibold))
-                        .foregroundStyle(sessionMode ? Color.white : Color.userAccent)
+                        .foregroundStyle(sessionMode ? Color.onChatInk : Color.chatInk)
                 }
             }
             .frame(width: 40, height: 30)
-            .background(Capsule().fill(sessionMode ? Color.userAccent : Color.clear))
+            .background(Capsule().fill(sessionMode ? Color.chatInk : Color.clear))
             .opacity(codeOwnedByMe ? 1 : 0.35)
         }
         .disabled(codeSwitching || !codeOwnedByMe)

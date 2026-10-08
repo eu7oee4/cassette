@@ -24,10 +24,10 @@ struct PermitCardView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack {
+                // 纯小字标签，不垫胶囊底（10-08 简洁化）
                 Text("想动手 · \(card.tool)")
-                    .font(.caption2.bold())
-                    .padding(.horizontal, 8).padding(.vertical, 3)
-                    .background(ink.opacity(0.14), in: Capsule())
+                    .font(.caption2.weight(.semibold))
+                    .opacity(0.6)
                 Spacer()
                 if expired {
                     Button("收起") { onClose() }
@@ -109,15 +109,23 @@ struct PermitCardView: View {
         }
     }
 
+    /// 主按钮反色实心（卡是黑底就是白底黑字），次按钮只描边——一眼分得出轻重。
     private func decideButton(_ label: String, strong: Bool,
                               action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Text(label)
                 .font(.subheadline.weight(.semibold))
+                .foregroundStyle(strong ? fill : ink)
                 .frame(maxWidth: .infinity)
-                .padding(.vertical, 8)
-                .background(ink.opacity(strong ? 0.22 : 0.12),
-                            in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .padding(.vertical, 9)
+                .background {
+                    let shape = RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    if strong {
+                        shape.fill(ink)
+                    } else {
+                        shape.strokeBorder(ink.opacity(0.35), lineWidth: 1)
+                    }
+                }
         }
         .buttonStyle(.plain)
     }
