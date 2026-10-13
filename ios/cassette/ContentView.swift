@@ -137,6 +137,8 @@ struct ContentView: View {
     @State private var windowSyncPending: (char: String, history: [ChatMessage])? = nil
     @State private var deleteCandidates: [ChatMessage] = []   // 长按气泡/堆叠卡 → 删除确认（组删多条）
     @State private var viewingWebpage: WebpageItem? = nil      // 点网页卡片 → 查看
+    @State private var switcherOpen = false        // 切角色下拉（点顶栏名字 / 子页右上角名字）
+    @State private var headerHeight: CGFloat = 48  // 下拉卡片挂在顶栏正下方
 
     private let chatService = ChatService()
 
@@ -150,10 +152,7 @@ struct ContentView: View {
                                   onOpenDrawer: { drawerOpen = true },
                                   onOpenPhone: { phoneOpen = true })
                     } else {
-                        VStack(spacing: 0) {
-                            header
-                            chatBody
-                        }
+                        chatScreen
                     }
                 }
                 .toolbar(.hidden, for: .navigationBar)   // 聊天页/小屋都用自定义顶栏
@@ -180,10 +179,7 @@ struct ContentView: View {
         // （.environmentObject 只罩自己的子树，cover 挂在它外层）——必须显式再挂一份，
         // 不然 ChatView 的 @EnvironmentObject 一渲染就 fatal（实锤：点手机钮闪退）。
         .fullScreenCover(isPresented: $phoneOpen) {
-            VStack(spacing: 0) {
-                header
-                chatBody
-            }
+            chatScreen
             .background(Color(.systemBackground))
             .environmentObject(profileStore)
         }
@@ -287,27 +283,56 @@ struct ContentView: View {
     private func charSwitchable<V: View>(_ page: V) -> some View {
         page
             .id(currentCharID)
+            .overlay(alignment: .top) { switcherLayer(top: 6) }
             .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button { cycleCharacter() } label: {
-                        HStack(spacing: 4) {
+                if canSwitch {
+                    ToolbarItem(placement: .topBarTrailing) {
+                        Button { switcherOpen.toggle() } label: {
                             Text(topTitle)
                                 .font(.subheadline.weight(.medium))
+                                .foregroundStyle(Color.chatInk)
                                 .lineLimit(1)
-                            Image(systemName: "arrow.2.squarepath")
-                                .font(.caption2.weight(.semibold))
                         }
                     }
                 }
             }
+            .onDisappear { switcherOpen = false }
     }
 
-    /// 循环切到清单里的下一个角色（只有一个角色时不动）。
-    private func cycleCharacter() {
-        let items = charListStore.items
-        guard items.count > 1 else { return }
-        let idx = items.firstIndex(where: { $0.id == currentCharID }) ?? -1
-        switchCharacter(to: items[(idx + 1) % items.count].id)
+    private var canSwitch: Bool { charListStore.items.count > 1 }
+
+    /// 聊天页 = 顶栏 + 聊天流，切角色下拉浮在顶栏正下方。
+    private var chatScreen: some View {
+        VStack(spacing: 0) {
+            header
+                .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { headerHeight = $0 }
+            chatBody
+        }
+        .overlay(alignment: .top) { switcherLayer(top: headerHeight + 6) }
+    }
+
+    /// 下拉本体 + 一层透明接点击的底（点外面收起）。
+    @ViewBuilder
+    private func switcherLayer(top: CGFloat) -> some View {
+        ZStack(alignment: .top) {
+            if switcherOpen {
+                Color.clear
+                    .contentShape(Rectangle())
+                    .onTapGesture { switcherOpen = false }
+                CharSwitcherMenu(items: charListStore.items.map { c in
+                    CharSwitcherMenu.Row(id: c.id,
+                                         name: charListStore.name(for: c.id)
+                                             ?? (c.id == "default" ? "cassette" : c.id),
+                                         unread: c.id != currentCharID && (chatStore.unread[c.id] ?? 0) > 0)
+                }, currentID: currentCharID) { id in
+                    switcherOpen = false
+                    switchCharacter(to: id)
+                }
+                .padding(.top, top)
+                .transition(.scale(scale: 0.92, anchor: .top).combined(with: .opacity))
+            }
+        }
+        .animation(.easeOut(duration: 0.16), value: switcherOpen)
     }
 
     /// 抽屉层：阴影 + 面板。点阴影/阴影区左滑关；选中项 → 关抽屉 + push。
@@ -322,8 +347,7 @@ struct ContentView: View {
                     .gesture(DragGesture(minimumDistance: 20)
                         .onEnded { v in if v.translation.width < -30 { drawerOpen = false } })
                     .transition(.opacity)
-                DrawerPanel(agentName: topTitle, draftCount: draftCount,
-                            onTapName: charListStore.items.count > 1 ? { cycleCharacter() } : nil) { page in
+                DrawerPanel(agentName: topTitle, draftCount: draftCount) { page in
                     drawerOpen = false
                     // 小屋当首页时抽屉里的「小屋」就是回根，别在根上再叠一层小屋
                     if page == .house, houseAsRoot { navPath.removeAll(); return }
@@ -340,7 +364,6 @@ struct ContentView: View {
     private var chatBody: some View {
         ChatView(messages: chatStore.messages,
                  charID: currentCharID,                  // 头像认这个，不认 ProfileStore 里的缓存
-                 charName: topTitle,                     // 「正在思考…」小字念名字用
                  isWaiting: (isWaiting && streamingChar == currentCharID) || rescueActive,
                  // 三个点只在流所属的会话里亮；后台生成期间小字不灭，补投到达才熄
                  onEdit: startEdit,
@@ -678,7 +701,7 @@ struct ContentView: View {
                 Color.clear.frame(width: 40, height: 40)
             }
             Spacer()
-            // 标题可点：点一下＝循环切到下一个角色；长按＝进会话列表。
+            // 标题可点：点一下＝展开切角色下拉；长按＝进会话列表。
             // 别的会话有未读时名字旁亮一个小圆点。
             VStack(spacing: 1) {
                 HStack(spacing: 5) {
@@ -690,9 +713,12 @@ struct ContentView: View {
                     if chatStore.otherUnreadTotal > 0 {
                         Circle().fill(Color.chatInk).frame(width: 7, height: 7)
                     }
-                    Image(systemName: "chevron.down")
-                        .font(.caption2.weight(.semibold))
-                        .foregroundStyle(.secondary)
+                    if canSwitch {
+                        Image(systemName: "chevron.down")
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(Color.secondary)
+                            .rotationEffect(.degrees(switcherOpen ? 180 : 0))
+                    }
                 }
                 // 在场状态（同居世界）：他正在电脑前 → 名字底下一行小字说清
                 if let line = charListStore.items.first(where: { $0.id == currentCharID })?.statusLine {
@@ -705,10 +731,11 @@ struct ContentView: View {
             .contentShape(Rectangle())
             .onTapGesture {
                 dismissKeyboard()
-                cycleCharacter()
+                if canSwitch { switcherOpen.toggle() }
             }
             .onLongPressGesture(minimumDuration: 0.4) {
                 dismissKeyboard()
+                switcherOpen = false
                 if phoneOpen { phoneOpen = false }   // 会话列表在小屋那层的栈上，先收手机
                 navPath.append(DrawerPage.conversations)
             }
@@ -1734,4 +1761,45 @@ struct ContentView: View {
 
 #Preview {
     ContentView()
+}
+
+/// 切角色下拉（10-09）：纯文字一列名字，和长按菜单同一套深色浮层。
+/// 当前角色那行垫一层浅底，别的会话有未读就在名字后面点个小圆点——不放头像/图标/状态小字。
+private struct CharSwitcherMenu: View {
+    struct Row: Identifiable {
+        let id: String
+        let name: String
+        let unread: Bool
+    }
+    let items: [Row]
+    let currentID: String
+    let onPick: (String) -> Void
+
+    var body: some View {
+        VStack(spacing: 2) {
+            ForEach(items) { r in
+                Button { onPick(r.id) } label: {
+                    HStack(spacing: 6) {
+                        Text(r.name)
+                            .font(.system(size: 15, weight: r.id == currentID ? .semibold : .regular))
+                            .lineLimit(1)
+                        if r.unread {
+                            Circle().fill(.white).frame(width: 6, height: 6)
+                        }
+                    }
+                    .foregroundStyle(.white)
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 40)
+                    .background(r.id == currentID ? Color.white.opacity(0.12) : .clear,
+                                in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(4)
+        .frame(width: 168)
+        .background(Color(hex: 0x1C1C1E), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .shadow(color: .black.opacity(0.18), radius: 10, y: 4)
+    }
 }

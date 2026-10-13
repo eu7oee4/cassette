@@ -2,7 +2,7 @@ import SwiftUI
 
 /// 底部输入栏：➕(附件) + 笑脸(表情包)按钮 + 文字输入框 + 发送按钮。
 /// 生成中不禁用（09-05）：想说就说，消息进 app 侧 outbox 排队串行发——
-/// 「正在生成」的反馈归 ThinkingNoteRow 三个点小字，不归这排按钮。
+/// 「正在生成」的反馈归 TypingBubbleRow 三个点气泡，不归这排按钮。
 struct InputBar: View {
     @Binding var text: String
     var stickersActive: Bool = false  // 表情面板是否已展开，用来高亮笑脸按钮

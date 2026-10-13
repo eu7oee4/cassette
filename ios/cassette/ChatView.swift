@@ -6,9 +6,7 @@ struct ChatView: View {
     /// 这些气泡属于**哪个角色**的会话。头像靠它取（ProfileStore 里没有「当前是谁」，
     /// 见那边的注释）——身份跟着数据一起传下来，不去问一个可变的全局。
     let charID: String
-    /// 角色显示名：「正在思考…」小字要念出名字（§3.4：`🐾 cassette 正在思考…`）。
-    var charName: String = ""
-    var isWaiting: Bool = false   // 等待对方回复中：底部显示「正在思考…」呼吸小字
+    var isWaiting: Bool = false   // 等待对方回复中：底部显示三个点的输入气泡
 
     var onEdit: (ChatMessage) -> Void = { _ in }   // 时间戳旁小按钮：进编辑弹窗
     var onDelete: (ChatMessage) -> Void = { _ in } // 长按气泡：弹删除确认
@@ -41,8 +39,10 @@ struct ChatView: View {
                 // 它在列表最底端，滚动/离底期间跟着 isWaiting 插进拔出＝滚动中动布局，
                 // 正是 contentSize 污染的老病根（流式 text_break 会反复翻 isWaiting）。
                 if shownIsWaiting {
-                    ThinkingNoteRow(charID: charID, charName: charName)
-                        .padding(.top, 14)
+                    // 接着 TA 上一个气泡就按连发排（紧间距、不挂头像），否则按换人排
+                    let cont = typingContinuesRun
+                    TypingBubbleRow(charID: charID, showAvatar: !cont)
+                        .padding(.top, cont ? 3 : 14)
                         .flippedUpsideDown()
                         .transition(.opacity)
                 }
@@ -440,6 +440,21 @@ struct ChatView: View {
     /// 展示行 + 排版信息一次算完（别在 ForEach 里逐行回头查——长记录会变 O(n²)）。
     /// 规则：距上一行 >5 分钟出居中时间；同一发送者连发（中间没夹小字/系统行/时间）
     /// 贴紧 3pt，否则 14pt；TA 的头像只挂在连发的第一条上。
+    /// 输入气泡算不算 TA 上一串的延续：最后一行是 TA 的气泡、且离现在不到 5 分钟
+    /// （超了真回复会带居中时间 + 头像，输入气泡提前排成一样，冒字时不跳）。
+    private var typingContinuesRun: Bool {
+        guard let last = displayRows.last else { return false }
+        switch last {
+        case .single(let m):
+            return m.sender == .other && !Self.isVisuallyEmpty(m)
+                && !(m.isSystem || m.isMemoryNote || m.isBrowseNote)
+                && Date().timeIntervalSince(m.timestamp) <= 300
+        case .imageStack(let ms):
+            return ms[0].sender == .other
+                && Date().timeIntervalSince(ms[ms.count - 1].timestamp) <= 300
+        }
+    }
+
     private var displayEntries: [DisplayEntry] {
         var out: [DisplayEntry] = []
         var prevTime: Date? = nil
@@ -615,25 +630,48 @@ private struct NoteRow: View {
     }
 }
 
-/// 「正在思考…」呼吸小字（§3.4 第 1 条）：取代旧的头像+三跳点气泡。
-/// 模型还在生成、下一句还没跟上来时亮着，柔和地隐隐灭灭——呼吸感，不粗暴闪。
-private struct ThinkingNoteRow: View {
+/// 输入中气泡（10-12）：TA 下一个气泡的位置先放一个灰气泡，三个点依次起伏——
+/// 不念名字、不挂 logo（顶栏已经写着是谁）。同色同圆角，冒字时原地换成真气泡。
+private struct TypingBubbleRow: View {
+    @Environment(\.colorScheme) private var scheme
     let charID: String
-    let charName: String
-    @State private var dim = false
+    let showAvatar: Bool
+
     var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 5) {
-            CharLogo(senderID: charID)
-            Text("\(charName.isEmpty ? "cassette" : charName) 正在思考…")
+        HStack(alignment: .top, spacing: 8) {
+            if showAvatar {
+                AvatarView(sender: .other, charID: charID)
+            } else {
+                Color.clear.frame(width: 34, height: 1)
+            }
+            TypingDots()
+                .padding(.horizontal, 14)
+                .frame(height: 38)
+                .background(RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .fill(ChatPalette.current(scheme).bubbleAI))
+            Spacer(minLength: 0)
         }
-        .font(.caption)
-        .foregroundStyle(Color.noteGray)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.leading, 4)
-        .padding(.vertical, 2)
-        .opacity(dim ? 0.3 : 0.95)
-        .animation(.easeInOut(duration: 1.5).repeatForever(autoreverses: true), value: dim)
-        .onAppear { dim = true }
+    }
+}
+
+/// 三个点一波一波往上走：每个点错开 0.2s，相位驱动大小和深浅。
+private struct TypingDots: View {
+    var body: some View {
+        TimelineView(.animation) { ctx in
+            let t = ctx.date.timeIntervalSinceReferenceDate
+            HStack(spacing: 5) {
+                ForEach(0..<3, id: \.self) { i in
+                    // 1.2s 一个周期；每个点只在自己那一段亮起，其余时间歇着
+                    let phase = (t / 1.2 - Double(i) * 0.18).truncatingRemainder(dividingBy: 1)
+                    let k = phase < 0.5 ? sin(phase * 2 * .pi) : 0
+                    Circle()
+                        .fill(Color.secondary)
+                        .frame(width: 7, height: 7)
+                        .opacity(0.35 + 0.5 * max(0, k))
+                        .offset(y: -2.5 * max(0, k))
+                }
+            }
+        }
     }
 }
 
@@ -791,12 +829,12 @@ private struct MessageRow: View {
     private func menuItems(_ copyText: String?) -> [BubbleMenuItem] {
         var out: [BubbleMenuItem] = []
         if let t = copyText {
-            out.append(BubbleMenuItem(title: "复制", icon: "doc.on.doc") { UIPasteboard.general.string = t })
-            out.append(BubbleMenuItem(title: "选择", icon: "text.cursor") { onSelectText(t) })
-            out.append(BubbleMenuItem(title: "编辑", icon: "pencil") { onEdit(message) })
+            out.append(BubbleMenuItem(title: "复制") { UIPasteboard.general.string = t })
+            out.append(BubbleMenuItem(title: "选择") { onSelectText(t) })
+            out.append(BubbleMenuItem(title: "编辑") { onEdit(message) })
         }
         // 删除是整条消息（一条消息可能拆成好几个气泡，存储单位是消息）
-        out.append(BubbleMenuItem(title: "删除", icon: "trash", destructive: true) { onDelete(message) })
+        out.append(BubbleMenuItem(title: "删除", destructive: true) { onDelete(message) })
         return out
     }
 
@@ -946,7 +984,6 @@ struct BubbleRef: Equatable {
 
 private struct BubbleMenuItem: Identifiable {
     let title: String
-    let icon: String
     var destructive = false
     let action: () -> Void
     var id: String { title }
@@ -1030,8 +1067,8 @@ private struct BubbleMenuBar: View {
     let items: [BubbleMenuItem]
     let onDismiss: () -> Void
 
-    static let itemWidth: CGFloat = 54
-    static let height: CGFloat = 52
+    static let itemWidth: CGFloat = 50
+    static let height: CGFloat = 38
     static let hPad: CGFloat = 4
     /// 尺寸是定死的（每项等宽），浮层摆位直接算，不用量。
     static func size(count: Int) -> CGSize {
@@ -1045,21 +1082,17 @@ private struct BubbleMenuBar: View {
                     onDismiss()
                     item.action()
                 } label: {
-                    VStack(spacing: 4) {
-                        Image(systemName: item.icon)
-                            .font(.system(size: 16, weight: .medium))
-                        Text(item.title)
-                            .font(.system(size: 11, weight: .medium))
-                    }
-                    .foregroundStyle(item.destructive ? Color(hex: 0xFF6B60) : .white)
-                    .frame(width: Self.itemWidth, height: Self.height)
-                    .contentShape(Rectangle())
+                    Text(item.title)
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundStyle(item.destructive ? Color(hex: 0xFF6B60) : .white)
+                        .frame(width: Self.itemWidth, height: Self.height)
+                        .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
             }
         }
         .padding(.horizontal, Self.hPad)
-        .background(Color(hex: 0x1C1C1E), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .background(Color(hex: 0x1C1C1E), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
         .shadow(color: .black.opacity(0.18), radius: 10, y: 4)
     }
 }

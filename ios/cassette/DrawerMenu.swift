@@ -51,17 +51,12 @@ struct DrawerPanel: View {
         VStack(alignment: .leading, spacing: 0) {
             // 顶部放 TA 的名字——这是 TA 的空间，不是功能列表的标题。
             // 下沉一段（眠眠真机反馈：贴着状态栏太高），大约落在原第二行菜单的位置。
-            // 可点：切到下一个角色的菜单（多角色循环）。
+            // 切角色统一走聊天页顶栏的下拉，这里只显示名字。
             Button { onTapName?() } label: {
                 HStack(spacing: 7) {
                     Text(agentName)
                         .font(.title3.bold())
                         .foregroundStyle(.primary)
-                    if onTapName != nil {
-                        Image(systemName: "arrow.2.squarepath")
-                            .font(.caption.weight(.semibold))
-                            .foregroundStyle(.secondary)
-                    }
                 }
                 .contentShape(Rectangle())
             }

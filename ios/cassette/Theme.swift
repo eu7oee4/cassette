@@ -169,7 +169,7 @@ extension Color {
     /// chatInk 实底上的字/图标色。
     static let onChatInk = Color(uiColor: .systemBackground)
 
-    /// 小字提醒/「正在思考」/系统消息的固定灰（§3.4/§3.9）：不随深浅模式换值——
+    /// 小字提醒/系统消息的固定灰（§3.4/§3.9）：不随深浅模式换值——
     /// 它直接坐在背景上，要在浅深两种背景和自定义背景图（蒙版兜底）上都读得清。
     /// 机主 09-01 拍定 #828282（别用 .secondary——那会跟着系统漂）。
     static let noteGray = Color(hex: 0x828282)
