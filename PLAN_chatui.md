@@ -738,3 +738,42 @@ hold/grow/trace/I/webpage_write/code_start/task_run/game_start/mail_send。
 - **待验**（装新包）：A 生成中切到 B 再切回 → 半截气泡还在长、B 里什么都没多；A 生成中在 B 发一条 →
   排队、A 说完后 B 那条才发、回复进 B；A 生成中在 B 看到的三个点不亮；
   Mac 睡眠时发一条 → 2 分钟内三个点转成对账提示而不是锁 10 分钟。
+
+## 13. 复盘：模拟器吞了五天醒来消息（2026-10-13）
+
+**现象**：Cassius 10-13 15:17 醒来，手机只收到 Bark，app 气泡没上屏。一查，10-09 起
+他醒来的 5 条全没到手机（手机最后一次 ack 是 10-08）。
+
+**定位**（机主报的现象，链路是我查的；以下「实证」= 日志/文件里看到的，「读码」= 读代码推的）
+- 实证：15:17:10 outbox 条目 `a9cd7539f7fc` char_id=cass 正常入队；15:17:56 `POST /pending/ack`
+  来自 **127.0.0.1**（手机走 Tailscale 100.103.75.38）；Mac 上周一中午起开着的模拟器
+  cassette 进程（停在小卡页轮询）；那条消息在模拟器 `conversations/cass/chat_history.json` 里。
+- 实证：全日志 ack 来源 127.0.0.1 共 7 次，10-09 之后的 5 次正好对上那 5 条。
+
+**根因：三件事同时成立**
+1. outbox 一条只有一个全局 `delivered` 标记（v1 97ae3f9 起就是这样，当时只有一台手机）；
+2. 有第二个客户端在轮询同一个后端（模拟器 baseURL=127.0.0.1，同一把 auth key）；
+3. 第二个客户端没人看——它领走就写进自己本地文件，后端认为「送达了」，谁都不报错。
+Bark 走后端直推不经 outbox，所以「推送到了、气泡没有」，看起来像 app 渲染问题。
+难触发程度：中——只在开发期模拟器长开时出，但一出就是静默、持续、每条都丢。
+
+**归类**：「**多个消费者共用一个『已消费』标记 = 谁先到谁拿走，其余的静默缺失**」。
+跟 [[cassette-layer-ok-bug-class]] 同族：ack 成功 ≠ 送到了**该送的那个人**。
+
+**规避规则**
+1. 被多端轮询的「待领取」队列，消费状态按消费者记（acked_by），不用单个布尔。
+2. 消费者身份必须由客户端显式带（X-Device），别用 IP 等推断；缺失时归一个具名桶（legacy），不静默当「所有人」。
+3. 新消费者第一次露面时登记 first_seen，只补它露面之后的条目——不然按设备拆分会把历史整批重放（PR 系统行不去重）。
+4. 「送达」的日志/指标要带上是谁领的；今天能定位全靠 uvicorn access log 里的来源 IP。
+
+**扫同类**（读码）：后端还有 `prs.take_app_notices`（app.py:992）、`prs.take_events`
+（pipeline.py:874）、`mail_bridge.consume_wake_pending`（wake.py:632）三个「取走即消失」的队列，
+消费者都是后端进程内单一调用点，不存在多端抢——不修。`/questions/pending`、`/permits/pending`
+只读列表、靠作答收卡，不同类。git log 翻 outbox/ack：第一次犯，前提从 v1 带下来没人清算过。
+
+**修法**：state_store.outbox_pending/outbox_ack 按设备记（`acked_by` + `state/outbox_devices.json`
+的 first_seen），`delivered` 保留成「至少一台领过」给 `_stale_depth` 和 7 天清理用；
+app.py 两个端点收 `X-Device` 头；iOS `ChatService.authedRequest` 统一带 `X-Device`
+（UserDefaults 里生成一次的 UUID）。旧包不带头＝legacy 一台，所以**只升后端**时，新包模拟器
+和旧包手机已经互不影响；两边都是旧包才会继续抢。单测 tests/test_outbox_devices.py 5 条；
+模拟器编译过；真机未验。补救：那 5 条手工改回 delivered=false 让手机重领（app 按同文字同秒去重）。

@@ -976,10 +976,11 @@ class AckIn(BaseModel):
 
 
 @app.get("/pending")
-def get_pending(x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
+def get_pending(x_auth: Optional[str] = Header(default=None, alias="X-Auth"),
+                x_device: Optional[str] = Header(default=None, alias="X-Device")):
     verify_auth(x_auth)
     _drain_pr_notices()
-    return {"items": state_store.outbox_pending()}
+    return {"items": state_store.outbox_pending(x_device)}
 
 
 def _drain_pr_notices() -> None:
@@ -999,9 +1000,10 @@ def _drain_pr_notices() -> None:
 
 
 @app.post("/pending/ack")
-def post_pending_ack(body: AckIn, x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
+def post_pending_ack(body: AckIn, x_auth: Optional[str] = Header(default=None, alias="X-Auth"),
+                     x_device: Optional[str] = Header(default=None, alias="X-Device")):
     verify_auth(x_auth)
-    state_store.outbox_ack(body.ids)
+    state_store.outbox_ack(body.ids, x_device)
     return {"ok": True}
 
 

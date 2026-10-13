@@ -574,6 +574,16 @@ struct ChatService {
 
     // MARK: - 内部请求工具
 
+    /// 这台设备的 id（X-Device）：后端 outbox 按设备记 ack，模拟器和真机各领各的
+    /// （10-13：模拟器开着时把醒来消息抢先 ack 掉，手机只剩 Bark）。装一次生成一次。
+    static let deviceID: String = {
+        let key = "cassette.deviceID"
+        if let id = UserDefaults.standard.string(forKey: key) { return id }
+        let id = UUID().uuidString
+        UserDefaults.standard.set(id, forKey: key)
+        return id
+    }()
+
     // internal：MemoryPage 等功能页的服务扩展也走这两个（统一鉴权/错误翻译，别另起一套）
     // 统一追加当前角色（?char=）：设置/心流/记忆/插件这些角色态端点一处全覆盖；
     // 全局端点（/pending /code/* 等）后端不声明该参数、FastAPI 直接忽略，无害。
@@ -591,6 +601,7 @@ struct ChatService {
         var req = URLRequest(url: url)
         req.httpMethod = method
         req.setValue(BackendConfig.authKey, forHTTPHeaderField: "X-Auth")
+        req.setValue(Self.deviceID, forHTTPHeaderField: "X-Device")
         req.timeoutInterval = timeout
         if let jsonBody {
             req.setValue("application/json", forHTTPHeaderField: "Content-Type")
