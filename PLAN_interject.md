@@ -80,6 +80,12 @@ sdk 聊天 session 生产上跑的也是 2.1.251，跟这次探针同版。）
 【实证，部分】线上 cass 的 78 次重铸里，大头是「第 0 条对不上（窗口里是 assistant…）」，形状吻合「窗口比账多一条 assistant、整体错位」；
 最近一段约每十轮一次，跟「先说一句、再调工具、再说」的轮出现频率量级相当。**但还没逐条对上**——P1 第一步就是核这个。
 
+**10-29 晚复审补**：当前 nohup.out（09-24 重启起）里 cass 共 170 次重铸：109 次「静默间隙+压力」（轮间隙重铸，
+不是判脏）、49 次「第 N 条对不上…这条被编辑或删过」、10 次「session 没开」、2 次硬阈。判脏那 49 次里除了多段
+回复，还混着另一类：**泵开着时 tick 点评与用户消息的 ts 交错**（PLAN_gamechat §2.2 第 3 条：app 按 ts 插位是
+[U, tick]，账按轮尾追加是 [tick, U]），形状同样是「第 0 条对不上（窗口里是 assistant…）」。P1 核对时两类分开数，
+一起修。
+
 插话会把一轮回复**一定**切成至少两段（插话前 / 插话后），所以账必须先能按气泡粒度记，否则插话上线就等于每次插话后必重铸。
 
 **10-29 补**：这条也是 PLAN_gamechat（游戏中消息改走 `/chat/stream`）的硬前置——游戏里他回你几乎每轮都带
@@ -103,6 +109,10 @@ sdk 聊天 session 生产上跑的也是 2.1.251，跟这次探针同版。）
 - **路由**：新来的 chat 请求，若同角色**当前在飞的是 chat 轮**（泵开着时由机主消息引起的 chat 轮也算，§0）→ 不进
   `handle.queue`，标成 `Interject`，直接 `client.query()` 写进同一个 session，挂进 `handle.meta["inflight"].pending`。
   在飞的是醒来轮 / 泵 tick 轮 / 巩固轮 → 照旧排队。
+  - **client 够不着**（10-29 复审补）：`client` 是 `chat_loop.run()` 的局部变量（`chat_loop.py:1466`），`stream_turn`
+    只拿得到 handle，`LoopHandle`（`session_mgr.py:53`）没有暴露它的字段。`run()` 起来时往 `handle.meta["interject"]`
+    挂一个闭包（`async (text) -> None`，内部 `client.query`），`_open_session` 换 client 时闭包跟着换；
+    `handle.reopening` 为真（正在重铸）或闭包不在 → 退回排队，别打到一个正在 disconnect 的 client 上。
 - **插话原文一个字都不加**：PLAN_toolmount 会往「新起的一轮」注入前补文字（游戏节奏补注 §4、MCP 缺席告知 §5.1），
   那个 helper **不许**包 `Interject` 的 `client.query`——下面的吸收判定按原文配 `queued_command`，前面多一个字就配不上，
   会被误判成没吸收。插话要带时间头的话（P0-a 决定），把它算进「原文」本身、配对时用同一个字符串。
@@ -201,4 +211,5 @@ transcript 里「附件形状」的插话在重铸后变成普通 user 轮——
 | 3 | pending 不铸 vs 配置变了的重铸 | 只在无在飞轮、pending 空时铸 | §4.2 | toolmount §5.2 |
 | 4 | 读流另起的一轮 | 工具接触记账覆盖它 | §4.2 | toolmount §6 |
 | 5 | 游戏中消息改走 chat 路 | P1 先行；泵开着的 chat 轮纳入 v1 插话 | §0、§3 | PLAN_gamechat |
-| 6 | 都靠 CLI 内部行为 | 升级前必跑清单共用 | §6 | toolmount §8 |
+| 6 | 都靠 CLI 内部行为 | 升级前必跑清单共用；升 SDK 是合排第 0 步 | §6 | toolmount §8 / §9 |
+| 7 | PLAN_delegate 的醒因 `delegate` | 醒来轮，v1 不插话：在飞 chat 轮时照旧排队 | §0 | PLAN_delegate §3.3 |

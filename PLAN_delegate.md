@@ -38,7 +38,8 @@
 | `claude-fable-5-1`（完整 ID） | **通** | `claude-fable-5-1` |
 
 - Fable：自带 CLI 打一行 `[claude-code:unrecognized_model]`（这版 CLI 还不认识这个 ID），请求照常成功。
-  可能影响 CLI 对它上下文窗口的估计；派活是短 session，影响小。SDK 升级后复测。
+  可能影响 CLI 对它上下文窗口的估计；派活是短 session，影响小。PLAN_toolmount §9 第 0 步升到 CLI 2.1.310
+  后复测——changelog 2.1.257 起 CLI 认识 Fable 5.1 的 ID，这行警告应当消失。
 - Haiku 对一句话系统提示的反应是先「指出系统提示里有冲突的指令」，没照做——能用，但只派最简单的活。
 
 ### 1.2 派活 session（假工作副本 + 进程内桩 + PreToolUse 门，派给 sonnet）
@@ -136,6 +137,8 @@ pr_delegate_cancel(slug: str)
 2. **立刻叫醒他**：`wake_sdk.enqueue_wake(<角色>, "delegate", note=<问题原文>)`——新醒因，口径同邮件那条
    （同一醒因在队里就不重复入队）。**不加 `force`**：派活的问题不急，夜里照醒来轮的规矩收敛 Bark。
    醒来注入里那句「〔PR：派给 sonnet 的 greet-zh 停下来问你：……〕」就是他看到的知觉。
+   他的聊天轮在飞时这条醒来轮照旧排队（PLAN_interject §0：v1 不往醒来轮插话）；泵开着时排在 tick 后面，
+   重开带不带游戏上下文归 PLAN_toolmount §4.1。
 3. **他自己决定**（醒来轮里，两条路都是现成的）：
    - 能答 → 调 `pr_delegate_reply(slug, answer)`；
    - 答不了、要机主拍板 → 在〔〕外写一句发到机主手机上（醒来轮〔〕外的话本来就投递），例如
@@ -222,6 +225,8 @@ TA 点名「让 fable 做」就用 fable。
 
 - **PLAN_toolmount**：`pr_delegate` 是 prs server 上的新工具——固定菜单要有它的块（§4.2）；延迟模式下它跟 prs 一起被延迟，
   他第一次派活要先取用法（一跳）。派活 session 本身是独立进程，不受延迟 / 重铸 / 探活影响。
-- **PLAN_interject / PLAN_gamechat**：不相交（派活不进他的 session）。
+- **PLAN_interject / PLAN_gamechat**：派活不进他的 session，唯一交界是醒因 `delegate` 按醒来轮排队（§3.3）。
 - **PLAN_prs**：复用工作副本、PR 记录、事件、合并重启；改动点是「每个派活一份副本」和重启前确认。
-- 三份合排顺序（PLAN_toolmount §9）里，本稿独立，可以插在任意位置；建议在第 6 步（固定菜单）之后，菜单块一次写好。
+- 四份合排顺序（PLAN_toolmount §9，10-29 晚重排）：本稿是**第 7 步**（固定菜单之后、延迟之前），菜单块一次写好；
+  §6 的探针三腿并进第 1 步；升 SDK 是第 0 步，§1 的数字之后按新版复测（Fable 那行警告应消失）。
+  `delegate_probe.py` 进 PLAN_toolmount §8 的升级前必跑清单。

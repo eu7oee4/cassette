@@ -35,7 +35,7 @@
 - 泵与聊天同一条 session、同一个队列；chat `Turn` 进来先被处理，泵只在队列空时补「·」
   （`chat_loop.py` 主循环 `wait_for(..., timeout=GAME_TICK_PAUSE)`）——行为同 `PumpNote`，只是回复流式。
 - 判脏容忍 outbox 里没拉走的泵点评：`_stale_depth` 按该角色未拉走条数上浮（泵专用）。
-- app 拉 outbox 按 ts 插位（`ChatStore.insertIntoCurrent`），顺序与账一致。
+- app 拉 outbox 按 ts 插位（`ChatStore.insertIntoCurrent`）——**但顺序不保证与账一致**，见 §2.2 第 3 条。
 - `_wake_gate`：泵开着时 chat 轮放行 `mcp__game__*`——机主说「点左边那个」他这一轮就能点。
 - chat 硬阈强铸在泵开着时本就跳过（`not handle.meta.get("game_pump")`）。
 - 图片走消息里的 image 块（不再落盘让他 Read），时间感走聊天注入，比终端口好。
@@ -48,6 +48,13 @@
 2. **chat 路重铸不带游戏的东西**：判脏走 `_open_session(turn.history)`，没有近 K 张图回填
    （`render_tail` 只在 `_game_reforge` 里传）、没有节奏补注、没有取过的用法。现在只在偶尔判脏时
    缺，改路由后会常态化。→ **前置：PLAN_toolmount §4.1（泵开着时的重开统一收进 `_open_session`）。**
+3. **tick 点评与用户消息的 ts 交错**（10-29 晚复审补，【读码】）：`ChatStore.swift:324` 按 timestamp 插入；
+   用户气泡 ts 是手机发送时刻 t0，消息排队期间一个 tick 点评以 t1 > t0 投递，app 里是 [U, tick]，账里是
+   [tick, U]（PumpNote 路 `chat_loop.py:1689` 用户条在轮头追加、点评在投递时追加；chat 路 `:1933-1937`
+   轮尾追加），下一条必判脏。**今天 PumpNote 路就有**，改走 chat 路一样有，形状混在 PLAN_interject §3 那批
+   「第 0 条对不上」里。修法二选一：① 账里用户条的 ts 用 app 给的 ts，比对前两边都按 ts 稳定排序
+   （`divergence` 比的是序列，排序要同口径）；② 泵收到 chat Turn 时把 outbox 里**未拉走**的点评 ts 抬到
+   max(ts, 用户 ts + 1)。本稿默认 ①，和 P1 同批做。→ **前置：PLAN_interject P1 核对时把这类分开数。**
 
 ## 3. 改动
 
@@ -66,13 +73,22 @@
 - 路由拆开：`sessionMode` 只看 `codeMine`；游戏态（`gameMine && engine == "pump"`）发送走正常的
   `/chat/stream` 那套（流式、`pumpOutbox` 串行、快照、rescue 全复用）。
   `engine != "pump"`（回退路）照旧走 `codeSend`。
-- 终端面板 / ⏸ 的显示条件不动（仍看 `gameMine`），只是不再决定消息走哪条路。
+  - `engine` 只从 `/code/status` 轮询来（sessionMode 下 3s 一次，`ContentView.swift:218`），而
+    `gameSessionActive` 能由聊天回复的 `game_started` 立刻置真（`:1321`）、那时 engine 还是空——
+    **game_started 到手时先拉一次 `/code/status` 再路由**，别让头一两条消息按「空 → 走 codeSend」。
+    新后端有 PumpNote 兜着不出事，§3.3 退役之后那条就是 409。
+- ⏸ 的显示条件不动（`gamePauseVisible`，`ContentView.swift:116`，仍看 `gameMine`），只是不再决定消息
+  走哪条路。（终端面板已退役，`:918`、`:1320` 两处注释是旧话，顺手改。）
+- chat 路的注入（`build_injection`，`chat_loop.py:698-706`）会给每条游戏中消息带待办块、PR 事件行、
+  「距离上一条过了多久」；`_pump_round` 现在都不带。本稿默认**照带**（那是知觉材料，不是档案），玩一局
+  看会不会把他的注意力从画面上拉走，再定要不要泵开着时只留时间头。【待拍 4】
 - 编辑 / 重新生成：终端口时代游戏态整个禁用（「那些轮次有真实副作用」）。走 chat 路后照 chat 的规矩，
   但**泵开着时**仍禁用（重放 = 再点一遍游戏）。【待拍 1】
 - 发送中被游戏点评插队：outbox 点评按 ts 插位，正在流式的气泡不受影响【待验，模拟器】。
 
 ### 3.3 退役（新包跑稳两周后）
 
+- 前提：新包已经做了「game_started 先拉 status」（§3.2），不然那几秒的 codeSend 没人接。
 - 删 `inject_pump_user`、`PumpNote`（及主循环、`_finish_orphans` 里对它的分支）、`/code/send` 的泵分支、
   游戏那条 `_code_window_append`。
 - `/code/send` 本身留给 Code 模式 tmux 回退路，那条路的退役归 PLAN_native。
@@ -98,3 +114,4 @@
 2. 回退路（`STORY_ENGINE=sdk` 独立 loop / tmux）要不要一起退役，让游戏只有 unified 一条路？
    退了的话 §3.1 的 `engine` 字段和 app 的分支都能省掉。
 3. 游戏中发的消息要不要像终端口那样额外加「〔现在是 …〕」——chat 注入已有时间头，本稿默认不加。
+4. chat 注入的待办块 / PR 事件行 / 间隔行，泵开着时照带还是只留时间头（§3.2）——本稿默认照带，玩一局再看。
