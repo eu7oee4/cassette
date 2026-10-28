@@ -38,8 +38,10 @@
 | `claude-fable-5-1`（完整 ID） | **通** | `claude-fable-5-1` |
 
 - Fable：自带 CLI 打一行 `[claude-code:unrecognized_model]`（这版 CLI 还不认识这个 ID），请求照常成功。
-  可能影响 CLI 对它上下文窗口的估计；派活是短 session，影响小。PLAN_toolmount §9 第 0 步升到 CLI 2.1.310
-  后复测——changelog 2.1.257 起 CLI 认识 Fable 5.1 的 ID，这行警告应当消失。
+  可能影响 CLI 对它上下文窗口的估计；派活是短 session，影响小。**10-29 晚升到 2.1.310 复测：警告没了**
+  （`claude -p --model claude-fable-5-1` 干净返回；探针 M 腿四个模型全通，别名现在落到
+  claude-haiku-5-5 / claude-sonnet-5-5 / claude-opus-5-5）。D 腿同形：门拒副本外写、没 Bash 改用 pr_test、
+  7 轮 19.9s。
 - Haiku 对一句话系统提示的反应是先「指出系统提示里有冲突的指令」，没照做——能用，但只派最简单的活。
 
 ### 1.2 派活 session（假工作副本 + 进程内桩 + PreToolUse 门，派给 sonnet）

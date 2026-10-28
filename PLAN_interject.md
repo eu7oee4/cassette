@@ -34,7 +34,9 @@
 
 探针：`server/tools/interject_probe.py`（haiku；SDK 0.2.148，内置 CLI 2.1.251）。
 （10-29 注：SDK 的 `_find_cli` 优先用包里自带的 CLI，PATH 上的 `claude` 2.1.310 只有 `-p` 老路在用——
-sdk 聊天 session 生产上跑的也是 2.1.251，跟这次探针同版。）
+sdk 聊天 session 生产上跑的也是 2.1.251，跟这次探针同版。**10-29 晚第 0 步升到 0.2.174 / 2.1.310 后三个模式
+重跑（仍 haiku）：流里的结局数、transcript 里 `queued_command` / `absorbed_mid_turn` / `enqueue` / `dequeue`
+的形状与下表一字不差；P0-e 换 Opus 的那一腿还欠着。**）
 一个 8 秒的进程内慢工具 + 一轮中途再 `client.query()`。三个模式各跑过，`tool` 跑了两次。
 
 | 场景 | 插话什么时候被看到 | 几个 result |

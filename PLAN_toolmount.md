@@ -27,7 +27,7 @@
 | 游戏节奏 | 常驻系统提示 | game_start 返回值带上 + 重开后首轮补注 |
 | 收尾格式「◆」 | 常驻系统提示 | 删 |
 
-## 1. 实测依据（10-29，agent-sdk 0.2.148 / **SDK 自带 CLI 2.1.251**）
+## 1. 实测依据（10-29，agent-sdk 0.2.148 / **SDK 自带 CLI 2.1.251**；§1.6 是同日晚升到 0.2.174 / 2.1.310 后的复测）
 
 > ⚠️ 两个 CLI：SDK 的 `_find_cli` 先找包里自带的 `_bundled/claude`（2.1.251，`_cli_version.py`），
 > 找不到才用 PATH 上的 `claude`（2.1.310）。所以 sdk 聊天 session 和本稿全部探针跑的都是 **2.1.251**；
@@ -96,6 +96,26 @@ game 2,298、notion 1,692、prs 914、basics 756、mail 701、webpage 480、skil
 - ⚠️ resume 后、首轮之前 `get_context_usage` 不可信（totalTokens=1、isLoaded 全 False）。
 - 铸的位置要照实：测试里 ToolSearch 挂在一句编的话上，Opus 当场指出「那时我只加载了
   schema，并没有真正调用过」——他会对照上下文。
+
+### 1.6 第 0 步复测（10-29 晚，agent-sdk 0.2.174 / CLI 2.1.310，§8 清单八条腿全绿）
+
+| 项 | 2.1.251（上面各节） | 2.1.310 |
+|---|---|---|
+| 体量：全量 / 延迟 合计 | 54,774 / 18,284 | **55,348 / 18,696**（系统提示 13,628；内置工具 5,367 / 4,974+428；MCP 36,343 / 84+36,257） |
+| galatea 开场 pending | 2.4–2.6s | **3.07s**（两次一致）；game +0.2s 同 |
+| 挂载对账 | 全对上 | 全对上（12 个 server） |
+| alwaysLoad 按 server（http / stdio / 进程内 sdk）、单工具 `_meta` | 生效 | 生效（D1 同形：ombre 7,457 + basics 757 + game 2,299 常驻） |
+| 「只挂 ToolSearch 不设环境变量 = 全延迟」 | 是 | 是（D2 同形） |
+| **进程内 sdk server（game）toggle** | **不吃**（off 空操作、on 抛错） | **吃了**：off→disabled、名单 0 行、total −3.2k；on→connected、14 行回来 |
+| **toggle off→on 后 Opus 再调** | 3/3 撞 `safeguards flagged` | **一次通过**（ToolSearch + 调用成功）——只跑了一次，§5.3 的结论先不翻 |
+| 铸进 tool_reference 后 resume 一次传对 | sonnet / opus 都成 | 都成；resume 后首轮前 `isLoaded` 仍报 False（§1.5 那条「首轮前不可信」照旧） |
+| forge_regress A–D2 | 全绿 | 全绿 |
+| 插话三模式 + transcript 形状 | §1 of PLAN_interject | 同形：tool 1 次 `absorbed_mid_turn`、tool2 2 次、text 2 个 result 无吸收 |
+| 派活：四模型 + 门 + 桩 | 全通；Fable 打 `unrecognized_model` | 全通；**Fable 不再警告**；别名现落到 haiku/sonnet/opus 5.5 |
+
+- 数字差在内置工具（+393，新版多了几个内置 schema）和 MCP（+244），结论不变：延迟省的还是 ~36k。
+- D2 两版都测不出「单给一个 server 设 false」：ToolSearch 一挂就是全延迟，galatea 的 false 看不出单独效果。要测 2.1.287 那条语义得在 D1 的形状里给某个 server 设 false（§9 第 1 步补）。
+- toggle 行为变了（game 吃 toggle、Opus 没撞误报）是**新版的新事实**，§5.3「生产不用 toggle」暂不翻：一次通过不够，§9 第 1 步再跑两次 Q5；翻了的话 §5.2「配置变了走重铸」可以改成 toggle，省一次重铸。
 
 ## 2. 延迟 + 常驻
 
@@ -250,6 +270,8 @@ AskUserQuestion 进去就在醒来轮放行了。
 
 §1.3：进程内 server 不吃；stdio/http 能用但 toggle 回来后 Opus 那一轮稳定撞安全误报，
 原因不明。`reconnect_mcp_server` 是否有同样问题**未测**——§9 第 1 条探针先补。
+**2.1.310 复测（§1.6）两条都变了**：game 吃 toggle、Opus 一次没撞误报。只跑一次不翻结论；§9 第 1 步
+再跑两次 Q5 都过，本节改成「可以用 toggle」，§5.2 配置变了那条改走 toggle、不重铸。
 
 ## 6. 重铸留用法
 
@@ -311,8 +333,10 @@ AskUserQuestion 进去就在醒来轮放行了。
 **CLI / agent-sdk 升级前必跑清单**（四份计划共用）：`forge_regress.py` + 上表四个 +
 PLAN_interject 的 `interject_probe.py` + PLAN_delegate 的 `delegate_probe.py`。alwaysLoad 是 `@internal`、
 tool_reference 恢复、`queued_command` / `absorbed_mid_turn` 都是 CLI 内部行为，不是公开契约。
-SDK 升级会连带换掉它自带的 CLI（现 2.1.251）——PATH 上的 `claude` 升级不影响 sdk 路，只影响 `-p` 路。
-升级 = 改 `requirements.txt` 的 `claude-agent-sdk` 钉版（0.2.174 = CLI 2.1.310，10-24 发）。
+SDK 升级会连带换掉它自带的 CLI（10-29 晚起 2.1.310，与 PATH 同版）——PATH 上的 `claude` 升级不影响 sdk 路，只影响 `-p` 路。
+升级 = 改 `requirements.txt` 的 `claude-agent-sdk` 钉版（0.2.174 = CLI 2.1.310，10-24 发；**第 0 步已做，§1.6**）。
+跑法：别在生产 `.venv` 里直接 pip 升——后端在跑，`_bundled/claude` 换掉后新 session 静默用上新版。
+在别处起一个装新版的 venv 跑清单，全绿再改钉版 + 生产 venv 装 + 一条命令重启。
 **2.1.251 → 2.1.310 的 changelog 里跟本稿直接相关、清单必须盯住的**（复审 10-29 读的，2.1.253–256、
 2.1.297–298 没覆盖到）：
 - 2.1.300「transcript 记录每次请求的系统提示和工具」——伪造件没这些字段，resume 怎么对待看 forge_regress；
@@ -335,10 +359,13 @@ SDK 升级会连带换掉它自带的 CLI（现 2.1.251）——PATH 上的 `cla
    施工之前。跑 §8 全部清单，全绿才改 `requirements.txt` 钉版；§1 的 token 数字在新版上重测一遍
    （第 11 步阈值复核要用）。中途不换版。理由见 §8 那张 changelog 清单——2.1.295 / 2.1.307 / 2.1.300 /
    2.1.290 这几条修的正是本稿要碰的地方，在旧版上施工等于先给已修的 bug 做兜底。
+   **10-29 晚已做**：八条腿全绿（§1.6），钉版已改；剩生产 venv 装新版 + 重启上电。
+   新版带来的两条待复核（toggle）并进第 1 步。
 1. **补测**（只动探针，可并行；全部在新版上跑）：
    - toolmount：一条 tool_result 多个 tool_reference；铸一个当前没挂的工具的 tool_reference；
      `reconnect_mcp_server` 之后 Opus 调用会不会撞 §1.3 的误报；Ombre 停掉时开场对账认不认得出；
-     `alwaysLoad: false` 在新版的行为（§1.4）。
+     `alwaysLoad: false` 在新版的行为（§1.4，要在 D1 形状里给某个 server 设 false 才测得出）；
+     §1.3 的 Q5（toggle 回来 Opus 再调）再跑两次、game toggle on/off 之后真调一次工具——都过就翻 §5.3。
    - interject P0（a–e；e 用 Opus 重跑）。
    - delegate §6 的三腿。
 2. **系统提示瘦身第一刀**（toolmount §3.3 第一刀 + §4）：删节奏 / discipline / capsule，节奏改进
@@ -374,7 +401,8 @@ SDK 升级会连带换掉它自带的 CLI（现 2.1.251）——PATH 上的 `cla
 - §6 的 token 预算 8k、容差沿用闹钟的 120s，是否合适。
 - 缺席告知的文案表（每个 server 一句）由机主写还是先给草稿。
 - game 的 14 个工具是否要在泵开着时临时常驻——本稿答「不」：进程内 server 不能 toggle、
-  换 client 只能重铸，§6 已经够用。
+  换 client 只能重铸，§6 已经够用。（2.1.310 上 game 吃 toggle 了，§1.6；若 §5.3 翻案，这条可以重开：
+  game_start 时 toggle on 常驻、game_end 时 toggle off，不用 §6 铸回游戏用法。）
 
 ## 11. 与 PLAN_interject / PLAN_gamechat 的交界
 
