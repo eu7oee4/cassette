@@ -228,8 +228,12 @@ async def phase_static(char_id: str, deferred: bool, cwd: str) -> None:
 
 
 async def ask(client, prompt: str) -> dict:
+    """一问一答。除了调用列表和正文，还把 ResultMessage 的 subtype / is_error / result
+    带回来——§1.3 那种「API Error: ... safeguards flagged」就落在这几个字段里
+    （2.1.310 实测：is_error=True、subtype=error_during_execution、result 是原话）。"""
     await client.query(prompt)
     uses, text, usage = [], [], None
+    res: dict = {}
     async for m in client.receive_response():
         if isinstance(m, AssistantMessage):
             for b in m.content:
@@ -239,7 +243,40 @@ async def ask(client, prompt: str) -> dict:
                     text.append(b.text)
         elif isinstance(m, ResultMessage):
             usage = m.usage
-    return {"tool_uses": uses, "text": "".join(text).strip(), "usage": usage}
+            res = {"subtype": m.subtype, "is_error": m.is_error,
+                   "result": (m.result or "")[:300], "session_id": m.session_id}
+    joined = "".join(text).strip()
+    flagged = ("safeguards" in joined) or ("safeguards" in (res.get("result") or ""))
+    return {"tool_uses": uses, "text": joined, "usage": usage, "result": res,
+            "api_error": bool(res.get("is_error")) or joined.startswith("API Error")
+            or flagged}
+
+
+def transcript_api_tools(cwd: str, session_id: str) -> list[dict]:
+    """2.1.310 的 transcript 里每次请求都记 `api-request-shape`（发给 API 的 system +
+    tools 原文）。按请求顺序返回每条的工具名单，mcp 工具带 input_schema 的 properties
+    ——这是「schema 到底在不在模型眼前」的直接证据，比 get_context_usage 硬。"""
+    import forge
+    p = forge.transcript_path(cwd, session_id)
+    out: list[dict] = []
+    if not p.exists():
+        return out
+    for ln in p.read_text("utf-8").splitlines():
+        try:
+            ev = json.loads(ln)
+        except Exception:
+            continue
+        if ev.get("type") != "api-request-shape":
+            continue
+        tools = (ev.get("shape") or {}).get("tools") or []
+        row = {"ts": ev.get("timestamp"), "n_tools": len(tools), "mcp": {}}
+        for t in tools:
+            n = t.get("name", "")
+            if n.startswith("mcp__"):
+                props = list(((t.get("input_schema") or {}).get("properties") or {}).keys())
+                row["mcp"][n] = props
+        out.append(row)
+    return out
 
 
 async def phase_ask(char_id: str, cwd: str) -> None:

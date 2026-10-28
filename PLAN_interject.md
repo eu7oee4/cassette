@@ -26,7 +26,8 @@
 `/chat/stream`，成为普通 chat 轮；这种轮几乎都是「说一句、点一下、看图、再说」，工具边界最多，
 正是插话最有用的地方（「别点那个！」在下一次点之前就被看到）。改路由之前游戏中的消息走终端口
 `/code/send` → `PumpNote`，不进本计划的路由。
-- 带图片 / 文件的插话：v1 照旧排队，等 §5 P0-b 验完再说。
+- 带图片的插话：**v1 也进**（P0-b 10-29 晚验通：照样 mid-turn 吸收、图到模型眼前、按文字配对，§1.1）；
+  带文件块的没验，v1 照旧排队。
 
 ---
 
@@ -56,7 +57,21 @@ sdk 聊天 session 生产上跑的也是 2.1.251，跟这次探针同版。**10-
   `{"type":"queue-operation","operation":"remove","reason":"absorbed_mid_turn"}`；
 - **没被吃进去**：`dequeue` 之后就是一条普通的 `{"type":"user", ...}`（新的 promptId），即那「第二轮」。
 
-也就是说：被吃进当前轮的插话在模型历史里**不是一条 user 消息，是一个附件**；模型实际看到的渲染原文【待验，§5 P0-a】。
+也就是说：被吃进当前轮的插话在模型历史里**不是一条 user 消息，是一个附件**；模型实际看到的渲染原文见 §1.1。
+
+### 1.1 P0 a–e 结果（10-29 晚，SDK 0.2.174 / CLI 2.1.310；探针 `interject_probe.py` 加了 verify / image / toollist 模式和 `--model / --hooks / --watch`）
+
+| 腿 | 结论 |
+|---|---|
+| a 渲染原文 | 纯文字插话发给 API 时是一条 **`role=system`** 消息：固定英文包装「The user sent a new message while you were working:\n<原文>\n\nThis is how Claude Code surfaces messages the user sends mid-turn … Address the message above as you continue this turn.」，**原文一字不改、没有任何时间**；同一个 text 块里还会拼别的 system 附件（探针环境里是晚挂的工具清单）。两条插话各自一段包装、顺序拼在同一块里。模型逐字复述得出，但**分不出 role**（自以为是 user 消息）。 |
+| b 带图 | 照样 mid-turn 吸收、图完整到眼前（两次都答「纯红色」）；但渲染变成**挂在 tool_result 那条 user 消息末尾**的 text + image 块，不再是 system 消息。决定 role 的是「有没有非文字块」。`remove.content` 只记文字，图不在配对内容里。 |
+| c hook | `UserPromptSubmit` **两种结局都触发**，每次 `query()` 一次；靠 `hook_input.prompt_id` 分辨：被吸收 → 等于在飞轮的 prompt_id；另起一轮 → 新的。触发点在工具边界，tool_result 到流里后 2–3ms，**先于任何 transcript 行落盘**。`hook_input` 里 `prompt` 是纯文字（图不在）。 |
+| d 写盘时机 | 流里 tool_result 到达那一刻读 transcript **读不到** `queued_command`（连那条 tool_result 自己的 user 行都没落）；user 行 / queued_command / remove / blob / api-request 五行在流事件后 **~105–120ms** 一起刷盘；到下一条 AssistantMessage（≥1.85s）早齐了。`queued_command` 的 timestamp 是 enqueue 时刻，吸收时刻看 `remove` 的。 |
+| e opus | 结局数、吸收点、transcript 形状与 haiku 一致。差别只在 opus 工具调用串行（一次一个）：第一个查完就改口，「橘子」根本没查；haiku 并行两个才有「已发出的照跑」。 |
+
+另两条新事实：
+- **插话若在 CLI 还没 dequeue 首条时就 enqueue**（client 启动慢、两条几乎同时发），两条被**拼成一条 user 消息**（`\n` 连接、同 promptId、一个 user 行），无 queued_command、无 absorbed。「在飞」必须在 CLI 真正 dequeue 首条（init / hook#1 / user 行）之后才算数。
+- 2.1.310 的 transcript 多了 `api-request` / `api-request-blob` / `prompt_snapshot` / `deferred_tools_delta` 行；`queued_command` 多了 `source_uuid` / `delivery_id` / `rendered` / `renderedRole`。
 
 ---
 
@@ -118,11 +133,19 @@ sdk 聊天 session 生产上跑的也是 2.1.251，跟这次探针同版。**10-
 - **插话原文一个字都不加**：PLAN_toolmount 会往「新起的一轮」注入前补文字（游戏节奏补注 §4、MCP 缺席告知 §5.1），
   那个 helper **不许**包 `Interject` 的 `client.query`——下面的吸收判定按原文配 `queued_command`，前面多一个字就配不上，
   会被误判成没吸收。插话要带时间头的话（P0-a 决定），把它算进「原文」本身、配对时用同一个字符串。
-- **吸收判定**：主证据 = transcript 的 `queue-operation remove reason=absorbed_mid_turn`（按原文配对，原文要带一个隐形的 rid 标记防重名——
-  注意「提及即使用」那一类，标记不能是模型会复述的文字，【待拍】放 promptId 还是零宽字符）。
-  时机：流里每来一条 tool_result `UserMessage`，查 transcript 里 `parentUuid` = 它的 `queued_command`；命中 → 在这个点之后的
-  第一段文字前，往**原流**发 `interject_point{rid}`，并给插话流发 `merged`。
-  备选信号【待验，P0-c】：`UserPromptSubmit` hook 是否只对「另起一轮」那种触发——若是，可以不读 transcript。
+  P0-a 定了：CLI 自己不加时间、但加一层英文 system 口吻包装（§1.1）；配对原文 = 传给 `client.query()` 的那串
+  （`remove.content` / `queued_command.prompt` / hook 的 `prompt` 三处同一串）。时间头要不要进原文【待拍 6】。
+- **吸收判定**（10-29 晚按 P0-c/d 改写）：**主信号 = `UserPromptSubmit` hook**（options.hooks 挂一个，每次 `query()`
+  触发一次）：hook 到了、`prompt_id` **等于在飞轮的** → 被吸收，在这个点之后的第一段文字前往**原流**发 `interject_point{rid}`，
+  给插话流发 `merged`；`prompt_id` 是新的 → 没被吸收，CLI 另起了一轮，这一轮归插话自己的流。在飞轮的 prompt_id 从它自己的
+  hook#1 拿。hook 在工具边界触发、先于 transcript 落盘 ~110ms，不用读文件、不用猜 parentUuid；按原文配对也仍然成立
+  （hook 的 `prompt` 就是原文）。
+  **不要在 tool_result 到流里那一刻读 transcript**：那时什么都还没落盘（P0-d）。transcript 的 `remove reason=absorbed_mid_turn`
+  只当事后对账 / 单测罐头用。
+  原文防重名：同一串文字两条插话时 hook 只给 `prompt` 分不出哪条——**按入队顺序配**（CLI 按 FIFO 吸收，P0 tool2 实证），不加标记；
+  零宽字符 / promptId 标记那条待拍撤销。
+  **「在飞」的起点**：在飞轮的 hook#1 到了（或流里 init 到了）才算在飞；之前就来的第二条会被 CLI 拼进首条（§1.1），
+  那种情况按排队处理（不发 interject，照常等 done）。
 - **轮尾**：`ResultMessage` 到了，`pending` 里还没被吸收的 → 每条对应 CLI 接下来自己起的一轮，**按入队顺序**继续读流，各自产出到
   各自的 `Turn.out`。读完才回到主循环。
 - **死了也要有结局**（[[cassette-wake-gate-bug-class]] 第四例「消费者死了队里的东西没结局」）：在飞轮超时 / 流断 / 报错 →
@@ -163,12 +186,13 @@ transcript 里「附件形状」的插话在重铸后变成普通 user 轮——
 
 ## 5. 施工顺序
 
-**P0 探针补测**（只跑探针、不改产品代码；脚本 `server/tools/interject_probe.py` 扩模式）：
-- a. 被吸收的插话**渲染给模型的原文**是什么（让模型逐字复述附件 / 抓 API 请求）。决定插话的人称和包装要不要像正常注入那样加时间。
-- b. 插话带**图片**时还能不能 mid-turn 吸收、图有没有丢。
-- c. `UserPromptSubmit` / 其他 hook 对两种结局各触发几次——能不能替代读 transcript。
-- d. transcript 写盘时机：`queued_command` 是不是**先于**下一次模型请求落盘（决定 4.2 判定会不会读早了）。
-- e. 用生产同款模型（opus）、同款 CLI 重跑一遍 §1 三个模式，确认不是 haiku 特有。
+**P0 探针补测**（只跑探针、不改产品代码；脚本 `server/tools/interject_probe.py` 扩模式）——**10-29 晚全部跑完，结果在 §1.1**：
+- a. 被吸收的插话**渲染给模型的原文**是什么 → role=system、英文包装、无时间。
+- b. 插话带**图片**时还能不能 mid-turn 吸收、图有没有丢 → 能、没丢，渲染改挂 user 尾巴。
+- c. `UserPromptSubmit` 对两种结局各触发几次——能不能替代读 transcript → 都触发，prompt_id 分辨，**能替代且更好**。
+- d. transcript 写盘时机 → tool_result 到流那一刻读不到，晚 ~110ms；靠 hook 不靠文件。
+- e. 用 opus 重跑三个模式 → 同形；只多一条「opus 串行调工具」的差别。
+- 没验：带文件块的插话。
 
 **P1 账按气泡记**：先拿日志 + 账文件逐条核 §3（那 78 次里有几次是这个原因）；坐实就改 `_turn_events`/轮尾入账为按段记，
 `divergence` 不动，每段带准 ts。测试：多段回复后下一条不判脏。**可以单独上线；10-29 起提前——它是 PLAN_gamechat 的前置。**
@@ -186,7 +210,7 @@ transcript 里「附件形状」的插话在重铸后变成普通 user 轮——
 
 ## 6. 风险
 
-- **`queued_command` / `absorbed_mid_turn` 是 CLI 内部实现，没文档**，随版本可能改。对策：后端启动时自检一次（探针的 `tool` 模式缩成 5 秒版），
+- **`UserPromptSubmit` 的 `prompt_id` 语义、`queued_command` / `absorbed_mid_turn` 都是 CLI 内部实现，没文档**，随版本可能改。对策：后端启动时自检一次（探针的 `tool` 模式缩成 5 秒版），
   形状不对就自动关闸退回排队，并 Bark 一条——别静默。升级 SDK（连带换自带 CLI）前，跟 PLAN_toolmount §8 的
   「升级前必跑清单」一起跑。
 - 插话「被吃进去」只在工具边界发生。他不调工具的长回复（纯聊天大多如此）**插话照样要等他说完**——这是 CLI 的行为，不是我们的限制，产品文案要说清，别承诺「随时打断」。
@@ -200,7 +224,10 @@ transcript 里「附件形状」的插话在重铸后变成普通 user 轮——
 2. 插话气泡位置：**挪到断点**（跟他看到的顺序一致，推荐）还是留在发送位置（跟你发的时刻一致，但账要另记映射）。
 3. 醒来轮在飞时你发消息：v1 照旧排队。要不要也插进去（醒来轮的回复走 outbox，混进你的插话后投递路由要重想）。
 4. 卡片挂起时你发的消息：要不要当成「顺便回答了这张卡」——现在是卡等到超时、插话排在后面。
-5. 吸收配对用的 rid 标记放哪（§4.2）。
+5. ~~吸收配对用的 rid 标记放哪（§4.2）~~ 撤销：hook 按入队顺序配，不加标记。
+6. CLI 给被吸收的插话包的是一层英文、system 口吻的「The user sent a new message while you were working」——和聊天记忆的
+   信感格式（注入文本 = 知觉材料、中文）不一致，而且不带时间。要不要把时间头写进原文（配对串跟着变）；英文包装改不了，
+   能不能在系统提示里一句话告诉他「这种形状的 system 消息就是 TA 中途说的话」。
 
 ---
 

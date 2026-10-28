@@ -20,8 +20,11 @@ def probe_pinned() -> str:
     return os.environ.get("PROBE_SECRET", "PING-?")
 
 
-# 带必填参数、参数名猜不到的工具：测「没取用法直接调」时模型到底有没有 schema
-@mcp.tool()
+# 带必填参数、参数名猜不到的工具：测「没取用法直接调」时模型到底有没有 schema。
+# 单工具级 opt-out（_meta=False）：server 整个 alwaysLoad=true 时这一个仍该延迟
+# （CLI 2.1.285/2.1.287 改的语义，mcp_probe_defer.py D3 用）；server 不设 alwaysLoad 时
+# 默认本来就延迟，对别的探针没影响。
+@mcp.tool(meta={"anthropic/alwaysLoad": False})
 def probe_echo(zq_token_7: str) -> str:
     """探针工具：把参数 zq_token_7 原样加前缀返回。只在被明确要求时调用。"""
     return "ECHO:" + zq_token_7

@@ -75,9 +75,10 @@ game 2,298、notion 1,692、prs 914、basics 756、mail 701、webpage 480、skil
   单给某个 server 设 `false` 做不到。
 - ⚠️ CLI 里这段说明带 `@internal` 标记——**不是公开契约**，升级可能变（§8 探针兜）。
 - ⚠️ **`alwaysLoad` 的语义在 2.1.285 / 2.1.287 改过**（changelog：`alwaysLoad: false` 从「不认」改成
-  「整个 server 延迟」；opt-out 的工具保持延迟）。上一条「单给某个 server 设 false 做不到」**只对 2.1.251
-  成立**；§9 第 0 步升到 2.1.310 后 `mcp_probe_defer.py` 的 D2 要重跑，把「false 生不生效」记进表。
-  本稿设计只用 true，两版都行。
+  「整个 server 延迟」；opt-out 的工具保持延迟）。第 1 步在 2.1.310 上复测（§1.6）：server 级 `false` 仍然看不出
+  独立效果（D4 = D1 逐字节同；不挂 ToolSearch 时 false 也不延迟），上一条「做不到」两版都成立；
+  **生效的 opt-out 是 server `true` + 某个工具 `_meta["anthropic/alwaysLoad"] = false`**（那一个延迟、其余常驻）。
+  本稿设计只用 server 级 true。
 
 ### 1.5 重铸能不能留住用法（`forge_toolref_probe.py`）
 
@@ -94,6 +95,9 @@ game 2,298、notion 1,692、prs 914、basics 756、mail 701、webpage 480、skil
 - 没取用法的延迟工具，模型**只有名字没有参数**；无参工具瞎调能成，有参的必错——
   所以兜底「他自己再取一次」是真兜底（Opus 实测会先去取，不硬猜）。
 - ⚠️ resume 后、首轮之前 `get_context_usage` 不可信（totalTokens=1、isLoaded 全 False）。
+  **2.1.310 改善了一半**（§1.6）：totalTokens 首轮前已是真值、`_meta` 钉住的工具 isLoaded=True、逐工具 tokens 行
+  都在；只有铸进去的 tool_reference 首轮前仍报 isLoaded=False（调用照样一次传对）。§6 的 token 表可以在
+  resume 后直接读，不必等首轮；isLoaded 仍不能当「铸没铸上」的判据。
 - 铸的位置要照实：测试里 ToolSearch 挂在一句编的话上，Opus 当场指出「那时我只加载了
   schema，并没有真正调用过」——他会对照上下文。
 
@@ -106,16 +110,21 @@ game 2,298、notion 1,692、prs 914、basics 756、mail 701、webpage 480、skil
 | 挂载对账 | 全对上 | 全对上（12 个 server） |
 | alwaysLoad 按 server（http / stdio / 进程内 sdk）、单工具 `_meta` | 生效 | 生效（D1 同形：ombre 7,457 + basics 757 + game 2,299 常驻） |
 | 「只挂 ToolSearch 不设环境变量 = 全延迟」 | 是 | 是（D2 同形） |
-| **进程内 sdk server（game）toggle** | **不吃**（off 空操作、on 抛错） | **吃了**：off→disabled、名单 0 行、total −3.2k；on→connected、14 行回来 |
-| **toggle off→on 后 Opus 再调** | 3/3 撞 `safeguards flagged` | **一次通过**（ToolSearch + 调用成功）——只跑了一次，§5.3 的结论先不翻 |
-| 铸进 tool_reference 后 resume 一次传对 | sonnet / opus 都成 | 都成；resume 后首轮前 `isLoaded` 仍报 False（§1.5 那条「首轮前不可信」照旧） |
+| **进程内 sdk server（game）toggle** | **不吃**（off 空操作、on 抛错） | **吃了**：off→disabled、名单 0 行、total −3.2k；on→connected、14 行回来；**on 之后真调 `game_notes_read` 成**（第 1 步复核） |
+| **toggle off→on 后 Opus 再调** | 3/3 撞 `safeguards flagged` | **3/3 不撞**（§1.6 一次 + 第 1 步两次），且 Opus 不重取、直接调——toggle 前后同一个 request shape，已加载集没清 |
+| `reconnect_mcp_server` 之后 Opus 再调 | 未测 | 3/3 不撞；reconnect 对活着的 server 返回 None ~0.35s，已加载集不清 |
+| 铸进 tool_reference 后 resume 一次传对 | sonnet / opus 都成 | 都成；一条 tool_result 多个 tool_reference 也成（§6）；resume 后首轮前 `totalTokens` 已是真值 5,089（不再是 1），`_meta` 钉住的工具 isLoaded=True，只有铸进去的那个首轮前仍 False |
+| Ombre 死端口开场 | 未测 | 首拍即 `failed`（不经 pending），`error='ECONNREFUSED: …'`，**status 里没有 `tools` 键**；`reconnect_mcp_server` **抛** `Exception: ECONNREFUSED`；其余 11 个照常，basics 可调；`get_context_usage` 里 ombre 0 行 |
+| alwaysLoad opt-out | 未测 | server `true` + 单工具 `_meta anthropic/alwaysLoad:false` → 那一个延迟、其余常驻（生效）；server 级 `false` 两版都看不出区别（D4=D1 逐字节同、D5 无效果） |
 | forge_regress A–D2 | 全绿 | 全绿 |
 | 插话三模式 + transcript 形状 | §1 of PLAN_interject | 同形：tool 1 次 `absorbed_mid_turn`、tool2 2 次、text 2 个 result 无吸收 |
 | 派活：四模型 + 门 + 桩 | 全通；Fable 打 `unrecognized_model` | 全通；**Fable 不再警告**；别名现落到 haiku/sonnet/opus 5.5 |
 
 - 数字差在内置工具（+393，新版多了几个内置 schema）和 MCP（+244），结论不变：延迟省的还是 ~36k。
-- D2 两版都测不出「单给一个 server 设 false」：ToolSearch 一挂就是全延迟，galatea 的 false 看不出单独效果。要测 2.1.287 那条语义得在 D1 的形状里给某个 server 设 false（§9 第 1 步补）。
-- toggle 行为变了（game 吃 toggle、Opus 没撞误报）是**新版的新事实**，§5.3「生产不用 toggle」暂不翻：一次通过不够，§9 第 1 步再跑两次 Q5；翻了的话 §5.2「配置变了走重铸」可以改成 toggle，省一次重铸。
+- 「单给一个 server 设 false」**两版都做不到**（第 1 步 D4/D5 实测）：ToolSearch 一挂就是全延迟，不挂就全常驻，server 级 false 没有独立效果。有效的 opt-out 是「server true + 工具 `_meta` false」。
+- galatea 开场 pending 不是稳定值：3.07 / 4.88 / 2.85s 都见过；§5.1 的 10s 上限够。Ombre 死掉时首拍即 failed，等待全在 galatea。
+- **§5.3 翻案**（第 1 步复核满足自定条件）：toggle 在 2.1.310 上可用——stdio / http / 进程内 sdk 都吃，Opus 回来不撞误报、不重取。§5.2「配置变了」改走 toggle，见那节。
+- 2.1.310 transcript 多了 `api-request-shape` / `api-request-blob` / `api-request` 记录（每轮一组，带 version、querySource、shapeHash），发给 API 的原文都在——探针和 §6 的证据以后直接读它。
 
 ## 2. 延迟 + 常驻
 
@@ -245,10 +254,13 @@ AskUserQuestion 进去就在醒来轮放行了。
 
 `_open_session` 里 `connect()` 之后：
 
-1. `get_mcp_status()` 每 0.2s 拍一次直到没有 `pending`，超时 10s（galatea 实测 ~2.6s）。
-2. `failed` 的逐个 `reconnect_mcp_server` 一次，再拍一次。
+1. `get_mcp_status()` 每 0.2s 拍一次直到没有 `pending`，超时 10s（galatea 实测 2.85–4.88s 不稳定；
+   连不上的 server 首拍就是 `failed`，不经过 pending）。
+2. `failed` 的逐个 `reconnect_mcp_server` 一次，再拍一次。**对连不上的 server 它是抛异常**
+   （`Exception: ECONNREFUSED: …`，0.01s），不是返回失败——必须 try/except，异常原话就是错误原话。
 3. 用 status 里每个 server 的 `tools` 与配置全集（§3.1）对账，缺的落
    `handle.meta["absent_tools"]`（按 server 分组 + 错误原话），打日志；缺 Ombre 推 Bark。
+   **`failed` 的 server 没有 `tools` 键**（只有 config/error/name/scope/source/status/transport），按缺键 = 空处理。
 4. 缺席告知：下一轮注入前缀加一句知觉白描（「〔记忆那边这会儿连不上〕」这类，按 server
    一句，文案表写在一处）；`_wake_gate` 对 absent 工具直接 deny 同一句话——不让他调到
    CLI 那层去撞一个不在的工具。ToolSearch 取 absent 工具也在门里拦（看 ToolSearch 的 `query`，
@@ -261,17 +273,20 @@ AskUserQuestion 进去就在醒来轮放行了。
   tick 也拍一次（同一个函数，别写两份）——Ombre 在一局中途掉线不能等到 game_end 才发现：
   - connected → failed：`reconnect_mcp_server`；还不行就进 absent + 下一轮告知。
   - absent 里的恢复了（重连成功）：出 absent + 下一轮告知「连上了」。
-- 插件在 app 里开 / 关：**不 toggle**，给该角色 session 打「配置变了」标记，下一个轮间隙
-  走一次巩固 + 重铸（新配置 → 新菜单 → 新挂载，口径一次对齐）。
-  - 动手条件：没有在飞的轮、PLAN_interject 的 `pending` 为空（它规定 pending 非空不铸）。
-  - **泵开着时推迟到 game_end**，别在一局中间换 client。
+- 插件在 app 里开 / 关（10-29 晚按 §5.3 翻案改写）：
+  - **开 session 时就在 mcp_servers 里的 server**（按 §3.1「配置全集」挂，开关只决定 toggle 态）：
+    开关 = `toggle_mcp_server(name, on/off)`，轮间隙做，不换 client、不重铸。off 之后名单里消失、token 归零，
+    on 之后回来、已加载集不清（§1.6）。菜单按配置渲染不变，关掉的那块本来就不渲染。
+  - **开 session 时不在 mcp_servers 里的**（新装的插件、新配的 Ombre）：toggle 没对象，仍走「配置变了」标记 →
+    下一个轮间隙巩固 + 重铸。动手条件：没有在飞的轮、PLAN_interject 的 `pending` 为空；**泵开着时推迟到 game_end**。
+  - 所以 §3.1 挂载时把「装了但关着」的插件也挂上、随即 toggle off，开关才永远有对象。代价：关着的 server 子进程活着。
 
 ### 5.3 为什么不用 toggle
 
-§1.3：进程内 server 不吃；stdio/http 能用但 toggle 回来后 Opus 那一轮稳定撞安全误报，
-原因不明。`reconnect_mcp_server` 是否有同样问题**未测**——§9 第 1 条探针先补。
-**2.1.310 复测（§1.6）两条都变了**：game 吃 toggle、Opus 一次没撞误报。只跑一次不翻结论；§9 第 1 步
-再跑两次 Q5 都过，本节改成「可以用 toggle」，§5.2 配置变了那条改走 toggle、不重铸。
+**（10-29 晚翻案：2.1.310 上可以用 toggle。）** 原因是 2.1.251 上进程内 server 不吃、stdio/http toggle 回来后
+Opus 稳定撞安全误报（§1.3）。2.1.310 复核：game 吃 toggle 且 on 后真调成；Opus toggle 回来 3/3 不撞、不重取；
+`reconnect_mcp_server` 后 Opus 3/3 不撞（§1.6）。§5.2 已改走 toggle。
+仍不用 toggle 的地方：连不上的 server（toggle 救不了，走 reconnect + 告知）；开 session 时不在配置里的 server。
 
 ## 6. 重铸留用法
 
@@ -306,7 +321,12 @@ AskUserQuestion 进去就在醒来轮放行了。
     - `_merge_alarm_calls` **不改锚规则**（它的「最近一条」正是为两种 ts 方向写的）；只给闹钟留底也补
       `turn_kind` / `turn_ts` 两个字段，有字段的走上面两条，老记录照旧走最近一条。
 - **forge 改动**：tools 槽的 `result` 允许 content 列表（现在一律 `str()`）；digest 照
-  json.dumps 走，确定性不变；带 toolUseResult 字段照真 transcript 补。
+  json.dumps 走，确定性不变；带 toolUseResult 字段照真 transcript 补。第 1 步实测的三条形状（§1.6）：
+  - 一条 tool_result 里放多个 tool_reference，CLI **原样**发给 API，并自己在后面追加
+    `{"type":"text","text":"Tool loaded."}`（真 ToolSearch 的结果也这样；transcript 记录里没这块，**别铸**）。
+  - 引用一个当前没挂的工具：不崩，发请求时 CLI 把那条改写成 text `[Tool references removed - tools no longer available]`。
+    所以「当前配置里没有的不铸」可以放松成「铸了也无害」，但模型会看见那行并顺嘴指出来，还是别铸。
+  - Ombre 掉线时它的工具不在延迟名单里（`get_context_usage` 0 行），铸回的引用走上一条改写路，无害。
 - **兜底**：没铸上的他自己 ToolSearch 再取——菜单头那句 + CLI 的延迟名单都在，
   Opus 实测缺 schema 时会先取不硬猜。代价一跳。
 - 游戏中自然全是游戏工具（2.3k 全进预算），平时是最近聊天用过的那几样。
@@ -328,7 +348,13 @@ AskUserQuestion 进去就在醒来轮放行了。
 | `mcp_probe.py` | 开场 pending 时间线、挂载对账、各部分 token、toggle 名单变化 | `--ask` 时 |
 | `mcp_probe_stdio.py` | 上面几个用的 stdio 探针 server（probe_ping / probe_pinned / probe_echo） | — |
 | `mcp_probe_defer.py` | alwaysLoad 按 server / 按工具、ToolSearch 是延迟开关 | `--ask` 时 |
-| `forge_toolref_probe.py` | 铸进 tool_reference 后 resume 能否一次传对参数 | `--ask` 时 |
+| `forge_toolref_probe.py` | 铸进 tool_reference 后 resume 能否一次传对参数；`--mode single\|multi\|ghost` | `--ask` 时 |
+| `mcp_probe_reconnect.py` | `reconnect_mcp_server` 之后 Opus 调用撞不撞误报、已加载集清不清 | 是 |
+| `mcp_probe_ombre_dead.py` | Ombre 指到死端口时开场 status / reconnect 异常 / 其余 server 对账 | `--ask` 时 |
+| `mcp_probe_toggle.py` | Q5（toggle 回来再调）+ game 进程内 toggle off→on→真调 | 是 |
+
+（`mcp_probe_defer.py` 另有 D3 单工具 opt-out / D4 server false / D5 全量+false，`--only` 选；
+`mcp_probe_stdio.py` 的 probe_echo 常驻带 `_meta anthropic/alwaysLoad:false`。）
 
 **CLI / agent-sdk 升级前必跑清单**（四份计划共用）：`forge_regress.py` + 上表四个 +
 PLAN_interject 的 `interject_probe.py` + PLAN_delegate 的 `delegate_probe.py`。alwaysLoad 是 `@internal`、
@@ -361,7 +387,9 @@ SDK 升级会连带换掉它自带的 CLI（10-29 晚起 2.1.310，与 PATH 同�
    2.1.290 这几条修的正是本稿要碰的地方，在旧版上施工等于先给已修的 bug 做兜底。
    **10-29 晚已做**：八条腿全绿（§1.6），钉版已改；剩生产 venv 装新版 + 重启上电。
    新版带来的两条待复核（toggle）并进第 1 步。
-1. **补测**（只动探针，可并行；全部在新版上跑）：
+1. **补测**（只动探针，可并行；全部在新版上跑）——**10-29 晚三组全部跑完**：toolmount 六条见 §1.6（§5.3 翻案、§5.1/§5.2/§6
+   按实改）、interject P0 见 PLAN_interject §1.1（吸收判定改走 hook）、delegate 三腿见 PLAN_delegate §1.4。报告原件在
+   `docs/probes/2026-10-29-step1/`。
    - toolmount：一条 tool_result 多个 tool_reference；铸一个当前没挂的工具的 tool_reference；
      `reconnect_mcp_server` 之后 Opus 调用会不会撞 §1.3 的误报；Ombre 停掉时开场对账认不认得出；
      `alwaysLoad: false` 在新版的行为（§1.4，要在 D1 形状里给某个 server 设 false 才测得出）；
@@ -400,9 +428,10 @@ SDK 升级会连带换掉它自带的 CLI（10-29 晚起 2.1.310，与 PATH 同�
   本稿按「算配置」写。
 - §6 的 token 预算 8k、容差沿用闹钟的 120s，是否合适。
 - 缺席告知的文案表（每个 server 一句）由机主写还是先给草稿。
-- game 的 14 个工具是否要在泵开着时临时常驻——本稿答「不」：进程内 server 不能 toggle、
-  换 client 只能重铸，§6 已经够用。（2.1.310 上 game 吃 toggle 了，§1.6；若 §5.3 翻案，这条可以重开：
-  game_start 时 toggle on 常驻、game_end 时 toggle off，不用 §6 铸回游戏用法。）
+- game 的 14 个工具是否要在泵开着时临时常驻——原答「不」的理由（进程内 server 不能 toggle）10-29 晚已不成立
+  （§5.3 翻案）。**重开这条，给机主拍**：game 设 `alwaysLoad: true` + 平时 toggle off（0 token）、
+  game_start 时 toggle on（2.3k 常驻、不用取用法、重铸也不丢）、game_end 时 toggle off。好处是 §6 不用管游戏工具，
+  游戏里每次段内重铸后不再多一跳；代价是 toggle 要在轮间隙做（game_start 在轮内调，置旗、下个轮边界 toggle）。
 
 ## 11. 与 PLAN_interject / PLAN_gamechat 的交界
 

@@ -12,6 +12,13 @@ when tool search is enabled.）；单工具认 _meta["anthropic/alwaysLoad"]。
   D2  不设 ENABLE_TOOL_SEARCH（ToolSearch 照挂）；只给 galatea 设 alwaysLoad=false
       ——看能不能「默认全量、只延迟一个 server」。
 --ask：D1 里用 sonnet 问一次，直接调 basics 的 now（不取用法）能不能成。
+
+§9 第 1 步补的两组（10-29 晚，2.1.310；alwaysLoad 语义 2.1.285/2.1.287 改过）：
+  D3  D1 形状 + probe(stdio) 设 alwaysLoad=true，而 probe_echo 带 _meta=false（opt-out）：
+      预期 probe_ping / probe_pinned 常驻、probe_echo 延迟。
+  D4  D1 形状 + galatea 设 alwaysLoad=false：看 galatea 跟 D1 比有没有区别
+      （D1 里 galatea 本来就延迟，差别只能从行数 / token 上看）。
+--only D3,D4 只跑指定组。
 """
 import argparse
 import asyncio
@@ -28,7 +35,6 @@ import dataclasses  # noqa: E402
 from claude_agent_sdk import ClaudeSDKClient  # noqa: E402
 
 import mcp_probe as mp  # noqa: E402
-import pipeline  # noqa: E402
 
 
 def with_flags(opts, flags: dict, extra_tools=(), env_search=None):
@@ -65,11 +71,18 @@ def report(tag: str, u: dict) -> dict:
     return by
 
 
+RESULTS: dict = {}
+
+
 async def run(tag, opts, ask=False):
     async with ClaudeSDKClient(opts) as c:
         await mp.poll_status(c)
         u = await c.get_context_usage()
-        report(tag, u)
+        by = report(tag, u)
+        RESULTS[tag] = {"total": u.get("totalTokens"),
+                        "categories": [(x["name"], x["tokens"], x.get("isDeferred", False))
+                                       for x in u.get("categories", [])],
+                        "by_server": by}
         if ask:
             r = await mp.ask(c, "这是一次测试。直接调用 mcp__basics__now（不要用 ToolSearch），"
                                 "然后用一句话告诉我它返回的时间。")
@@ -80,19 +93,40 @@ async def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--char", default="cass")
     ap.add_argument("--ask", action="store_true")
+    ap.add_argument("--only", default="D1,D2,D3,D4")
+    ap.add_argument("--json")
     a = ap.parse_args()
     if os.environ.get("ANTHROPIC_API_KEY"):
         sys.exit("环境里有 ANTHROPIC_API_KEY，拒跑")
+    only = set(a.only.split(","))
     cwd = tempfile.mkdtemp(prefix="mcp_probe_")
     base = mp.make_options(a.char, deferred=True, cwd=cwd, minimal_system=True)
-    extra = ["mcp__probe__probe_pinned"]
-    d1 = with_flags(base, {"ombre-brain": True, "basics": True, "game": True},
-                    extra_tools=extra, env_search="true")
-    if a.ask:
-        d1 = dataclasses.replace(d1, model="sonnet")
-    await run("D1 延迟开 + 三个 server alwaysLoad=true + probe_pinned 单工具钉住", d1, ask=a.ask)
-    d2 = with_flags(base, {"galatea": False}, extra_tools=extra, env_search=None)
-    await run("D2 不设 ENABLE_TOOL_SEARCH + galatea alwaysLoad=false", d2)
+    extra = ["mcp__probe__probe_pinned", "mcp__probe__probe_echo"]
+    d1_flags = {"ombre-brain": True, "basics": True, "game": True}
+    if "D1" in only:
+        d1 = with_flags(base, d1_flags, extra_tools=extra, env_search="true")
+        if a.ask:
+            d1 = dataclasses.replace(d1, model="sonnet")
+        await run("D1 延迟开 + 三个 server alwaysLoad=true + probe_pinned 单工具钉住", d1, ask=a.ask)
+    if "D2" in only:
+        d2 = with_flags(base, {"galatea": False}, extra_tools=extra, env_search=None)
+        await run("D2 不设 ENABLE_TOOL_SEARCH + galatea alwaysLoad=false", d2)
+    if "D3" in only:
+        d3 = with_flags(base, {**d1_flags, "probe": True}, extra_tools=extra, env_search="true")
+        await run("D3 D1 + probe alwaysLoad=true（probe_echo _meta=false opt-out）", d3)
+    if "D4" in only:
+        d4 = with_flags(base, {**d1_flags, "galatea": False}, extra_tools=extra, env_search="true")
+        await run("D4 D1 + galatea alwaysLoad=false", d4)
+    if "D5" in only:
+        # 全量形状（不挂 ToolSearch、不设环境变量）+ galatea alwaysLoad=false：
+        # 「false=整个 server 延迟」在没有 ToolSearch 可取的形状下还认不认。
+        full = mp.make_options(a.char, deferred=False, cwd=cwd, minimal_system=True)
+        d5 = with_flags(full, {"galatea": False}, extra_tools=extra, env_search=None)
+        await run("D5 全量（无 ToolSearch）+ galatea alwaysLoad=false", d5)
+    if a.json:
+        import json
+        Path(a.json).write_text(json.dumps(RESULTS, ensure_ascii=False, indent=1, default=str), "utf-8")
+        print(f"报告：{a.json}")
 
 
 if __name__ == "__main__":

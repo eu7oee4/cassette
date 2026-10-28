@@ -65,6 +65,19 @@
   - **Opus**：同样不改、不提 PR，给出几种候选格式让选；中途调了一次 `pr_test`（只读，无副作用）。
 - 结论：「拿不准就停、写清楚卡在哪」这条在两个模型上都守得住——前提是系统提示写了这条（§4.1）。
 
+### 1.4 §6 三腿复测（10-29 晚，agent-sdk 0.2.174 / CLI 2.1.310，sonnet 实际 claude-sonnet-5-5；全通）
+
+| 腿 | 结果 |
+|---|---|
+| ① 停下来问 → `resume=` 接着答 → 提 PR | 含糊段 3 轮 11.7s 只 Grep/Read、不改不提、末段列 4 个问题；新 client + resume 发一句回答：5 轮 12.9s、同 session_id、不重读直接 Edit×2 → pr_test → pr_open，cache_read 22k（吃到前段缓存） |
+| ② 读权限同角色 | 门：dossier 路径 allow、`server/.env` DENY「凭据类的文件不在你可看的范围里」；模型如实写「读取被钩子拦截」，没找第二条路 |
+| ③ 中断后 resume | disconnect / `interrupt()` / SIGKILL 三种死法都 resume 得上（13–29s、5 轮），被打断的 Edit 都没落盘，它看文件没改就重改 |
+
+- 腿②顺带实锤：**`pipeline.DOSSIER_ROOT=~/dossier` 在这台机上不存在**（活的是 `~/casebook`，旧的叫 `~/dossier.DISCARDED-20260906`），闸放行的是一条空路径，cass 本人的只读闸也一样。见 §8.1。
+- 腿③细节：SDK `disconnect()` 不是立刻死——CLI 会把在飞工具打成「The user doesn't want to take this action right now」再**多发一次 API** 写收尾，多等 ~5.5s；`interrupt()` 给 `is_error=True, subtype=error_during_execution`；只有 SIGKILL 是真断（Edit 的 tool_use 连 transcript 都没写进）。resume 时 CLI 都在新消息前补一行 `assistant "No response requested."`。
+- resume 段的 `num_turns` 只算当段不累计。回答只覆盖部分问题时模型**不再问**，自己拍板、末段写「未处理」。
+- 探针：`delegate_probe.py` 加了 `--resume-ask` / `--guard-char` / `--interrupt [--interrupt-mode kill|interrupt|kill9]` / `--log-dir`，系统提示用 §4.1 那版。
+
 ## 2. 工具（加在 prs 的 MCP 上，chat / wake 全轮次挂）
 
 ```
@@ -95,7 +108,10 @@ pr_delegate_cancel(slug: str)
    - `worktree_owner` 取路径第一段 → `"<角色>~<slug>"` ≠ 角色 id：**他本人的 session 碰不到派活的副本**
      （门照「别人的工作副本」拒），正好防两边同时改。
 3. **起 session**（asyncio task，后端进程内）：
-   - `ClaudeSDKClient`，`model=<选的>`，`cwd=<副本>`，`setting_sources=[]`，订阅登录态（有 `ANTHROPIC_API_KEY` 就拒，同 build_options）；
+   - `ClaudeSDKClient`，`model=<选的>`，`cwd=<副本>`，`setting_sources=[]`，**`strict_mcp_config=True`**，订阅登录态（有 `ANTHROPIC_API_KEY` 就拒，同 build_options）。
+     strict 这条 10-29 晚实锤不能省：interject 探针没设它，2.1.310 上机主 claude.ai 账号挂的连接器（Claude Docs、Notion
+     共 60 多个 `mcp__claude_ai_*` 工具）在轮中被当「新可用工具」塞进了 session（transcript `deferred_tools_delta` /
+     `mcp_instructions_delta`）。派出去的模型拿到机主的 Notion 写权限不是小事。生产 chat 路有 strict，mcp_probe 实测干净。
    - `tools` / `allowed_tools` = Read、Grep、Glob、Edit、Write + 进程内 MCP 的 `pr_test` / `pr_open`（绑死这个副本和分支）；
      **不挂 Bash**；
    - PreToolUse 门（机主拍板：读权限同角色）：
@@ -115,6 +131,9 @@ pr_delegate_cancel(slug: str)
 
    事件走现有 `prs._event` → 他下一轮注入时看到（chat 轮 `chat_loop.py:686`、醒来轮 `wake_sdk.py:139` 都注入）；
    提了 PR / 失败 / 撤回同时 Bark 机主。「停下来问」另见 §3.3。
+   **判据补严（§1.4 腿③）**：「停下来问」只认**正常 `ResultMessage`（is_error=False）且没调 pr_open**；
+   `is_error=True`（含 `error_during_execution`）→ 失败；**没有 ResultMessage**（流断 / 进程死）→ 不判，
+   状态留 `running` 交给 §3.2 的启动扫尾 resume。别把「没 ResultMessage 且没 pr_open」当停下来问。
 5. **拆副本**：提了 PR / 失败 / 撤回时 `git worktree remove`；**停下来问时副本和 session 记录都留着**（§3.3）。
    - 提了 PR：分支留着（PR 记录指向它）；之后他要接着改，`pr_start <slug>` 在**他自己的**副本里切过去
      ——前提是派活副本已经拆了（同一分支不能被两个 worktree 同时检出）。
@@ -123,7 +142,9 @@ pr_delegate_cancel(slug: str)
 ### 3.2 状态与重启
 
 - 状态落 `state/prs/delegates/<角色>~<slug>.json`：`{char, slug, model, brief, status, started, ended, pr_id, question, error}`。
-- **后端重启会杀掉在跑的派活**（runner 在后端进程里），而合并 PR 本身就会触发重启（PLAN_prs §6.2）：
+- **后端重启会杀掉在跑的派活**（runner 在后端进程里），而合并 PR 本身就会触发重启（PLAN_prs §6.2）。
+  实测（§1.4 腿③）三种死法都 resume 得上；但 `disconnect()` 不是立刻死（CLI 拒掉在飞工具再多发一次 API 写收尾，
+  ~5.5s），重启看守等不了这个——按 SIGKILL 的形状设计：被打断的那次工具不落盘、transcript 可能停在 tool_use 之前。
   - 重启看守（`restart.py`）发现有在跑的派活 → app 的重启按钮上提示「有 N 个派活在跑，重启会中断」，机主确认才重启；
   - 新后端启动时扫状态文件：
     - `running` → 用 `resume=<session_id>` 自动接着跑一次，首条消息「〔后端重启过，刚才的活接着做〕」；
@@ -154,6 +175,9 @@ pr_delegate_cancel(slug: str)
    - 回答原文进状态文件的 `qa` 列表（问 / 答 / 时间），PR 记录的 `delegated` 里一并存档，PR 页能看到来回。
 5. **等太久**：`asking` 超过 3 天没回答 → 按撤回收（拆副本、删分支、发事件「等太久撤回了」）。
 6. 一个派活最多来回 3 次问答，第 4 次停下来按失败收——说明「这活该他自己理一理再派」。
+   `max_turns=40` 是**按段**算的（resume 段 num_turns 从 0 起，§1.4），3 次问答最多 4×40 轮；30 分钟总时长按累计算。
+7. 回答只覆盖部分问题时它不会再问，自己拍板、末段写「未处理」（§1.4）。§4.2 教他写回答时要把对方列的问题**逐条答**；
+   答不了的明说「这条你定」，别留空让它猜。
 
 ## 4. 提示词
 
@@ -197,7 +221,10 @@ TA 点名「让 fable 做」就用 fable。
 - 单测：门——副本外路径、`..`、软链、`.git` 都拒（复用 `readonly_path_guard` 的路径摊平）。
 - 探针：`delegate_probe.py` 已覆盖模型可用性和 session 行为；SDK 升级前和 PLAN_toolmount §8 的清单一起跑。
 - 探针补腿（动工前）：①停下来问 → `resume=` 接着回答 → 从停下处接着改并提 PR；②读 dossier 走
-  `readonly_path_guard`、读 .env 被拒；③后端重启中断后 resume 接着跑。
+  `readonly_path_guard`、读 .env 被拒；③后端重启中断后 resume 接着跑。**三腿 10-29 晚已跑，全通（§1.4）。**
+  没测到的边：工具已落盘、但 tool_result 没写进 transcript 就死——三次都断在执行前。
+- `readonly_path_guard` 的相对路径按 `neutral_cwd` 解析，而派活 cwd 是副本：副本在 CODE_ROOT 下两头都放行不漏，
+  但「同一把闸」在相对路径上基准不同，单测里要有一条相对路径用例。
 - 真机：派一个真的小 PR（改一处文案），走完合并重启。
 
 ## 7. 施工顺序
@@ -221,6 +248,8 @@ TA 点名「让 fable 做」就用 fable。
 ## 8.1 还开着的
 
 - 问答来回上限 3 次、等回答 3 天，这两个数先拍着，跑起来看。
+- **`DOSSIER_ROOT=~/dossier` 不存在**（§1.4）：改指 `~/casebook`，还是把「可以读 dossier 仓」从 §4.1 / 菜单 / cass 的只读段里一起删？
+  不只是本稿的事——cass 本人的只读闸（PLAN_toolmount §3.2「翻代码和资料」块）说的也是这条空路径。
 - 醒因 `delegate` 跟随机自醒的关系：本稿不重抽 auto 时刻（它不是机主的新交互）。
 
 ## 9. 与其他计划的交界
