@@ -4,6 +4,8 @@
 > `server/tools/delegate_probe.py` 实测（§1）。
 > 起点：机主问「能不能让 cass 派一个模型去提 PR，他自己选模型、写提示词」。
 > 依赖 PLAN_prs（工作副本 / PR 记录 / 合并重启）；与 PLAN_toolmount 的交界见 §9。
+> 同日机主拍板 §8 四条：放 Fable；上限先这么定；停下来问 → 接着原来那个 session 回答（他可以先问机主）；
+> 派出去的模型读权限同角色。正文已按拍板改。
 
 ---
 
@@ -21,6 +23,8 @@
 | 弹卡 | 工作副本内不弹 | 不弹（只能动自己那份副本） |
 | 醒来轮能不能用 | 能 | 能（另有更低的日上限） |
 | PR 作者 | 他 | 他（记录里多一个 `delegated`：模型 + 说明原文） |
+| 能读什么 | cassette 仓 + dossier 仓 + state/ 里自己的房间和求职/工作台资料 | 同他（`readonly_path_guard` 同一把闸） |
+| 对方拿不准时 | — | 停下来问 → 叫醒他 → 他自己答，或者先发消息问机主 → `pr_delegate_reply` 接着原 session |
 
 ## 1. 实测依据（10-29，`delegate_probe.py`，agent-sdk 0.2.148 / 自带 CLI 2.1.251，订阅登录态）
 
@@ -62,6 +66,7 @@
 
 ```
 pr_delegate(slug: str, model: str, brief: str)
+pr_delegate_reply(slug: str, answer: str)
 pr_delegate_cancel(slug: str)
 ```
 
@@ -71,7 +76,7 @@ pr_delegate_cancel(slug: str)
   - **haiku**：改文案 / 常量 / 单文件小修；
   - **sonnet**：大多数 bug 修复和小功能，默认它；
   - **opus**：跨模块、要读很多代码、要做设计判断的；
-  - **fable**：【待拍 1】——要不要开放、什么时候用。
+  - **fable**（`claude-fable-5-1`）：复杂的活、会改动很多文件的；以及机主点名「让 fable 做一下……」的时候。
 - `brief`：他写给对方的任务说明，原样存档、原样进对方的首条消息。
 - `pr_list` / `pr_view` 显示派活状态（跑着 / 等他回答 / 提了 #N / 失败）和说明原文。
 - prs MCP 是 stdio 子进程（`prs_mcp.py`），session 不能在它里面跑——`pr_delegate` 只做参数校验，
@@ -90,7 +95,10 @@ pr_delegate_cancel(slug: str)
    - `ClaudeSDKClient`，`model=<选的>`，`cwd=<副本>`，`setting_sources=[]`，订阅登录态（有 `ANTHROPIC_API_KEY` 就拒，同 build_options）；
    - `tools` / `allowed_tools` = Read、Grep、Glob、Edit、Write + 进程内 MCP 的 `pr_test` / `pr_open`（绑死这个副本和分支）；
      **不挂 Bash**；
-   - PreToolUse 门：带路径的调用 resolve 后必须落在副本内，否则拒（§1.2 实测拦得住）；`.git`、`.env`、`state/` 再拒一遍；
+   - PreToolUse 门（机主拍板：读权限同角色）：
+     - **读**（Read/Grep/Glob）：走 `pipeline.readonly_path_guard(tool_input, <角色>, tool)`——和他本人同一把闸：
+       cassette 仓、dossier 仓、state/ 里只有他自己的房间和 jobhunt / workbench / webpages，.env 不在范围；
+     - **写**（Edit/Write）：resolve 后必须落在这份副本内（§1.2 实测拦得住），副本里的 `.git` 再拒；
    - `max_turns=40`、总时长 30 分钟（超了 cancel，按失败收）；
    - 首条消息 = 他的 `brief` 原文；系统提示见 §4.1。
 4. **收尾判定**（读流到 `ResultMessage`）：
@@ -98,38 +106,66 @@ pr_delegate_cancel(slug: str)
 | 结局 | 判据 | 回给他的事件 |
 |---|---|---|
 | 提了 PR | 进程内 `pr_open` 被调用且成功（拿到 PR 号） | 〔PR：#N <模型>提好了：<标题>〕 |
-| 停下来问 | 正常结束、没调 `pr_open` | 〔PR：派给<模型>的 <slug> 没动手，它问：<最后一段原文>〕 |
+| 停下来问 | 正常结束、没调 `pr_open` | 〔PR：派给<模型>的 <slug> 停下来问你：<最后一段原文>〕（§3.3） |
 | 失败 | `is_error` / 异常 / 超时 / 超轮数 | 〔PR：派给<模型>的 <slug> 没做成：<原因>〕 |
 | 被撤 | `pr_delegate_cancel` | 〔PR：<slug> 撤回了〕 |
 
-   事件走现有 `prs._event` → 他下一轮注入时看到（`prs_event_lines`）；同时 Bark 机主。
-5. **拆副本**：任何结局都 `git worktree remove`。
+   事件走现有 `prs._event` → 他下一轮注入时看到（chat 轮 `chat_loop.py:686`、醒来轮 `wake_sdk.py:139` 都注入）；
+   提了 PR / 失败 / 撤回同时 Bark 机主。「停下来问」另见 §3.3。
+5. **拆副本**：提了 PR / 失败 / 撤回时 `git worktree remove`；**停下来问时副本和 session 记录都留着**（§3.3）。
    - 提了 PR：分支留着（PR 记录指向它）；之后他要接着改，`pr_start <slug>` 在**他自己的**副本里切过去
      ——前提是派活副本已经拆了（同一分支不能被两个 worktree 同时检出）。
-   - 停下来问 / 失败 / 撤回：分支上没有提交 → 删分支，slug 释放，他补充说明后可以用同一个 slug 再派。
+   - 失败 / 撤回：分支上没有提交 → 删分支，slug 释放，可以用同一个 slug 再派。
 
 ### 3.2 状态与重启
 
 - 状态落 `state/prs/delegates/<角色>~<slug>.json`：`{char, slug, model, brief, status, started, ended, pr_id, question, error}`。
 - **后端重启会杀掉在跑的派活**（runner 在后端进程里），而合并 PR 本身就会触发重启（PLAN_prs §6.2）：
   - 重启看守（`restart.py`）发现有在跑的派活 → app 的重启按钮上提示「有 N 个派活在跑，重启会中断」，机主确认才重启；
-  - 新后端启动时扫状态文件：`running` 的一律改成「失败：后端重启中断」，发事件、拆副本。
+  - 新后端启动时扫状态文件：
+    - `running` → 用 `resume=<session_id>` 自动接着跑一次，首条消息「〔后端重启过，刚才的活接着做〕」；
+      同一个派活第二次被重启打断才按失败收（发事件、拆副本）。
+    - `asking` → 不动（本来就不挂进程，§3.3）。
 - usage 落账 `scene="delegate"`（面板上和「陪 TA 聊的」「他自己醒来花的」分开）。
+
+### 3.3 停下来问 → 他回答 → 接着原 session
+
+机主拍板：不整份重派，接着原来那个 session。他也可以先发消息问机主。
+
+1. **对方停下来**：状态改 `asking`，记下 `session_id` 和问题原文（最后一段）；副本留着。
+2. **立刻叫醒他**：`wake_sdk.enqueue_wake(<角色>, "delegate", note=<问题原文>)`——新醒因，口径同邮件那条
+   （同一醒因在队里就不重复入队）。**不加 `force`**：派活的问题不急，夜里照醒来轮的规矩收敛 Bark。
+   醒来注入里那句「〔PR：派给 sonnet 的 greet-zh 停下来问你：……〕」就是他看到的知觉。
+3. **他自己决定**（醒来轮里，两条路都是现成的）：
+   - 能答 → 调 `pr_delegate_reply(slug, answer)`；
+   - 答不了、要机主拍板 → 在〔〕外写一句发到机主手机上（醒来轮〔〕外的话本来就投递），例如
+     「派给 sonnet 改问候语那个，它问格式要哪种——『你好，a』还是『你好 a』？」；机主在聊天里回了，
+     他在那一轮里调 `pr_delegate_reply`。
+4. **接着跑**：`pr_delegate_reply` → 后端用**同一套 options + `resume=<session_id>`** 起一个新的
+   `ClaudeSDKClient`，把回答作为下一条消息发进去，照 §3.1 第 4 步重新判结局（可能又停下来问，循环）。
+   - 不让 session 挂着等：等回答可能要几个钟头，挂着占一个 CLI 进程、后端一重启就没了。
+     session 记录在磁盘上（cwd = 副本，CLI 按真路径找记录——副本路径要 `realpath`，PLAN_toolmount §8 踩过）；
+     resume 接得上，重启也不丢。
+   - 回答原文进状态文件的 `qa` 列表（问 / 答 / 时间），PR 记录的 `delegated` 里一并存档，PR 页能看到来回。
+5. **等太久**：`asking` 超过 3 天没回答 → 按撤回收（拆副本、删分支、发事件「等太久撤回了」）。
+6. 一个派活最多来回 3 次问答，第 4 次停下来按失败收——说明「这活该他自己理一理再派」。
 
 ## 4. 提示词
 
-### 4.1 派活 session 的系统提示（后端写死，§1.2/§1.3 实测用的就是这一版）
+### 4.1 派活 session 的系统提示（后端写死；比 §1.2/§1.3 实测那版多了读 dossier 和「接着做」两处）
 
 ```
 你在 cassette 仓的一个独立工作副本里干活：{path}，分支 {branch}。
 这是别人派给你的一件活——派活的是 {角色名}，下面是他写的任务说明。
-- 只改这个副本里的文件；不碰 .env、state/，不跑命令，git 的事交给工具。
+- 可以读 cassette 仓和 {机主名} 的 dossier 仓来核实（只读）；只改这个副本里的文件；不跑命令，git 的事交给工具。
 - 改之前先读相关代码，照周围代码的写法和注释风格来（中文注释，注释密度跟周围一致）。
 - 改完用 pr_test 跑测试；不过就修，修不好就如实写进 PR 描述。
 - 用 pr_open 提 PR。描述写给不读代码的人看：做了什么、为什么、合并后会感觉到什么变化。
 - 说明里有拿不准的关键点、或者活比说明大得多：别猜着做，不提 PR，直接结束，最后一段写清楚
-  你卡在哪、需要他回答什么。
+  你卡在哪、需要他回答什么。他的回答会在这个对话里接着发给你，你从停下的地方接着做。
 ```
+
+（§1.2/§1.3 实测用的是没有「可以读 dossier」和最后一句的版本；改了措辞要拿 `delegate_probe.py` 复跑一遍。）
 
 ### 4.2 教他怎么写 brief（进能力菜单「改代码：提一个 PR」块，PLAN_toolmount §3.2）
 
@@ -137,13 +173,17 @@ pr_delegate_cancel(slug: str)
 活大、或者你醒着不想自己一下下改，可以派出去：pr_delegate 挑一个模型、写一份说明。
 说明写清四件事：要解决什么（现象或目标）、你已经查到的位置（文件:行）、哪些不能动、
 怎么算做完。对方看不到你们的聊天，说明就是它知道的全部。
-它拿不准会停下来问——你在下一次醒来或聊天时会看到它的问题，补充好再派一次。
+它拿不准会停下来问——问题一来你就会醒过来看到。你能答就用 pr_delegate_reply 回它，
+它接着做；要 TA 拍板的，先发消息问 TA，TA 回了再回它。
+挑模型：小改用 haiku，一般用 sonnet，跨模块要判断的用 opus，复杂的、要动很多文件的用 fable；
+TA 点名「让 fable 做」就用 fable。
 ```
 
 ## 5. app
 
 - PR 页：派来的 PR 多一个标签「cass 派 <模型>」，详情里可展开说明原文。
 - 跑着的派活：PR 页顶上一行「<slug> · <模型> · 跑了 N 分钟」，可撤回（调 `pr_delegate_cancel` 的 REST 版）。
+- 停下来问的派活：显示「等回答」和问题原文；问答来回在详情里按时间排。
 - 重启按钮：有派活在跑时先确认（§3.2）。
 
 ## 6. 测试
@@ -151,23 +191,32 @@ pr_delegate_cancel(slug: str)
 - 单测：校验（并发 / 上限 / 白名单 / slug 复用）、四种结局的判定与事件文案、重启后 `running` 收成失败。
 - 单测：门——副本外路径、`..`、软链、`.git` 都拒（复用 `readonly_path_guard` 的路径摊平）。
 - 探针：`delegate_probe.py` 已覆盖模型可用性和 session 行为；SDK 升级前和 PLAN_toolmount §8 的清单一起跑。
+- 探针补腿（动工前）：①停下来问 → `resume=` 接着回答 → 从停下处接着改并提 PR；②读 dossier 走
+  `readonly_path_guard`、读 .env 被拒；③后端重启中断后 resume 接着跑。
 - 真机：派一个真的小 PR（改一处文案），走完合并重启。
 
 ## 7. 施工顺序
 
+0. 探针补三腿（§6）。
 1. `delegate.py` runner + REST + 状态文件 + 启动扫尾（不挂工具，先用 REST 手动派一次验证）。
-2. prs MCP 加 `pr_delegate` / `pr_delegate_cancel`；`pr_list` / `pr_view` 显示派活状态。
+2. prs MCP 加 `pr_delegate` / `pr_delegate_reply` / `pr_delegate_cancel`；`pr_list` / `pr_view` 显示派活状态；
+   醒因 `delegate` 接进 `wake_sdk`。
 3. 菜单块（§4.2）。
 4. app：PR 页标签 / 在跑的派活 / 撤回 / 重启确认。
 5. 灰度：先只给 cass 开，跑一周看次数、用量、提上来的 PR 质量。
 
-## 8. 待拍
+## 8. 已拍（10-29）
 
-1. 白名单里要不要放 Fable、什么时候用它？（可用已实测，CLI 还不认识这个 ID。）
-2. 日上限（chat 5 / 醒来 2）和单次时长 30 分钟、40 轮是否合适。
-3. 「停下来问」之后：只把问题告诉他（本稿），还是允许他用 `pr_delegate_reply(slug, answer)` 接着那个 session 回答？
-   后者要 session 活着等回答（占后端、重启就丢），本稿选前者：补充说明后整份重派。
-4. 派出去的模型要不要也能看 dossier 仓（他自己的只读范围有，派活本稿只给副本）。
+1. **放 Fable**：复杂的、会改很多文件的活用它；机主点名「让 fable 做一下……」时用它（§2、§4.2）。
+   CLI 还不认识这个 ID（§1.1），SDK 升级后复测。
+2. **上限先这样定**：chat 发起每天 5 次、醒来发起每天 2 次；单次 30 分钟、40 轮。跑一周看实际再调。
+3. **停下来问 → 接着原 session**（§3.3）。他收到问题时可以先发消息问机主——醒来轮〔〕外的话本来就投递。
+4. **读权限同角色**：`readonly_path_guard` 同一把闸（§3.1 第 3 步）；写只在自己那份副本里。
+
+## 8.1 还开着的
+
+- 问答来回上限 3 次、等回答 3 天，这两个数先拍着，跑起来看。
+- 醒因 `delegate` 跟随机自醒的关系：本稿不重抽 auto 时刻（它不是机主的新交互）。
 
 ## 9. 与其他计划的交界
 
