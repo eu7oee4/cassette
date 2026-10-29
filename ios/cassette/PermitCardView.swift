@@ -9,13 +9,18 @@ struct PermitCardView: View {
     @Environment(\.colorScheme) private var scheme
     let card: PermitCard
     let charID: String
+    /// 后端给的收场态标签（「已让路，你发送了新消息」/「已让路，他醒来了」/「已超时」，10-30）。
+    /// nil = 还在等；有值就置灰标它。deadline 到点自己也会置灰标「已超时」。
+    var outcome: String? = nil
     /// 拍板：allow + 拒绝理由（批准时理由为空）。
     var onDecide: (_ allow: Bool, _ reason: String) -> Void = { _, _ in }
     /// 超时置灰后机主点「收起」。
     var onClose: () -> Void = { }
 
     @State private var reason = ""
-    @State private var expired = false
+    @State private var timedOut = false
+    private var expired: Bool { timedOut || outcome != nil }
+    private var closedLabel: String { outcome ?? "已超时" }
 
     private var pal: CharPalette { IdentityColor.palette(for: charID) }
     private var fill: Color { expired ? Color(uiColor: .systemGray4) : ChatTint.fill(pal, scheme) }
@@ -88,7 +93,7 @@ struct PermitCardView: View {
         .background(fill, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
         .overlay(alignment: .topLeading) {
             if expired {
-                Text("已超时")
+                Text(closedLabel)
                     .font(.caption2.bold())
                     .padding(.horizontal, 8).padding(.vertical, 3)
                     .background(Color(uiColor: .systemGray2), in: Capsule())
@@ -105,7 +110,7 @@ struct PermitCardView: View {
                 do { try await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000)) }
                 catch { return }
             }
-            expired = true                          // 后端同刻已超时自拒，这儿只管置灰
+            timedOut = true                         // 后端同刻已超时自拒，这儿只管置灰
         }
     }
 

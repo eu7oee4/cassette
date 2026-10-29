@@ -210,6 +210,8 @@ async def _lifespan(_app: FastAPI):
     world.ensure_world()         # 大房子：注册表 + world.json 补齐（幂等，存在不覆盖）
     import prs
     prs.settle_rollback()        # 上一次重启起不来、看守退回了哪些 PR：标「已退回」+通知提的人（PLAN_prs §6.2）
+    import delegate
+    asyncio.get_running_loop().create_task(_delegate_sweep(delegate))   # 在跑的派活 resume 一次（PLAN_delegate §3.2）
     if config.COHABIT_ENABLED:
         # 同居世界上电（C4 之前默认关）：事件钩子 + 单 worker（醒来并发=1 的执行锁）。
         cohabit_queue.install()
@@ -237,6 +239,15 @@ async def _lifespan(_app: FastAPI):
     yield
     for t in tasks:
         t.cancel()
+
+
+async def _delegate_sweep(delegate) -> None:
+    try:
+        done = await delegate.sweep_on_start()
+        if done:
+            logerr(f"派活启动扫尾：{done}")
+    except Exception as e:
+        logerr(f"派活启动扫尾失败: {e}")
 
 
 app = FastAPI(title="cassette backend", lifespan=_lifespan)
@@ -1552,7 +1563,9 @@ def permits_pending(char: Optional[str] = None,
     out = permits.pending(char or None)
     for r in out:
         r["char_name"] = characters.display_name(r["char"])
-    return {"pending": out}
+    # closed：近一小时收场了的卡及其收场态（timeout / yielded_chat / yielded_wake / denied / allowed），
+    # app 据此把还挂着的卡置灰标原因（10-30 机主拍板：「已让路，你发送了新消息」/「已让路，他醒来了」）。
+    return {"pending": out, "closed": permits.closed(char or None)}
 
 
 @app.post("/permits/decide")
@@ -1576,6 +1589,66 @@ class PRCloseIn(BaseModel):
     reason: str = ""
 
 
+class DelegateIn(BaseModel):
+    char: str
+    slug: str
+    model: str
+    brief: str
+
+
+class DelegateReplyIn(BaseModel):
+    char: str
+    slug: str
+    answer: str
+
+
+class DelegateCancelIn(BaseModel):
+    char: str
+    slug: str
+    reason: str = ""
+
+
+def _delegate_origin(char_id: str) -> str:
+    """派活从哪种轮发起（日上限分两档，PLAN_delegate §3.1）：看他聊天 session 此刻的 turn_kind。"""
+    h = session_mgr.get(char_id, "chat")
+    return "wake" if h is not None and h.meta.get("turn_kind") == "wake" else "chat"
+
+
+@app.post("/prs/delegate")
+def prs_delegate(inp: DelegateIn, x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
+    """派活（PLAN_delegate §3.1）：prs MCP 壳转发来的；runner 在本进程的事件循环上。"""
+    verify_auth(x_auth)
+    import delegate
+    try:
+        return delegate.start(inp.char, inp.slug, inp.model, inp.brief,
+                              origin=_delegate_origin(inp.char))
+    except delegate.PRError as e:
+        raise HTTPException(status_code=409, detail={"error": str(e)})
+
+
+@app.post("/prs/delegate/reply")
+def prs_delegate_reply(inp: DelegateReplyIn,
+                       x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
+    verify_auth(x_auth)
+    import delegate
+    try:
+        return delegate.reply(inp.char, inp.slug, inp.answer)
+    except delegate.PRError as e:
+        raise HTTPException(status_code=409, detail={"error": str(e)})
+
+
+@app.post("/prs/delegate/cancel")
+def prs_delegate_cancel(inp: DelegateCancelIn,
+                        x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
+    """撤回（他自己调，或 app PR 页上机主撤）。"""
+    verify_auth(x_auth)
+    import delegate
+    try:
+        return delegate.cancel(inp.char, inp.slug, inp.reason)
+    except delegate.PRError as e:
+        raise HTTPException(status_code=409, detail={"error": str(e)})
+
+
 def _pr_row(r: dict) -> dict:
     import characters
     return r | {"char_name": characters.display_name(r["char"])}
@@ -1586,9 +1659,14 @@ def prs_list(x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
     """PR 列表（PLAN_prs §5）：没办完的在前、收口的在后，各按时间倒序。
     unapplied=合并了但还没在正在跑的代码里生效的个数（页顶「还没重启」那条的数）。"""
     verify_auth(x_auth)
+    import delegate
     import prs
     rows = [_pr_row(r) for r in prs.list_prs()]
-    return {"prs": rows,
+    # 派活（PLAN_delegate §5）：跑着 / 等回答的列在页顶；收口的只给今天的（历史在 PR 记录的 delegated 里）
+    today = prs._now()[:10]
+    dele = [_pr_row(r) for r in delegate.rows()
+            if r["status"] in delegate.ACTIVE or (r.get("ended") or "")[:10] == today]
+    return {"prs": rows, "delegates": dele,
             "unapplied": sum(1 for r in rows if r["status"] == "merged"
                              and r["effective"] is False)}
 
@@ -1657,6 +1735,11 @@ def _running_now() -> list[str]:
                     out.append(text)
             except Exception:
                 continue
+    try:
+        import delegate
+        out += delegate.running_now()      # 在跑的派活（PLAN_delegate §3.2）
+    except Exception:
+        pass
     return out
 
 
@@ -1705,7 +1788,7 @@ def questions_pending(char: Optional[str] = None,
     out = questions.pending(char or None)
     for r in out:
         r["char_name"] = characters.display_name(r["char"])
-    return {"pending": out}
+    return {"pending": out, "closed": questions.closed(char or None)}
 
 
 @app.post("/questions/decide")

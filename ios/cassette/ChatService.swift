@@ -134,6 +134,39 @@ struct QuestionCard: Codable, Identifiable, Equatable {
     var char: String?                        // pending 拉回来的带；SSE 的不带（就是当前会话角色）
 }
 
+/// 一张卡的收场（/permits/pending、/questions/pending 的 closed 列，近一小时）。
+/// state：allowed / denied / timeout / yielded_chat / yielded_wake / answered / skipped / cancelled。
+struct CardOutcome: Decodable, Equatable {
+    let id: String
+    let char: String?
+    let state: String
+    let ts: Int?
+
+    /// 卡片上置灰那条小标签。nil = 不该标（批了 / 答了的卡 app 自己已经收了）。
+    var label: String? {
+        switch state {
+        case "timeout":      return "已超时"
+        case "yielded_chat": return "已让路，你发送了新消息"
+        case "yielded_wake": return "已让路，他醒来了"
+        case "cancelled":    return "已作废"
+        default:             return nil
+        }
+    }
+}
+
+/// /permits/pending 与 /questions/pending 共用的形状：pending + closed（老后端没 closed → 空）。
+struct CardsState<Card: Decodable>: Decodable {
+    let pending: [Card]
+    let closed: [CardOutcome]
+
+    enum CodingKeys: String, CodingKey { case pending, closed }
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        pending = try c.decode([Card].self, forKey: .pending)
+        closed = (try? c.decode([CardOutcome].self, forKey: .closed)) ?? []
+    }
+}
+
 /// 权限卡（PLAN_native §6 / chatui U4）：TA 的一次写类调用挂起等批。
 /// SSE "permit" 事件带参数原文（detail）；/permits/pending 拉回来的带 title
 /// 没 detail（够拍板用）。批/拒 POST /permits/decide，批了那次调用原地执行。
@@ -339,9 +372,13 @@ struct ChatService {
 
     /// 待答的卡（回前台对齐用；char 缺省＝全部角色）。
     func pendingQuestions(char: String? = nil) async throws -> [QuestionCard] {
+        try await questionsState(char: char).pending
+    }
+
+    /// 待答的卡 + 近一小时收场了的卡的收场态（10-30：让路 / 超时 / 答了，卡片据此置灰标原因）。
+    func questionsState(char: String? = nil) async throws -> CardsState<QuestionCard> {
         let data = try await perform(authedRequest("GET", "/questions/pending", char: char))
-        struct Resp: Decodable { let pending: [QuestionCard] }
-        do { return try JSONDecoder().decode(Resp.self, from: data).pending }
+        do { return try JSONDecoder().decode(CardsState<QuestionCard>.self, from: data) }
         catch { throw ChatServiceError.badResponse }
     }
 
@@ -362,9 +399,13 @@ struct ChatService {
 
     /// 待批的写类调用（回前台对齐用；char 缺省＝全部角色）。
     func pendingPermits(char: String? = nil) async throws -> [PermitCard] {
+        try await permitsState(char: char).pending
+    }
+
+    /// 待批的卡 + 近一小时收场了的卡的收场态（口径同 questionsState）。
+    func permitsState(char: String? = nil) async throws -> CardsState<PermitCard> {
         let data = try await perform(authedRequest("GET", "/permits/pending", char: char))
-        struct Resp: Decodable { let pending: [PermitCard] }
-        do { return try JSONDecoder().decode(Resp.self, from: data).pending }
+        do { return try JSONDecoder().decode(CardsState<PermitCard>.self, from: data) }
         catch { throw ChatServiceError.badResponse }
     }
 

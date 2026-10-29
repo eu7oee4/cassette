@@ -2227,18 +2227,24 @@ def start_game_pump(char_id: str, *, note: str,
 
 
 YIELD_MSG = "TA 来了，先聊——这件事当面说。"
+YIELD_MSG_WAKE = "你的下一次醒来到了，这张卡让路了——想做的话这一轮再提。"
 
 
-def _yield_wake_cards(char_id: str) -> None:
-    """TA 的消息到了：醒来轮挂着等批的卡让路（10-29 机主拍板）。卡挂着时整条 session
-    被那一轮占着，TA 不答卡直接聊的话消息要等到卡超时才轮到——所以卡自动拒、醒来轮
-    收尾、聊天轮接上；他聊天时想做可以当场再弹。只拒醒来轮的卡（聊天轮的卡 TA 正看着）。
-    线程安全（/code/send 的 REST 线程也调）。"""
+def _yield_wake_cards(char_id: str, how: str = "chat") -> None:
+    """醒来轮挂着等批的卡让路（10-29 / 10-30 机主拍板）。卡挂着时整条 session 被那一轮占着，
+    后面排的东西要等到卡超时才轮到——所以卡自动拒、醒来轮收尾、下一轮接上。两种触发：
+    how="chat"：TA 的消息到了（stream_turn / inject_pump_user 入口）；他聊天时想做可以当场再弹。
+    how="wake"：他自己的下一次醒来入队了（wake_sdk.enqueue_wake）。
+    只拒醒来轮的卡（聊天轮的卡 TA 正看着）。收场态进 permits/questions 的 closed 账，app 据此置灰
+    标「已让路，你发送了新消息」/「已让路，他醒来了」。线程安全（REST 线程也调）。"""
     import permits
     import questions
-    n = permits.yield_wake(char_id, YIELD_MSG) + questions.yield_wake(char_id, YIELD_MSG)
+    msg = YIELD_MSG_WAKE if how == "wake" else YIELD_MSG
+    state = "yielded_wake" if how == "wake" else "yielded_chat"
+    n = (permits.yield_wake(char_id, msg, state)
+         + questions.yield_wake(char_id, msg, state))
     if n:
-        print(f"[chat_loop] TA 来了，醒来轮 {n} 张卡让路（char={char_id}）", file=sys.stderr)
+        print(f"[chat_loop] 醒来轮 {n} 张卡让路（char={char_id}，{how}）", file=sys.stderr)
 
 
 def inject_pump_user(char_id: str, text: str, ledger_text: str = "") -> None:

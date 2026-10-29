@@ -49,6 +49,29 @@ def pending(char_id: Optional[str] = None) -> list[dict]:
                   key=lambda r: r["ts"])
 
 
+# 收场态账（10-30 机主拍板）：卡收场了 app 要知道是为什么——原来 app 只认 deadline 到点的「已超时」，
+# 让路 / 手拒的卡在 app 里原样挂到 deadline。这里记近一小时内收场的卡：单号 → 收场态
+# （allowed / denied / timeout / yielded_chat / yielded_wake / cancelled），/pending 一并下发。内存态，同卡本身。
+CLOSED_KEEP_SEC = 3600
+_closed: dict[str, dict] = {}
+
+
+def _mark_closed(rec: dict, state: str) -> None:
+    now = int(time.time())
+    for k, v in list(_closed.items()):
+        if now - v["ts"] > CLOSED_KEEP_SEC:
+            _closed.pop(k, None)
+    _closed[rec["id"]] = {"id": rec["id"], "char": rec["char"], "state": state, "ts": now}
+
+
+def closed(char_id: Optional[str] = None) -> list[dict]:
+    """近一小时收场了的卡（app 对齐用）。"""
+    now = int(time.time())
+    return sorted((dict(v) for v in _closed.values()
+                   if now - v["ts"] <= CLOSED_KEEP_SEC and (char_id is None or v["char"] == char_id)),
+                  key=lambda r: r["ts"])
+
+
 def waiting(char_id: str) -> bool:
     """这个角色有没有一张挂着等答的卡——轮内空闲超时的豁免判据。"""
     return any(r["char"] == char_id and _live(r)
@@ -73,13 +96,14 @@ def decide(question_id: str, answers: Optional[dict],
     return {"ok": True, "state": "answered" if answers else "dismissed"}
 
 
-def yield_wake(char_id: str, reason: str) -> int:
-    """TA 来了：这个角色醒来轮挂着的问答卡全部按「没答」收掉（note=原话），回收掉几张。
-    口径同 permits.yield_wake。"""
+def yield_wake(char_id: str, reason: str, state: str = "yielded_chat") -> int:
+    """让路：这个角色醒来轮挂着的问答卡全部按「没答」收掉（note=原话），回收掉几张。
+    口径同 permits.yield_wake（state = yielded_chat / yielded_wake）。"""
     n = 0
     for r in list(_pending.values()):
         if r["char"] != char_id or not r.get("wake") or r["future"].done():
             continue
+        r["state"] = state
         fut = r["future"]
 
         def _set(f=fut):
@@ -110,12 +134,18 @@ async def ask(char_id: str, *, questions: list[dict],
                      "wake": bool(wake),
                      "future": fut, "loop": loop}
     _push_card(char_id, questions or [])
+    rec = _pending[qid]
+    state = "cancelled"
     try:
-        return await asyncio.wait_for(fut, t)
+        res = await asyncio.wait_for(fut, t)
+        state = rec.get("state") or ("answered" if res[0] is not None else "skipped")
+        return res
     except asyncio.TimeoutError:
+        state = "timeout"
         return None
     finally:
         _pending.pop(qid, None)
+        _mark_closed(rec, state)
 
 
 def _push_card(char_id: str, questions: list[dict]) -> None:

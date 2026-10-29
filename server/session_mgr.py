@@ -38,6 +38,11 @@ def set_event_loop(loop: asyncio.AbstractEventLoop) -> None:
     _LOOP = loop
 
 
+def event_loop() -> Optional[asyncio.AbstractEventLoop]:
+    """SDK 常驻事件循环（没起来 = None）。派活 runner（delegate）从 REST 线程往上挂 task 用。"""
+    return _LOOP
+
+
 @dataclass
 class WatchPolicy:
     idle_stop_sec: float = 20 * 60

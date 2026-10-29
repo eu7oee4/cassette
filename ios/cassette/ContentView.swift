@@ -65,6 +65,8 @@ struct ContentView: View {
     @State private var questionCards: [QuestionCard] = []
     // 权限卡队列（PLAN_native §6/U4）：同款通道，permit 事件实时进 + 轮询对齐。
     @State private var permitCards: [PermitCard] = []
+    /// 卡的收场态（单号 → 标签），/pending 的 closed 列同步来；卡片据此置灰标原因（10-30）。
+    @State private var cardOutcomes: [String: String] = [:]
     // 发送排队（09-05 生成中不禁发）：气泡先上屏，POST 由 pumpOutbox 串行补发。
     // 排队必须在 app 不在引擎：判脏比对要求每轮快照含上一轮回复，并发发送=
     // 每条插话都逼后端全量重铸（divergence 口径，chat_loop.py:145）。
@@ -410,6 +412,7 @@ struct ContentView: View {
                     if let pcard = permitCards.first {
                         // 权限卡（U4/native §6）：写类调用挂起等批，最新位置插卡
                         PermitCardView(card: pcard, charID: currentCharID,
+                                       outcome: cardOutcomes[pcard.id],
                                        onDecide: { decidePermit(pcard, allow: $0, reason: $1) },
                                        onClose: { removePermit(pcard.id) })
                             // 换卡=换身份（同 :351 的根治口径）：这个槽位复用一个视图，
@@ -422,6 +425,7 @@ struct ContentView: View {
                     if let card = questionCards.first {
                         // 问答卡（U4）：钉在输入栏上方＝聊天最新位置，答案走 REST 回填
                         QuestionCardView(card: card, charID: currentCharID,
+                                         outcome: cardOutcomes[card.id],
                                          onPick: questionPicked,
                                          onFinish: { finishQuestion(card, answers: $0) },
                                          onSkip: { skipQuestion(card) },
@@ -1493,22 +1497,34 @@ struct ContentView: View {
     @MainActor
     private func syncQuestions() async {
         let char = currentCharID
-        guard let cards = try? await chatService.pendingQuestions(char: char)
+        guard let state = try? await chatService.questionsState(char: char)
         else { return }
+        let cards = state.pending
         // 在飞期间切了人（09-12 串台修）：这份是上一位的卡，挂上去就是 A 的问题染 B 的色、
         // 答案的小字进 B 的记录。口径同 refreshDraftCount。
         guard char == currentCharID else { return }
         let now = Int(Date().timeIntervalSince1970)
+        noteOutcomes(state.closed)
         withAnimation {
             for var c in cards where !questionCards.contains(where: { $0.id == c.id }) {
                 if c.char == nil { c.char = char }
                 questionCards.append(c)
             }
+            // 后端不认了、又没有收场态、也没到点的卡收走（幽灵卡）；有收场态 / 到点的留着置灰等机主收
             questionCards.removeAll { qc in
                 !cards.contains(where: { $0.id == qc.id })
+                    && cardOutcomes[qc.id] == nil
                     && (qc.deadline.map { now < $0 } ?? true)
             }
         }
+    }
+
+    /// 收场态落表：有标签的留给卡片置灰；批了 / 答了的（label=nil）卡 app 早收了，不记。
+    private func noteOutcomes(_ closed: [CardOutcome]) {
+        for o in closed {
+            if let l = o.label { cardOutcomes[o.id] = l }
+        }
+        if cardOutcomes.count > 200 { cardOutcomes.removeAll() }
     }
 
     // MARK: - 权限卡（PLAN_native §6/U4）
@@ -1538,10 +1554,12 @@ struct ContentView: View {
     @MainActor
     private func syncPermits() async {
         let char = currentCharID
-        guard let cards = try? await chatService.pendingPermits(char: char)
+        guard let state = try? await chatService.permitsState(char: char)
         else { return }
+        let cards = state.pending
         guard char == currentCharID else { return }   // 同 syncQuestions（09-12）
         let now = Int(Date().timeIntervalSince1970)
+        noteOutcomes(state.closed)
         withAnimation {
             for var c in cards where !permitCards.contains(where: { $0.id == c.id }) {
                 if c.char == nil { c.char = char }
@@ -1549,6 +1567,7 @@ struct ContentView: View {
             }
             permitCards.removeAll { pc in
                 !cards.contains(where: { $0.id == pc.id })
+                    && cardOutcomes[pc.id] == nil
                     && (pc.deadline.map { now < $0 } ?? true)
             }
         }

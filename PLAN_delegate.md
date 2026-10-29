@@ -229,13 +229,35 @@ TA 点名「让 fable 做」就用 fable。
 
 ## 7. 施工顺序
 
-0. 探针补三腿（§6）。
-1. `delegate.py` runner + REST + 状态文件 + 启动扫尾（不挂工具，先用 REST 手动派一次验证）。
-2. prs MCP 加 `pr_delegate` / `pr_delegate_reply` / `pr_delegate_cancel`；`pr_list` / `pr_view` 显示派活状态；
-   醒因 `delegate` 接进 `wake_sdk`。
-3. 菜单块（§4.2）。
-4. app：PR 页标签 / 在跑的派活 / 撤回 / 重启确认。
-5. 灰度：先只给 cass 开，跑一周看次数、用量、提上来的 PR 质量。
+0. ~~探针补三腿（§6）~~ 10-29 晚已跑（§1.4）。
+1. ~~`delegate.py` runner + REST + 状态文件 + 启动扫尾~~ **已落码（10-30，PLAN_toolmount §9 第 7 步，未重启）**。
+2. ~~prs MCP 加三件；`pr_list` 显示派活状态；醒因 `delegate` 接进 `wake_sdk`~~ **已落码**。
+3. ~~菜单块（§4.2）~~ **已落码**（PR 块末尾，needs 加 pr_delegate / pr_delegate_reply）。
+4. ~~app：PR 页标签 / 在跑的派活 / 撤回 / 重启确认~~ **已落码（模拟器编译，未装真机）**。
+5. 灰度：先只给 cass 开（`.env` 写 `DELEGATE_CHARS=cass`，**拨闸前记得写**），跑一周看次数、用量、提上来的 PR 质量。
+
+### 7.1 施工记录（10-30）
+
+- `server/delegate.py`：`start / reply / cancel / rows / running_now / open_pr / sweep_on_start / sweep_asking_expired`。
+  状态文件 `state/prs/delegates/<角色>~<slug>.json`；副本 `.worktrees/<角色>~<slug>/`，分支 `wake/<角色>/<slug>`。
+  session 段挂在 SDK 常驻事件循环上（`session_mgr.event_loop()` 新加；REST 线程 `call_soon_threadsafe` 过桥），
+  收尾的 git / 文件活 `to_thread`。真正起 session 只有 `_run_session`（测试打桩它）。
+  结局判定照 §3.1 第 4 步 + §1.4 腿③补严：pr_open 成了 → opened；`is_error` / 异常 / 超时 → failed；
+  正常收尾没 pr_open → asking（记 session_id、叫醒）；没 ResultMessage → 留 running 给启动扫尾 resume 一次。
+  门：写只在副本内（相对路径先按副本解析）、.git 拒、Bash 拒；读副本内随便（.env 仍拒）、副本外走他本人那把
+  `readonly_path_guard`。派活副本上提 PR 走 `delegate.open_pr`（prs.open_pr 的派活版：记录多 `delegated{model, slug, brief, qa}`）。
+  usage 落账 `scene="delegate"`。
+- 校验：同角色同时一个在跑；没办完 PR + 在跑派活 ≤ 3；日上限 `DELEGATE_DAILY=5` / `DELEGATE_DAILY_WAKE=2`
+  （发起的轮看他聊天 session 的 turn_kind）；模型白名单 `DELEGATE_MODELS`（fable 别名）；slug 不撞自己的 PR / 没收口的派活；
+  brief ≥ 20 字；灰度闸 `DELEGATE_CHARS`。
+- REST：`POST /prs/delegate` / `/prs/delegate/reply` / `/prs/delegate/cancel`；`GET /prs` 多 `delegates`；重启确认的
+  `running` 列入「在跑的派活」；lifespan 起 `sweep_on_start`。prs MCP 三件只转发（接线同 game-story / pet_mcp，.env 继承）。
+- 醒因 `delegate`：`wake_headline` 一句「是你派出去的活有动静把你叫起来了」，问题原文走 PR 事件行（不重复塞 note）。
+- 停下来问时的事件原话：「派给 <模型> 的 <slug> 停下来问你：<问题>——能答就 pr_delegate_reply 回它；要机主拍板的先发消息问。」
+- app：`PRsPage` 顶部「派出去的活」区（模型 / slug / 状态 / 问题或说明 / 撤回）；详情页「X 派 Y 做的」区展开说明原文 + 问答来回；
+  `PRListWrap.delegates` 老后端缺省空。
+- 测试 `tests/test_delegate.py`（13 条）：四种结局、问答 resume、重启扫尾两次、撤回、并发 / 日上限 / 白名单 / slug 复用 / 灰度、门。
+- 没做：§3.2「重启按钮上提示有 N 个派活在跑」走的是现成的 `running` 列表（不另做按钮态）；§5「跑了 N 分钟」按 started 现算。
 
 ## 8. 已拍（10-29）
 

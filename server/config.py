@@ -121,9 +121,17 @@ WRITE_TOOLS_ENABLED = os.environ.get("WRITE_TOOLS", "0") == "1"
 
 # 醒来改代码只提 PR（PLAN_prs）：拨开=PR 工具（prs_mcp）挂进 sdk 聊天 session、
 # 本角色工作副本（.worktrees/<char>/）里的写类直接放行不弹卡。前提是 WRITE_TOOLS
-# 也开着（在副本里干活用的就是 Edit/Write）。默认关；**关着时 wake 轮写类照样拒**
-# ——wake 轮不再有卡，这条跟这个闸无关（§9.6）。
+# 也开着（在副本里干活用的就是 Edit/Write）。默认关。（10-29 起醒来轮也弹卡，
+# 「关着时 wake 轮写类照样拒」那条退役——关着只是副本不放行、照样弹卡。）
 WAKE_PRS_ENABLED = os.environ.get("WAKE_PRS", "0") == "1"
+
+# 派活提 PR（PLAN_delegate §2 / §8 第 2 条，10-30）：他挑模型写说明、后端起一次性 session 去改。
+# 白名单（fable 是别名 → claude-fable-5-1）；日上限按发起的轮分两档，先这么定、跑一周看实际再调。
+DELEGATE_MODELS = os.environ.get("DELEGATE_MODELS", "haiku,sonnet,opus,claude-fable-5-1")
+DELEGATE_DAILY = int(os.environ.get("DELEGATE_DAILY", "5"))
+DELEGATE_DAILY_WAKE = int(os.environ.get("DELEGATE_DAILY_WAKE", "2"))
+# 灰度（§7 第 5 步）：逗号分隔的角色 id，只这些角色能派；空 = 都能。先只给 cass 开一周。
+DELEGATE_CHARS = {s.strip() for s in os.environ.get("DELEGATE_CHARS", "").split(",") if s.strip()}
 
 # 问答卡（PLAN_chatui §3.5/U4）：AskUserQuestion 挂进 sdk 聊天 session（不进
 # allowed_tools → 每问一卡，can_use_tool 挂起等机主作答，updated_input 回填）。

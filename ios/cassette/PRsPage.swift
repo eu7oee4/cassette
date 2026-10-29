@@ -14,9 +14,45 @@ struct PRRow: Decodable, Identifiable, Equatable {
     let effective: Bool?          // 合并了的此刻生没生效（nil = 不是合并态）
 }
 
+/// 派出去的活（PLAN_delegate §5）：跑着 / 等回答的列在页顶；收口的只给今天的。
+struct DelegateRow: Decodable, Identifiable, Equatable {
+    struct QA: Decodable, Equatable { let q: String; let a: String; let ts: String? }
+    let char: String
+    let char_name: String?
+    let slug: String
+    let model: String
+    let status: String            // running / asking / opened / failed / cancelled
+    let pr_id: Int?
+    let question: String?
+    let error: String?
+    let started: String?
+    let ended: String?
+    let qa: [QA]?
+    let brief: String?
+    var id: String { char + "~" + slug }
+}
+
+/// PR 记录里的「派来的」信息（详情页展开说明原文 + 问答来回）。
+struct PRDelegated: Decodable {
+    struct QA: Decodable { let q: String; let a: String; let ts: String? }
+    let model: String?
+    let slug: String?
+    let brief: String?
+    let qa: [QA]?
+}
+
 struct PRListWrap: Decodable {
     let prs: [PRRow]
+    let delegates: [DelegateRow]
     let unapplied: Int            // 合并了还没生效的个数
+
+    enum CodingKeys: String, CodingKey { case prs, delegates, unapplied }
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        prs = try c.decode([PRRow].self, forKey: .prs)
+        delegates = (try? c.decode([DelegateRow].self, forKey: .delegates)) ?? []   // 老后端没有
+        unapplied = try c.decode(Int.self, forKey: .unapplied)
+    }
 }
 
 struct PRFile: Decodable, Hashable {
@@ -50,6 +86,7 @@ struct PRDetail: Decodable, Identifiable {
     let diff: String?
     let effective: Bool?
     let blockers: [String]?
+    let delegated: PRDelegated?   // 派来的 PR 带：模型 + 说明原文 + 问答来回
 }
 
 struct RestartPreview: Decodable {
@@ -101,6 +138,13 @@ extension ChatService {
     func closePR(_ id: Int, reason: String) async throws {
         let body = try JSONSerialization.data(withJSONObject: ["reason": reason])
         _ = try await prAction(authedRequest("POST", "/prs/\(id)/close", jsonBody: body))
+    }
+
+    /// 撤回一个派出去的活（跑着的掐掉 / 等回答的收掉）。409 = 已经收口了。
+    func cancelDelegate(char: String, slug: String) async throws {
+        let body = try JSONSerialization.data(withJSONObject: ["char": char, "slug": slug,
+                                                               "reason": "机主在 PR 页撤回"])
+        _ = try await prAction(authedRequest("POST", "/prs/delegate/cancel", jsonBody: body))
     }
 
     func getRestartPreview() async throws -> RestartPreview {
@@ -350,6 +394,11 @@ struct PRsPage: View {
                     Section {
                         RestartBar(unapplied: wrap?.unapplied ?? 0) { await load() }
                     }
+                    // 派活（PLAN_delegate §5）：跑着 / 等回答的列在页顶，可撤回
+                    let dele = wrap?.delegates ?? []
+                    if !dele.isEmpty {
+                        Section("派出去的活") { ForEach(dele) { delegateRow($0) } }
+                    }
                     let rows = wrap?.prs ?? []
                     if rows.isEmpty {
                         Section {
@@ -402,6 +451,54 @@ struct PRsPage: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+    }
+
+    private func delegateRow(_ d: DelegateRow) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 6) {
+                Circle().fill(IdentityColor.color(for: d.char)).frame(width: 6, height: 6)
+                Text("\(d.char_name ?? d.char) 派 \(d.model)")
+                Text("·")
+                Text(d.slug).font(.caption.monospaced())
+                Spacer()
+                Text(delegateStatus(d))
+            }
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            if d.status == "asking", let q = d.question, !q.isEmpty {
+                Text(q).font(.footnote).lineLimit(4)
+            } else if d.status == "failed", let e = d.error, !e.isEmpty {
+                Text(e).font(.footnote).foregroundStyle(PRLook.amber).lineLimit(3)
+            } else if let b = d.brief, !b.isEmpty {
+                Text(b).font(.footnote).foregroundStyle(.secondary).lineLimit(2)
+            }
+            if d.status == "running" || d.status == "asking" {
+                Button("撤回", role: .destructive) {
+                    Task {
+                        try? await service.cancelDelegate(char: d.char, slug: d.slug)
+                        await load()
+                    }
+                }
+                .font(.caption)
+            }
+        }
+        .padding(.vertical, 2)
+    }
+
+    private func delegateStatus(_ d: DelegateRow) -> String {
+        switch d.status {
+        case "running":   return "跑了 \(minutesSince(d.started)) 分钟"
+        case "asking":    return "等他回答"
+        case "opened":    return d.pr_id.map { "提了 #\($0)" } ?? "提了"
+        case "failed":    return "没做成"
+        case "cancelled": return "撤回了"
+        default:          return d.status
+        }
+    }
+
+    private func minutesSince(_ iso: String?) -> Int {
+        guard let iso, let d = ISO8601DateFormatter().date(from: iso) else { return 0 }
+        return max(0, Int(Date().timeIntervalSince(d) / 60))
     }
 
     private func load() async {
@@ -502,6 +599,24 @@ struct PRDetailPage: View {
                         .textSelection(.enabled)
                 }
                 .padding(.vertical, 4)
+            }
+
+            // 派来的 PR（PLAN_delegate §5）：标签 + 说明原文 + 问答来回
+            if let dl = pr.delegated, let model = dl.model {
+                Section("\(pr.char_name ?? pr.char) 派 \(model) 做的") {
+                    if let b = dl.brief, !b.isEmpty {
+                        DisclosureGroup("他写的说明") {
+                            Text(b).font(.footnote).textSelection(.enabled)
+                        }
+                        .font(.subheadline)
+                    }
+                    ForEach(Array((dl.qa ?? []).enumerated()), id: \.offset) { _, qa in
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text("问：" + qa.q).font(.footnote)
+                            Text("答：" + qa.a).font(.footnote).foregroundStyle(.secondary)
+                        }
+                    }
+                }
             }
 
             if pr.status == "reverted", let why = pr.revert_reason, !why.isEmpty {

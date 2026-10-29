@@ -458,7 +458,13 @@ SDK 升级会连带换掉它自带的 CLI（10-29 晚起 2.1.310，与 PATH 同�
      `inject_pump_user` 入口调 `_yield_wake_cards` → `permits/questions.yield_wake` 把该角色醒来轮的卡按拒收掉
      （原话 `YIELD_MSG`），醒来轮收尾、聊天轮接上。跨后端重启不保留（卡是内存态，permits 卷首）；要永久保留走 PLAN_proposals。
      PLAN_prs §0 / §4 已改口。测试：`tests/test_toolmount_step6.py`（17 条）+ 旧测改 6 条。
-7. **派活**（PLAN_delegate 第 1–4 步）：prs 的派活工具上了再补 §3.2 的派活菜单段；app 发一版（PR 页）。
+7. ~~**派活**（PLAN_delegate 第 1–4 步）~~ **已落码（10-30，未重启、app 未装真机；施工记录在 PLAN_delegate §7.1）**：
+   prs 的派活工具上了，§3.2 的派活菜单段已补进 PR 块；app PR 页加了派活区。
+   **同批（10-30 机主拍板）已落码**：醒来轮的卡让路补第二种触发（`wake_sdk.enqueue_wake` 入队时
+   `_yield_wake_cards(cid, "wake")`，原话 `YIELD_MSG_WAKE`）+ 收场态账（`permits/questions._closed`，近一小时，
+   `/permits/pending` `/questions/pending` 多 `closed` 列）+ app 卡片置灰标「已让路，你发送了新消息」/
+   「已让路，他醒来了」/「已超时」（`CardOutcome.label`，ContentView `cardOutcomes`）。测试 `tests/test_cards_closed.py`。
+   上电前 `.env` 写 `DELEGATE_CHARS=cass`（灰度）。
 8. **延迟 + 常驻**（toolmount §2）+ **§5.2 中途探活 / 配置变了的重铸 / game 开关**：`CHAT_TOOL_DEFER` 默认关，
    cass 先开跑几天看 ToolSearch 频率。预期：第 9 步接上之前，游戏里每次段内重铸（70 张）之后开头
    多一跳取用法，正常现象，别当 bug 修。
@@ -480,8 +486,11 @@ SDK 升级会连带换掉它自带的 CLI（10-29 晚起 2.1.310，与 PATH 同�
   本稿按「算配置」写。
 - §6 的 token 预算 8k、容差沿用闹钟的 120s，是否合适。
 - ~~缺席告知的文案表（每个 server 一句）由机主写还是先给草稿。~~ **10-29 我给草稿、机主定稿**，在 `pipeline.ABSENT_NOTES`。
-- 醒来弹卡挂着时整条 session 被占：TA 的消息到了让路（已做）；他自己的下一次醒来（闹钟 / 来信）排在队里等卡——
-  要不要也让路（比如闹钟到点卡自动拒）？先看灰度里醒来弹卡的频率再定。
+- ~~醒来弹卡挂着时整条 session 被占：TA 的消息到了让路（已做）；他自己的下一次醒来（闹钟 / 来信）排在队里等卡——
+  要不要也让路？~~ **10-30 机主拍板：也让路，并进第 7 步**：醒来轮的卡两种让路——TA 发了新消息 / 他自己的下一次醒来到了，
+  原话分开；app 卡片置灰标「已让路，你发送了新消息」/「已让路，他醒来了」（现在 app 只认 deadline 到点的「已超时」，
+  让路 / 手拒的卡在 app 里原样挂到 deadline，点了报「没有这张待批单」）。后端 pending 轮询或 SSE 带收场态，随第 7 步
+  的 app 版本（PR 页）一起发。
 - game 的 14 个工具是否要在泵开着时临时常驻——原答「不」的理由（进程内 server 不能 toggle）10-29 晚已不成立
   （§5.3 翻案）。**10-29 机主拍板：做**。game 设 `alwaysLoad: true` + 平时 toggle off（0 token）、
   game_start 时 toggle on（2.3k 常驻、不用取用法、重铸也不丢）、game_end 时 toggle off。好处是 §6 不用管游戏工具，

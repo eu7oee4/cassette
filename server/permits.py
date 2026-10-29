@@ -51,6 +51,29 @@ def pending(char_id: Optional[str] = None) -> list[dict]:
                   key=lambda r: r["ts"])
 
 
+# 收场态账（10-30 机主拍板）：卡收场了 app 要知道是为什么——原来 app 只认 deadline 到点的「已超时」，
+# 让路 / 手拒的卡在 app 里原样挂到 deadline。这里记近一小时内收场的卡：单号 → 收场态
+# （allowed / denied / timeout / yielded_chat / yielded_wake / cancelled），/pending 一并下发。内存态，同卡本身。
+CLOSED_KEEP_SEC = 3600
+_closed: dict[str, dict] = {}
+
+
+def _mark_closed(rec: dict, state: str) -> None:
+    now = int(time.time())
+    for k, v in list(_closed.items()):
+        if now - v["ts"] > CLOSED_KEEP_SEC:
+            _closed.pop(k, None)
+    _closed[rec["id"]] = {"id": rec["id"], "char": rec["char"], "state": state, "ts": now}
+
+
+def closed(char_id: Optional[str] = None) -> list[dict]:
+    """近一小时收场了的卡（app 对齐用）。"""
+    now = int(time.time())
+    return sorted((dict(v) for v in _closed.values()
+                   if now - v["ts"] <= CLOSED_KEEP_SEC and (char_id is None or v["char"] == char_id)),
+                  key=lambda r: r["ts"])
+
+
 def waiting(char_id: str) -> bool:
     """这个角色有没有一次挂着等批的调用——轮内空闲超时的豁免判据：挂起是
     在等机主拍板，流静着是正常的，不是引擎死了。"""
@@ -75,13 +98,15 @@ def decide(permit_id: str, allow: bool, reason: str = "") -> dict:
     return {"ok": True, "state": "allowed" if allow else "denied"}
 
 
-def yield_wake(char_id: str, reason: str) -> int:
-    """TA 来了：这个角色醒来轮挂着的卡全部按「拒」收掉（理由原话给模型），回收掉几张。
-    聊天轮的卡不动（TA 正看着）。任意线程可调（future 在它自己的 loop 上置值）。"""
+def yield_wake(char_id: str, reason: str, state: str = "yielded_chat") -> int:
+    """让路：这个角色醒来轮挂着的卡全部按「拒」收掉（理由原话给模型），回收掉几张。
+    两种触发（10-30 机主拍板）：TA 发了新消息（yielded_chat）/ 他自己的下一次醒来到了
+    （yielded_wake）。聊天轮的卡不动（TA 正看着）。任意线程可调（future 在它自己的 loop 上置值）。"""
     n = 0
     for r in list(_pending.values()):
         if r["char"] != char_id or not r.get("wake") or r["future"].done():
             continue
+        r["state"] = state
         fut = r["future"]
 
         def _set(f=fut):
@@ -116,12 +141,18 @@ async def ask(char_id: str, *, tool: str, summary: str, title: str = "",
                      "wake": bool(wake),
                      "future": fut, "loop": loop}
     _push_card(char_id, tool, said or summary)
+    rec = _pending[pid]
+    state = "cancelled"
     try:
-        return await asyncio.wait_for(fut, t)
+        res = await asyncio.wait_for(fut, t)
+        state = rec.get("state") or ("allowed" if res[0] else "denied")
+        return res
     except asyncio.TimeoutError:
+        state = "timeout"
         return None
     finally:
         _pending.pop(pid, None)
+        _mark_closed(rec, state)
 
 
 def _push_card(char_id: str, tool: str, summary: str) -> None:

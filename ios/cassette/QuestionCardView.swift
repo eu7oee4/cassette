@@ -9,6 +9,8 @@ struct QuestionCardView: View {
     @Environment(\.colorScheme) private var scheme
     let card: QuestionCard
     let charID: String
+    /// 后端给的收场态标签（同 PermitCardView，10-30）：nil = 还在等；有值就置灰标它。
+    var outcome: String? = nil
     /// 每答完一个问题喊一次（父层出「眠眠选择了「…」」小字 §5.2）。
     var onPick: (_ question: String, _ answer: String) -> Void = { _, _ in }
     /// 所有问题都答完：父层拿完整 answers 去 POST decide。
@@ -22,7 +24,9 @@ struct QuestionCardView: View {
     @State private var answers: [String: String] = [:]
     @State private var picked: Set<String> = []     // multiSelect 的勾选集
     @State private var custom = ""                  // 自定义答案输入
-    @State private var expired = false
+    @State private var timedOut = false
+    private var expired: Bool { timedOut || outcome != nil }
+    private var closedLabel: String { outcome ?? "已超时" }
     @FocusState private var customFocused: Bool
 
     private var pal: CharPalette { IdentityColor.palette(for: charID) }
@@ -50,7 +54,7 @@ struct QuestionCardView: View {
         .background(fill, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
         .overlay(alignment: .topLeading) {
             if expired {
-                Text("已超时")
+                Text(closedLabel)
                     .font(.caption2.bold())
                     .padding(.horizontal, 8).padding(.vertical, 3)
                     .background(Color(uiColor: .systemGray2), in: Capsule())
@@ -67,7 +71,7 @@ struct QuestionCardView: View {
                 do { try await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000)) }
                 catch { return }
             }
-            expired = true                          // 后端同刻已超时自拒，这儿只管置灰
+            timedOut = true                         // 后端同刻已超时自拒，这儿只管置灰
         }
     }
 

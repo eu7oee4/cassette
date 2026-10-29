@@ -838,7 +838,9 @@ def _pet_mcp_config(char_id: Optional[str] = None) -> Path:
 # 挂载条件三样全要：WAKE_PRS 闸开、WRITE_TOOLS 开（在工作副本里干活靠 Edit/Write）、
 # 这个角色走 sdk 聊天（门和工作副本放行都在 chat_loop 里）。
 PRS_MCP_TOOLS = [f"mcp__prs__{t}" for t in
-                 ("pr_start", "pr_test", "pr_open", "pr_close", "pr_list", "pr_view")]
+                 ("pr_start", "pr_test", "pr_open", "pr_close", "pr_list", "pr_view",
+                  # 派活（PLAN_delegate §2，10-30）：壳在 prs_mcp，真身 delegate.py 走后端 REST
+                  "pr_delegate", "pr_delegate_reply", "pr_delegate_cancel")]
 
 
 def _prs_mounted(char_id: Optional[str] = None) -> bool:

@@ -114,6 +114,9 @@ def wake_headline(trigger: str) -> str:
     if trigger == "mail":
         # 硬触发不是"自己醒的"，别把外面推的一下说成自发（note 里写是什么事）。
         return f"{config.user_name()}没找你，是外面有动静把你叫起来了。"
+    if trigger == "delegate":
+        # 派出去的活停下来问（PLAN_delegate §3.3）：问题原文在 PR 事件行里（〔PR：…〕）。
+        return f"{config.user_name()}没找你，是你派出去的活有动静把你叫起来了。"
     return f"{config.user_name()}没找你，你自己醒过来了。"
 
 
@@ -321,6 +324,8 @@ def enqueue_wake(cid: str, trigger: str, note: str = "", force: bool = False) ->
             injection="", finalize=_finalize, kind="wake", wake_trigger=trigger,
             injection_factory=_injection, on_dead=lambda: _wake_dead(cid, trigger))
         slots[trigger] = turn.rid
+        # 上一轮醒来弹的卡还挂着：让路（10-30 机主拍板第二种触发），不然这次醒来要等卡超时。
+        chat_loop._yield_wake_cards(cid, "wake")
         handle.queue.put_nowait(turn)
         logerr(f"sdk 醒来入队（{cid}，{trigger}{'，硬触发' if force else ''}）")
         return True
