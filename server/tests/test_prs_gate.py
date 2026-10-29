@@ -1,5 +1,6 @@
 """PLAN_prs §4：写类按路径分路——本角色工作副本直接放行、别人的副本 / 副本里的 .git 拒、
-工作副本以外 chat 轮弹卡 / wake 轮拒；Bash 醒来轮拒。PR 工具的挂载口径和系统提示两种措辞。
+工作副本以外弹卡（**醒来轮也弹**，10-29 机主拍板；原「wake 轮拒 / Bash 醒来轮拒」退役）。
+PR 工具的挂载口径和菜单块（原系统提示两种措辞 _write_paths_text 10-29 第 6 步进菜单）。
 全部离线（路径不用真存在，resolve 只是算路径）。
 
 跑法（cwd = server/）：
@@ -67,9 +68,9 @@ class GateOnTest(FlagsMixin, unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(_decision(out), "allow", (turn, tool))
 
     async def test_relative_escape_from_worktree_is_main(self):
-        p = self.wt("default", "../../server/x.py")        # 爬出副本回到主目录
+        p = self.wt("default", "../../server/x.py")        # 爬出副本回到主目录 → 不是直放，弹卡
         self.assertEqual(_decision(await self.gate("Edit", {"file_path": p}, turn="wake")),
-                         "deny")
+                         "ask")
 
     async def test_other_worktree_denied(self):
         for other in ("cass", "_baseline"):
@@ -83,18 +84,16 @@ class GateOnTest(FlagsMixin, unittest.IsolatedAsyncioTestCase):
             out = await self.gate("Write", {"file_path": self.wt("default", rel)})
             self.assertEqual(_decision(out), "deny", rel)
 
-    async def test_main_dir_chat_asks_wake_denies(self):
-        self.assertEqual(_decision(await self.gate("Edit", {"file_path": self.main()})),
-                         "ask")
-        out = await self.gate("Edit", {"file_path": self.main()}, turn="wake")
-        self.assertEqual(_decision(out), "deny")
-        self.assertIn("pr_start", out["hookSpecificOutput"]["permissionDecisionReason"])
+    async def test_main_dir_asks_both_turns(self):
+        """10-29：醒来轮也弹卡（超时走醒来档，TA 来了让路）——门不再按轮拒。"""
+        for turn in (None, "wake"):
+            self.assertEqual(_decision(await self.gate("Edit", {"file_path": self.main()},
+                                                       turn=turn)), "ask", turn)
 
-    async def test_bash_chat_asks_wake_denies(self):
-        self.assertEqual(_decision(await self.gate("Bash", {"command": "ls"})), "ask")
-        out = await self.gate("Bash", {"command": "ls"}, turn="wake")
-        self.assertEqual(_decision(out), "deny")
-        self.assertIn("pr_test", out["hookSpecificOutput"]["permissionDecisionReason"])
+    async def test_bash_asks_both_turns(self):
+        for turn in (None, "wake"):
+            self.assertEqual(_decision(await self.gate("Bash", {"command": "ls"}, turn=turn)),
+                             "ask", turn)
 
     async def test_path_guard_still_first(self):
         out = await self.gate("Edit", {"file_path": self.wt("default", "server/.env")})
@@ -116,12 +115,30 @@ class PermitFallbackTest(FlagsMixin, unittest.IsolatedAsyncioTestCase):
             self.assertIsInstance(out, PermissionResultAllow)
         self.assertEqual(permits.pending(), [])
 
-    async def test_wake_main_dir_denied_without_card(self):
-        from claude_agent_sdk import PermissionResultDeny
-        out = await self.cb("Write", {"file_path": self.main()}, "wake")
-        self.assertIsInstance(out, PermissionResultDeny)
-        self.assertIn("pr_start", out.message)
-        self.assertEqual(permits.pending(), [])
+    async def test_wake_main_dir_pops_card_with_wake_timeout(self):
+        """10-29：醒来轮主目录写类 → 弹卡，超时走醒来档、卡标 wake。"""
+        from claude_agent_sdk import PermissionResultAllow
+        import chat_loop
+        seen: dict = {}
+
+        async def fake_ask(char_id, **kw):
+            seen.update(kw, char=char_id)
+            return (True, "")
+
+        h = self.handle(turn="wake")
+        h.meta["said_for"] = {"t9": "我改一下主目录"}
+        orig = permits.ask
+        permits.ask = fake_ask
+        try:
+            out = await chat_loop._permit_gate(h)(
+                "Write", {"file_path": self.main()},
+                SimpleNamespace(title="", tool_use_id="t9"))
+        finally:
+            permits.ask = orig
+        self.assertIsInstance(out, PermissionResultAllow)
+        self.assertTrue(seen["wake"])
+        self.assertEqual(seen["timeout"], permits.WAKE_TIMEOUT_SEC)
+        self.assertEqual(seen["said"], "我改一下主目录")
 
     async def test_other_worktree_denied_in_chat(self):
         from claude_agent_sdk import PermissionResultDeny
@@ -131,20 +148,18 @@ class PermitFallbackTest(FlagsMixin, unittest.IsolatedAsyncioTestCase):
 
 
 class GateOffTest(FlagsMixin, unittest.IsolatedAsyncioTestCase):
-    """WAKE_PRS 关着：工作副本不放行，醒来轮写类照样拒（不回退到弹卡，§9.6）。"""
+    """WAKE_PRS 关着：工作副本不放行（哪一轮都弹卡，10-29 起醒来轮也弹）。"""
     prs_on = False
 
     async def test_worktree_not_special_when_off(self):
-        self.assertEqual(_decision(await self.gate("Edit", {"file_path": self.wt("default")})),
-                         "ask")
-        self.assertEqual(_decision(await self.gate("Edit", {"file_path": self.wt("default")},
-                                                   turn="wake")), "deny")
+        for turn in (None, "wake"):
+            self.assertEqual(_decision(await self.gate("Edit", {"file_path": self.wt("default")},
+                                                       turn=turn)), "ask", turn)
 
-    async def test_wake_reasons_dont_mention_pr_tools(self):
-        for tool, inp in (("Edit", {"file_path": self.main()}), ("Bash", {"command": "ls"})):
-            out = await self.gate(tool, inp, turn="wake")
-            self.assertEqual(_decision(out), "deny")
-            self.assertNotIn("pr_", out["hookSpecificOutput"]["permissionDecisionReason"])
+    async def test_other_worktree_still_denied_when_off(self):
+        out = await self.gate("Edit", {"file_path": self.wt("cass")}, turn="wake")
+        self.assertEqual(_decision(out), "deny")
+        self.assertNotIn("pr_start 拿到", out["hookSpecificOutput"]["permissionDecisionReason"])
 
 
 class EventInjectionTest(FlagsMixin, unittest.TestCase):
@@ -206,13 +221,26 @@ class MountTest(FlagsMixin, unittest.TestCase):
             finally:
                 setattr(config, flag, orig)
 
-    def test_prompt_two_ways_only_when_on(self):
+    def test_pr_block_in_menu_only_when_mounted(self):
+        """§3.2：原 _write_paths_text 两种措辞进了菜单——PR 块 needs 四个 pr_ 工具，
+        配置里没有整块不出；「动手改东西」块只看写类开关。"""
         import chat_loop
-        self.assertIn("pr_start", chat_loop._write_paths_text("default"))
-        config.WAKE_PRS_ENABLED = False
-        text = chat_loop._write_paths_text("default")
-        self.assertNotIn("pr_", text)
-        self.assertIn("醒着", text)
+        self.assertFalse(hasattr(chat_loop, "_write_paths_text"))
+        orig = pipeline.mounted_tool_names
+        pipeline.mounted_tool_names = lambda ctx, cid=None: (
+            list(pipeline.BASICS_MCP_TOOLS)
+            + (list(pipeline.PRS_MCP_TOOLS) if pipeline._prs_mounted(cid) else []))
+        try:
+            on = pipeline.tool_menu_block("chat", "default")
+            self.assertIn("提一个 PR", on)
+            self.assertIn("动手改东西", on)
+            config.WAKE_PRS_ENABLED = False
+            pipeline._menu_gap_seen.clear()
+            off = pipeline.tool_menu_block("chat", "default")
+            self.assertNotIn("提一个 PR", off)
+            self.assertIn("动手改东西", off)
+        finally:
+            pipeline.mounted_tool_names = orig
 
 
 if __name__ == "__main__":

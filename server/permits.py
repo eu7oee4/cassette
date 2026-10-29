@@ -23,9 +23,12 @@ import time
 import uuid
 from typing import Optional
 
-# 卡只在聊天轮弹（PLAN_prs §4，09-23）：醒来轮不再有卡——工作副本里改不用卡、
-# 工作副本以外一律拒——旧的 wake 快拒超时（PERMIT_TIMEOUT_WAKE_SEC）随之退役。
+# 两档超时（10-29 机主拍板：醒来轮也弹卡——醒来要防的只有安全面，卡有 Bark 推送、
+# app 回前台也拉得到）。醒来档长一些：TA 多半不在手机边上。卡挂着时整条 session 被那
+# 一轮占着，所以 TA 的消息一到醒来轮的卡自动让路（yield_wake，chat_loop 调）。
+# 09-23 到 10-29 之间醒来轮没有卡（PLAN_prs §4 旧口径），那条已改口。
 CHAT_TIMEOUT_SEC = int(os.environ.get("PERMIT_TIMEOUT_CHAT_SEC", "600"))
+WAKE_TIMEOUT_SEC = int(os.environ.get("PERMIT_TIMEOUT_WAKE_SEC", "1800"))
 
 _pending: dict[str, dict] = {}   # 单号 → 卡（含 future/loop；REST 读时剥掉）
 
@@ -72,11 +75,31 @@ def decide(permit_id: str, allow: bool, reason: str = "") -> dict:
     return {"ok": True, "state": "allowed" if allow else "denied"}
 
 
+def yield_wake(char_id: str, reason: str) -> int:
+    """TA 来了：这个角色醒来轮挂着的卡全部按「拒」收掉（理由原话给模型），回收掉几张。
+    聊天轮的卡不动（TA 正看着）。任意线程可调（future 在它自己的 loop 上置值）。"""
+    n = 0
+    for r in list(_pending.values()):
+        if r["char"] != char_id or not r.get("wake") or r["future"].done():
+            continue
+        fut = r["future"]
+
+        def _set(f=fut):
+            if not f.done():
+                f.set_result((False, reason))
+
+        r["loop"].call_soon_threadsafe(_set)
+        n += 1
+    return n
+
+
 async def ask(char_id: str, *, tool: str, summary: str, title: str = "",
               said: str = "", note: str = "",
               permit_id: Optional[str] = None,
-              timeout: Optional[float] = None) -> Optional[tuple[bool, str]]:
+              timeout: Optional[float] = None,
+              wake: bool = False) -> Optional[tuple[bool, str]]:
     """登记一张卡并原地等机主拍板。返回 (批没批, 理由)；None＝超时。
+    wake=醒来轮弹的（TA 来了会被 yield_wake 收掉）。
     卡的清理只有这一处（finally）：批完/拒完/超时/轮被掐，都不留悬单。"""
     pid = (permit_id or "").strip() or uuid.uuid4().hex[:12]
     loop = asyncio.get_running_loop()
@@ -90,6 +113,7 @@ async def ask(char_id: str, *, tool: str, summary: str, title: str = "",
                      "said": (said or "").strip()[:1000],
                      "note": (note or "").strip()[:300],
                      "ts": now, "deadline": now + int(t),
+                     "wake": bool(wake),
                      "future": fut, "loop": loop}
     _push_card(char_id, tool, said or summary)
     try:

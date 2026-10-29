@@ -14,8 +14,8 @@ Bark 推送；卡本体在 assistant 事件流过 translate_events 时就实时�
 - **内存态是特性**（同 permits）：后端重启即作废，模型想问会再问。
 - **答案只能从后端 REST 来**（app 卡片调）：注入文本怂恿得了他提问，
   替机主作答做不到。
-- wake 轮问不了：AskUserQuestion 不在 wake_tools，PreToolUse 门直接拒——
-  机主多半不在，问了也是超时。
+- 醒来轮也能问（10-29 机主拍板，原来门直接拒）：超时走醒来档 WAKE_TIMEOUT_SEC，
+  TA 的消息一到醒来轮的卡自动让路（yield_wake，chat_loop 调）。
 """
 from __future__ import annotations
 
@@ -25,9 +25,9 @@ import time
 import uuid
 from typing import Optional
 
-# 问答只有聊天轮一档（wake 被门挡了）。默认跟 permits 聊天档一样 10 分钟，
-# 拍板了改 env。
+# 两档：聊天档默认跟 permits 一样 10 分钟；醒来档 30 分钟（TA 多半不在手机边上）。
 TIMEOUT_SEC = int(os.environ.get("QUESTION_TIMEOUT_SEC", "600"))
+WAKE_TIMEOUT_SEC = int(os.environ.get("QUESTION_TIMEOUT_WAKE_SEC", "1800"))
 
 _pending: dict[str, dict] = {}   # 单号 → 卡（含 future/loop；REST 读时剥掉）
 
@@ -73,11 +73,31 @@ def decide(question_id: str, answers: Optional[dict],
     return {"ok": True, "state": "answered" if answers else "dismissed"}
 
 
+def yield_wake(char_id: str, reason: str) -> int:
+    """TA 来了：这个角色醒来轮挂着的问答卡全部按「没答」收掉（note=原话），回收掉几张。
+    口径同 permits.yield_wake。"""
+    n = 0
+    for r in list(_pending.values()):
+        if r["char"] != char_id or not r.get("wake") or r["future"].done():
+            continue
+        fut = r["future"]
+
+        def _set(f=fut):
+            if not f.done():
+                f.set_result((None, reason))
+
+        r["loop"].call_soon_threadsafe(_set)
+        n += 1
+    return n
+
+
 async def ask(char_id: str, *, questions: list[dict],
               question_id: Optional[str] = None,
-              timeout: Optional[float] = None
+              timeout: Optional[float] = None,
+              wake: bool = False
               ) -> Optional[tuple[Optional[dict], str]]:
     """登记一张卡并原地等机主作答。返回 (answers|None, note)；None＝超时。
+    wake=醒来轮弹的（TA 来了会被 yield_wake 收掉）。
     卡的清理只有这一处（finally）：答完/不答/超时/轮被掐，都不留悬单。"""
     qid = (question_id or "").strip() or uuid.uuid4().hex[:12]
     loop = asyncio.get_running_loop()
@@ -87,6 +107,7 @@ async def ask(char_id: str, *, questions: list[dict],
     _pending[qid] = {"id": qid, "char": char_id,
                      "questions": questions or [],
                      "ts": now, "deadline": now + int(t),
+                     "wake": bool(wake),
                      "future": fut, "loop": loop}
     _push_card(char_id, questions or [])
     try:

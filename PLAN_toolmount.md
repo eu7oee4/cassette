@@ -177,7 +177,11 @@ game 2,298、notion 1,692、prs 914、basics 756、mail 701、webpage 480、skil
 - 维护纪律（写进菜单文件顶部注释）：**上新插件 / 改工具名必须同步改菜单**；日志那两条
   喊话是提醒，不是过滤。
 
-### 3.2 新增菜单块（草稿在会话里给过，定稿时照抄）
+### 3.2 新增菜单块（**10-29 机主定稿，已照抄进三份菜单文件**：`characters/{default,cass}/tool_menu.md`、`tool_menu.example.md`）
+
+> 10-29 深夜随第 6 步落地时的两处改判（机主拍板）：**醒来轮也能弹卡**（写类 + 问答卡），所以「动手改东西」
+> 「拿不准的事让 TA 选」两块不再写「只在 TA 跟你说话时能用」，改写成「醒着也能弹，但 TA 多半不在：等不到就是没批
+> / 一轮最多一张」。机制见 PLAN_prs §4 改口。翻代码块的两个仓路径由渲染器自动补一行（常量，手写会过期）。
 
 - `## 翻代码和资料 <!-- needs: Read, Grep, Glob -->`：只读范围（cassette 仓 / dossier 仓），
   .env 不在范围，state/ 只看自己房间 + jobhunt / workbench / webpages。
@@ -277,6 +281,14 @@ AskUserQuestion 进去就在醒来轮放行了。
    一句，文案表写在一处）；`_wake_gate` 对 absent 工具直接 deny 同一句话——不让他调到
    CLI 那层去撞一个不在的工具。ToolSearch 取 absent 工具也在门里拦（看 ToolSearch 的 `query`，
    `select:` 里含 absent 全名就 deny 同一句）——不拦的话他先白跑一跳取 schema、再被拒。
+
+**施工记录（10-29 深夜，第 6 步）**：`chat_loop._probe_mcp(client, options, handle)` 在 `_open_session` 的
+`connect()` 之后调，①–④ 照上面；假 client（没 `get_mcp_status`）直接跳过；探活自身任何异常按「全在」处理不影响
+开 session。缺席落 `handle.meta["absent_tools"] = {server: {"tools": [全名], "error": 原话}}`，
+`absent_note_due` 由 `_turn_prefix` 消费（和开局引子 / 节奏补注同一个口）。文案表 `pipeline.ABSENT_NOTES`
+（机主 10-29 定稿，每 server 两句：缺席 / 恢复，恢复句给 §5.2），没写的走兜底模板。门：`_absent_hit` 在
+`_wake_gate` 最前，直接调 → 拒；ToolSearch `select:` 含缺席全名 → 拒同一句，只认整串全名不做别的匹配。
+轮询上限 `MCP_PROBE_TIMEOUT_SEC`（env，默认 10）。「server 连上了但少工具」（版本漂移）也算缺席。
 
 ### 5.2 中途
 
@@ -428,9 +440,24 @@ SDK 升级会连带换掉它自带的 CLI（10-29 晚起 2.1.310，与 PATH 同�
 5. ~~**游戏改走 /chat/stream**~~ **已落码（10-29 深夜，未重启、app 未装真机；施工记录在 PLAN_gamechat §5 末）**：
    后端 `/code/status` 加 `engine` + 终端口泵分支加退役判据日志 → app `terminalRoute` 只在 `send()` 改道（含
    game_started 到手时先拉一次 status）。剩：观察旧包日志 → 两周后退役终端口泵分支（§3.3）。
-6. **固定菜单 + 开场探活同批**（toolmount §3.1 / §3.2 / §3.3 第二刀 / §5.1）：菜单摘掉 `ombre_alive`
+6. ~~**固定菜单 + 开场探活同批**~~ **已落码（10-29 深夜，未重启）**（toolmount §3.1 / §3.2 / §3.3 第二刀 / §5.1）：菜单摘掉 `ombre_alive`
    过滤的同一批**必须**带上缺席告知 + 门拒，否则中间 Ombre 掉线菜单在说谎（`pipeline.py:1067-1070`
    自己定的「绝不提不在场的能力」）。§5.2 中途探活可以放到第 8 步。
+   施工记录：
+   - §3.1：`pipeline.ombre_configured`（OMBRE_ENABLED 且接线有 mcp_url）替掉三处 `ombre_alive`（`build_options` /
+     `mounted_tool_names` / `_ombre_on`）；`ombre_alive` 只剩 `-p` 老路（`base_claude_args`）。
+     `pipeline.configured_tool_names(context, char_id)` = `mounted_tool_names` + 内置工具按三个开关（只对 sdk 引擎的角色）；
+     内置的**不进** `mounted_tool_names`（它兼做 wake_tools）。`tool_menu_block` 按它渲染；chat 渲染时块尾自动补
+     「醒着的时候这几样用不了：…」（对 `configured_tool_names("wake")`，不碰运行时）；翻代码块自动补「范围：两个仓路径」。
+     `_warn_unknown` 反向喊话（菜单提到、chat 全集里没有），只在 chat 上查。三份菜单文件头注释写了维护纪律。
+   - §3.3 第二刀：`build_options` 删文件工具段 + `_write_paths_text` + 问答卡段（工具照挂），`one_turn_hint` 重新真的在最末。
+   - §5.1：见 §5.1 末施工记录。
+   - **醒来轮也弹卡**（10-29 机主拍板，不在原稿里）：`_write_route` 不再按轮拒（工作副本直放 / 别人副本与 .git 拒 / 其余 ask）、
+     `_permit_gate` 醒来档超时 `permits.WAKE_TIMEOUT_SEC` / `questions.WAKE_TIMEOUT_SEC`（env，默认 1800）、卡标 `wake`；
+     `_wake_gate` 放行 AskUserQuestion（闸是卡本身）；`_said_feed` 醒来轮也认领人话；**TA 来了让路**：`stream_turn` /
+     `inject_pump_user` 入口调 `_yield_wake_cards` → `permits/questions.yield_wake` 把该角色醒来轮的卡按拒收掉
+     （原话 `YIELD_MSG`），醒来轮收尾、聊天轮接上。跨后端重启不保留（卡是内存态，permits 卷首）；要永久保留走 PLAN_proposals。
+     PLAN_prs §0 / §4 已改口。测试：`tests/test_toolmount_step6.py`（17 条）+ 旧测改 6 条。
 7. **派活**（PLAN_delegate 第 1–4 步）：prs 的派活工具上了再补 §3.2 的派活菜单段；app 发一版（PR 页）。
 8. **延迟 + 常驻**（toolmount §2）+ **§5.2 中途探活 / 配置变了的重铸 / game 开关**：`CHAT_TOOL_DEFER` 默认关，
    cass 先开跑几天看 ToolSearch 频率。预期：第 9 步接上之前，游戏里每次段内重铸（70 张）之后开头
@@ -452,7 +479,9 @@ SDK 升级会连带换掉它自带的 CLI（10-29 晚起 2.1.310，与 PATH 同�
 - 「配置全集」里插件开关算配置（菜单跟着变、触发重铸）还是算运行时（菜单不变、只告知）？
   本稿按「算配置」写。
 - §6 的 token 预算 8k、容差沿用闹钟的 120s，是否合适。
-- 缺席告知的文案表（每个 server 一句）由机主写还是先给草稿。
+- ~~缺席告知的文案表（每个 server 一句）由机主写还是先给草稿。~~ **10-29 我给草稿、机主定稿**，在 `pipeline.ABSENT_NOTES`。
+- 醒来弹卡挂着时整条 session 被占：TA 的消息到了让路（已做）；他自己的下一次醒来（闹钟 / 来信）排在队里等卡——
+  要不要也让路（比如闹钟到点卡自动拒）？先看灰度里醒来弹卡的频率再定。
 - game 的 14 个工具是否要在泵开着时临时常驻——原答「不」的理由（进程内 server 不能 toggle）10-29 晚已不成立
   （§5.3 翻案）。**10-29 机主拍板：做**。game 设 `alwaysLoad: true` + 平时 toggle off（0 token）、
   game_start 时 toggle on（2.3k 常驻、不用取用法、重铸也不丢）、game_end 时 toggle off。好处是 §6 不用管游戏工具，

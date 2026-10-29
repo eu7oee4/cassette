@@ -938,12 +938,31 @@ def ombre_alive(char_id: Optional[str] = None) -> bool:
     return alive
 
 
+def ombre_configured(char_id: Optional[str] = None) -> bool:
+    """这个角色**配了** Ombre（PLAN_toolmount §3.1，10-29 第 6 步）：OMBRE_ENABLED 且接线
+    有 mcp_url。常驻 session 那条路（chat_loop.build_options / mounted_tool_names /
+    _ombre_on）按它挂、**不探活**：此刻连不连得上交给开 session 探活（chat_loop._probe_mcp，
+    §5.1）。原来三处都按 ombre_alive 判——开 session 那刻 Ombre 不在，它就不在 mcp_servers
+    里：get_mcp_status 看不见 failed、reconnect_mcp_server 无从调，只能等下次重铸。
+    ombre_alive 留给 -p 老路（base_claude_args）。"""
+    if not config.OMBRE_ENABLED:
+        return False
+    try:
+        import characters
+        return bool(characters.ombre_conf(char_id)["mcp_url"])
+    except Exception:
+        return False
+
+
 # ---------- 人话版能力菜单 ----------
 # 取代原来那段写死的 memory_block：工具说明外置成可编辑文件（characters.tool_menu_path），
-# 按**本轮实际挂载的工具**过滤后注入。为什么非要按实际挂载过滤——四档醒来策略
-# （照挂 / NO_WAKE_PLUGINS 硬禁 / WAKE_TOGGLEABLE 开关 / WAKE_TOOL_EXCLUDE 工具级）、
-# 独占资源归属、per-char 插件集、Ombre 探活，每一条都会改变这一轮到底挂了什么。
-# 写死的菜单必然说谎：跟 TA 提一个这轮根本不在场的能力，他会去调、然后失败。
+# 按**这个角色配置上的工具全集**过滤后注入（configured_tool_names）。为什么非要过滤——
+# 四档醒来策略（照挂 / NO_WAKE_PLUGINS 硬禁 / WAKE_TOGGLEABLE 开关 / WAKE_TOOL_EXCLUDE
+# 工具级）、独占资源归属、per-char 插件集、内置工具开关，每一条都会改变这个角色到底有什么。
+# 写死的菜单必然说谎：跟 TA 提一个他根本没有的能力，他会去调、然后失败。
+# **按配置、不按运行时状态**（PLAN_toolmount §3.1，10-29 第 6 步）：Ombre 此刻连不连得上、
+# 某个 stdio 起没起来，不影响菜单——同一份配置永远渲染出同一份系统提示，前缀缓存才稳；
+# 运行时缺席走开 session 探活 + 注入告知（chat_loop._probe_mcp / absent_note）。
 _MENU_NEEDS_RE = re.compile(r"<!--\s*needs\s*:\s*(.*?)-->", re.I | re.S)
 _MENU_WHEN_RE = re.compile(r"<!--\s*when\s*:\s*(\w+)\s*-->", re.I)
 _MENU_COMMENT_RE = re.compile(r"<!--.*?-->", re.S)
@@ -1000,7 +1019,7 @@ def mounted_tool_names(context: str = "chat", char_id: Optional[str] = None) -> 
     不复用 base_claude_args 的返回值是因为那边还要拼参数、且引擎不对时会抛。"""
     import plugins
     names: list[str] = list(BASICS_MCP_TOOLS)   # 无条件挂（钟 + 取公开资料）
-    if ombre_alive(char_id):
+    if ombre_configured(char_id):               # 按配置不探活（§3.1；-p 路仍探活）
         names += OMBRE_TOOLS
     _, plug_tools = plugins.mounted(context, char_id)
     names += plug_tools
@@ -1017,6 +1036,29 @@ def mounted_tool_names(context: str = "chat", char_id: Optional[str] = None) -> 
     if names and tool_search_on(context):
         names.append(TOOL_SEARCH_TOOL)
     return names
+
+
+def configured_tool_names(context: str = "chat", char_id: Optional[str] = None) -> list[str]:
+    """这个角色**配置上**的工具全集（PLAN_toolmount §3.1）：mounted_tool_names（MCP 那一半，
+    已按配置不探活）+ 内置工具按三个开关并进来。菜单按它渲染。
+    **别把内置的塞进 mounted_tool_names**：那张表兼做醒来允许集（wake_tools），而内置工具
+    的放行另有门（_wake_gate 的路径闸 / 卡）。内置工具只在常驻 session 路挂
+    （build_options 要 handle），-p 引擎的角色不算有。"""
+    import characters
+    names = list(mounted_tool_names(context, char_id))
+    if config.chat_engine(characters.resolve(char_id)) != "sdk":
+        return names
+    if config.READONLY_TOOLS_ENABLED:
+        names += sorted(READONLY_BUILTINS)
+    if config.WRITE_TOOLS_ENABLED:
+        names += sorted(WRITE_BUILTINS)
+    if config.QUESTION_CARDS_ENABLED:
+        names.append("AskUserQuestion")
+    return names
+
+
+def _short(full: str) -> str:
+    return full.rsplit("__", 1)[-1]
 
 
 def _parse_tool_menu(text: str) -> list[dict]:
@@ -1046,8 +1088,25 @@ def _parse_tool_menu(text: str) -> list[dict]:
 _menu_gap_seen: dict[str, str] = {}   # 每种「漏了哪些」只喊一次，别每轮刷屏
 
 
+def _warn_unknown(context: str, by_short: dict, all_needs: set) -> None:
+    """反向检查（§3.1）：菜单提到、但配置里没有的工具 → 往日志里喊一条。改工具名 / 卸插件
+    忘了改菜单时，那块永远渲染不出来（needs 缺一个整块不出）而没人知道。只在 chat 全集上查：
+    wake 全集天然缺一批（开关没开的、醒来摘掉的），拿它查会把正常的缺也喊出来。
+    喊话是提醒，不是过滤。"""
+    if context != "chat":
+        return
+    unknown = sorted(n for n in all_needs if n not in by_short)
+    key = ",".join(unknown)
+    if _menu_gap_seen.get("chat:unknown") == key:
+        return
+    _menu_gap_seen["chat:unknown"] = key
+    if unknown:
+        logerr(f"能力菜单提到了配置里没有的工具：{'、'.join(unknown)}"
+               f" —— 工具改名 / 插件卸了？那几块永远渲染不出来，去 tool_menu.md 对一下")
+
+
 def _warn_uncovered(context: str, by_short: dict, rendered_needs: set) -> None:
-    """挂载了、但这一轮没有任何菜单块提到的工具 → 往日志里喊一条。
+    """配置里有、但这一轮没有任何菜单块提到的工具 → 往日志里喊一条。
 
     为什么要机械查而不是靠纪律：开了工具延迟之后，**菜单没覆盖的工具在 TA 眼里只是一个
     光秃秃的名字**，等于装了个他用不上的东西。上新插件忘了补菜单是必然会发生的事
@@ -1067,14 +1126,21 @@ def _warn_uncovered(context: str, by_short: dict, rendered_needs: set) -> None:
 
 
 def tool_menu_block(context: str = "chat", char_id: Optional[str] = None) -> str:
-    """人话版能力菜单，按本轮实际挂载的工具过滤后渲染。没有一块过得了就返回空串。
+    """人话版能力菜单，按这个角色**配置上的工具全集**过滤后渲染（§3.1）。没有一块过得了
+    就返回空串。
 
-    两条渲染纪律：
-    - needs 里的工具**全都在场**才渲染这块（不是任一个）。宁可少提一块，也绝不提一个
-      不在场的能力——所以菜单文件里块要切得细（读信/发信必须分开：醒来默认摘 mail_send
+    渲染纪律：
+    - needs 里的工具**全都在配置里**才渲染这块（不是任一个）。宁可少提一块，也绝不提一个
+      他没有的能力——所以菜单文件里块要切得细（读信/发信必须分开：醒来默认摘 mail_send
       但留读信，合成一块的话整块消失，连读信都不提了）。
     - 工具全名由这里从 needs 填进正文，**作者不手写**。手写的名字会随插件改名/Ombre
       换版本过期，而名字错了 TA 就取不到用法。
+    - **场景注记自动补**（chat 渲染时）：块里有工具不在 wake 全集里（NO_WAKE_PLUGINS /
+      开关没开 / WAKE_TOOL_EXCLUDE），块尾自动加一句「醒着的时候这几样用不了」。作者不手写
+      场景，手写会和门的口径漂。用 configured_tool_names("wake") 不用运行时状态：注记随
+      Ombre 死活抖的话前缀缓存跟着抖。
+    - 翻代码那块（needs 含只读内置工具）自动补一行两个仓的路径：路径是常量不是运行时
+      状态，但手写进菜单会过期。
     """
     try:
         import characters
@@ -1083,17 +1149,25 @@ def tool_menu_block(context: str = "chat", char_id: Optional[str] = None) -> str
         logerr(f"读能力菜单失败（这轮不注入）: {e}")
         return ""
 
-    mounted = mounted_tool_names(context, char_id)
-    # 全名按尾段建索引：菜单里写裸名（dream），挂载的是全名（mcp__ombre-brain__dream）
+    mounted = configured_tool_names(context, char_id)
+    # 全名按尾段建索引：菜单里写裸名（dream），配置里是全名（mcp__ombre-brain__dream）
     by_short: dict[str, str] = {}
     for full in mounted:
-        by_short.setdefault(full.rsplit("__", 1)[-1], full)
+        by_short.setdefault(_short(full), full)
+    wake_short: Optional[set[str]] = None
+    if context == "chat":
+        try:
+            wake_short = {_short(n) for n in configured_tool_names("wake", char_id)}
+        except Exception as e:
+            logerr(f"算醒来全集失败（这轮不补场景注记）: {e}")
 
     lines: list[str] = []
     rendered_needs: set[str] = set()
+    all_needs: set[str] = set()
     for b in _parse_tool_menu(text):
         if b["when"] and b["when"] != context:
             continue
+        all_needs.update(b["needs"])
         fulls = [by_short[n] for n in b["needs"] if n in by_short]
         if len(fulls) != len(b["needs"]):
             continue        # 缺任一个 → 整块不提
@@ -1102,6 +1176,13 @@ def tool_menu_block(context: str = "chat", char_id: Optional[str] = None) -> str
         lines.append("  " + b["body"].replace("\n", "\n  "))
         if fulls:
             lines.append("  工具：" + ", ".join(fulls))
+        if set(b["needs"]) & READONLY_BUILTINS:
+            lines.append(f"  范围：cassette 仓 {CODE_ROOT}；"
+                         f"{config.user_name()}的 casebook 仓 {DOSSIER_ROOT}")
+        if wake_short is not None:
+            off = [n for n in b["needs"] if n not in wake_short]
+            if off:
+                lines.append("  醒着的时候这几样用不了：" + "、".join(off))
     # skill 索引（PLAN_skills）：skill_read 在场才追加（渲染纪律同 needs——绝不提
     # 不在场的能力；挂载判据 _skills_mounted 和这里同问 list_skills，不会两边打架）。
     # 索引就是 skill_read 的菜单块，所以要记进 rendered_needs——不然
@@ -1113,6 +1194,7 @@ def tool_menu_block(context: str = "chat", char_id: Optional[str] = None) -> str
             lines.append(blk)
             rendered_needs.add("skill_read")
     _warn_uncovered(context, by_short, rendered_needs)
+    _warn_unknown(context, by_short, all_needs)
     if not lines:
         return ""
 
@@ -1140,6 +1222,42 @@ def tool_menu_block(context: str = "chat", char_id: Optional[str] = None) -> str
                 "。你可能会看到它们的用法，但调用会被拒——别去调，也别跟"
                 f"{config.user_name()}说你能做这件事。】")
     return head + "\n" + "\n".join(lines) + tail
+
+
+# ---------- 运行时缺席告知（PLAN_toolmount §5.1 ④，10-29 第 6 步）----------
+# 开 session 探活发现某个 server 连不上（chat_loop._probe_mcp）→ 下一轮注入前缀加一句
+# 知觉白描，_wake_gate 对缺席工具 deny 同一句。每个 server 一句，文案表只写这一处
+# （机主 10-29 定稿）。键是 mcp_servers 里的 server 名；没写的走兜底模板。
+# 第二句给 §5.2 中途恢复用（第 8 步接）。
+ABSENT_NOTES: dict[str, tuple[str, str]] = {
+    "ombre-brain": ("记忆那边这会儿够不着——最近的事还在脑子里，再往前的先别硬答",
+                    "记忆那边又够得着了"),
+    "basics": ("钟、闹铃、查资料这会儿都够不着——几点、下次什么时候醒都定不了",
+               "钟和闹铃又够得着了"),
+    "pets": ("猫房那边这会儿看不见——猫怎么样了先别说", "猫房又看得见了"),
+    "skills": ("手册架这会儿够不着——流程照记忆走，别说查过", "手册架又够得着了"),
+    "prs": ("PR 那条路这会儿不通——改代码的事先记下来", "PR 那条路又通了"),
+    "game": ("游戏这会儿不在手边——想玩先等等", "游戏又在手边了"),
+    "browser": ("浏览器这会儿开不起来——上网的事先放一放", "浏览器又开得起来了"),
+    "mail": ("信箱这会儿打不开——有没有新信不知道", "信箱又打得开了"),
+    "galatea": ("花园这会儿进不去——帖子、私信都看不了", "花园又进得去了"),
+    "beacon": ("墙那边这会儿够不着——卡片、写信都做不了", "墙那边又够得着了"),
+    "notion": ("TA 的 Notion 这会儿连不上——他记在那儿的东西先别引用", "TA 的 Notion 又连上了"),
+    "webpage": ("做网页的工具这会儿不在手边", "做网页的工具又回来了"),
+    "jobhunt": ("求职那套这会儿够不着——岗位、投递都看不了", "求职那套又够得着了"),
+    "game-story": ("剧情那边这会儿够不着——笔记本、画面都摸不到", "剧情那边又够得着了"),
+    "game-maayuan": ("游戏引擎这会儿够不着——派日常的事先放一放", "游戏引擎又够得着了"),
+}
+_ABSENT_FALLBACK = ("{server} 这会儿够不着", "{server} 又够得着了")
+
+
+def absent_note(servers, recovered: bool = False) -> str:
+    """缺席（或恢复）的知觉白描：每个 server 一句，〔〕包着、按行拼。空表回空串。"""
+    out = []
+    for s in servers:
+        pair = ABSENT_NOTES.get(s) or tuple(x.format(server=s) for x in _ABSENT_FALLBACK)
+        out.append("〔" + pair[1 if recovered else 0] + "〕")
+    return "\n".join(out)
 
 
 # ---------- 子进程 ----------

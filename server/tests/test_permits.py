@@ -164,12 +164,12 @@ class WriteGateTest(unittest.IsolatedAsyncioTestCase):
                                      "tool_input": {"command": "git status"}},
                                     "t", None), {})
 
-    async def test_wake_turn_bash_denied(self):
-        """PLAN_prs §4：醒来轮没有卡——Bash 在门里就拒（原来是落 ask 走 2 分钟快拒）。"""
+    async def test_wake_turn_bash_asks(self):
+        """10-29：醒来轮也弹卡（原 PLAN_prs §4「醒来轮没有卡、Bash 在门里就拒」退役）。"""
         gate = self._gate(turn="wake")
         out = await gate({"tool_name": "Bash", "tool_input": {"command": "ls"}},
                          "t", None)
-        self.assertEqual(out["hookSpecificOutput"]["permissionDecision"], "deny")
+        self.assertEqual(out, {})
 
     async def test_other_char_can_also_ask(self):
         """互斥退役（§2）：谁都能申请写，hook 不看资源归属。"""
@@ -263,14 +263,26 @@ class PermitCallbackTest(PermitBase):
         finally:
             permits.CHAT_TIMEOUT_SEC = orig
 
-    async def test_wake_turn_never_hangs_a_card(self):
-        """PLAN_prs §4 兜底：写类万一漏过门进了回调，醒来轮直接拒，不挂卡。"""
+    async def test_wake_turn_pops_card_and_yields_to_chat(self):
+        """10-29 改口（原「醒来轮直接拒，不挂卡」退役）：醒来轮照弹卡、卡标 wake、
+        超时走醒来档；TA 的消息一到（chat_loop._yield_wake_cards）卡自动拒让路。"""
+        import asyncio
+        import chat_loop
         from claude_agent_sdk import PermissionResultDeny
         cb = self._cb(turn="wake")
-        out = await cb("Bash", {"command": "ls"},
-                       SimpleNamespace(title="", tool_use_id="t1"))
+        self.said("t1", "我看一眼目录")
+        task = asyncio.ensure_future(cb("Bash", {"command": "ls"},
+                                        SimpleNamespace(title="", tool_use_id="t1")))
+        await asyncio.sleep(0.01)
+        cards = permits.pending()
+        self.assertEqual(len(cards), 1)
+        self.assertEqual(cards[0]["said"], "我看一眼目录")
+        self.assertAlmostEqual(cards[0]["deadline"] - cards[0]["ts"],
+                               permits.WAKE_TIMEOUT_SEC, delta=2)
+        chat_loop._yield_wake_cards("cass")
+        out = await asyncio.wait_for(task, 1)
         self.assertIsInstance(out, PermissionResultDeny)
-        self.assertTrue(out.message)
+        self.assertIn(chat_loop.YIELD_MSG, out.message)
         self.assertEqual(permits.pending(), [])
 
 
@@ -313,12 +325,14 @@ class SaidFeedTest(unittest.TestCase):
         self.assertEqual(out, {})
         self.assertEqual(self.h.meta["said_buf"], "在副本里改。")   # 没被白白认领掉
 
-    def test_wake_turn_no_cards(self):
+    def test_wake_turn_claims_too(self):
+        """10-29：醒来轮也弹卡，人话照样认领（原「醒来轮没有卡」退役）。"""
         import pipeline
         from claude_agent_sdk import TextBlock, ToolUseBlock
         self.h.meta["turn_kind"] = "wake"
         self.assertEqual(self.feed(TextBlock(text="x"), ToolUseBlock(
-            id="e", name="Edit", input={"file_path": str(pipeline.CODE_ROOT / "a")})), {})
+            id="e", name="Edit", input={"file_path": str(pipeline.CODE_ROOT / "a")})),
+            {"e": "x"})
 
 
 class SsePermitEventTest(unittest.TestCase):

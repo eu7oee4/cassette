@@ -327,20 +327,14 @@ def _write_route(handle: session_mgr.LoopHandle, tool: str,
                  tool_input: dict) -> tuple[str, str]:
     """写类调用走哪条路（PLAN_prs §4）：("allow"|"ask"|"deny", 原话)。路径闸已经过了。
     判据挂在**路径**上：本角色工作副本里的东西没合并之前碰不到线上，哪一轮改都不用卡；
-    轮只决定「工作副本以外能不能碰」——醒来轮没有卡（没人在看），一律拒。
-    门里的拒只是兜底：主路是系统提示把两条路讲清楚，让他一开始就走对。"""
+    工作副本以外一律弹卡——**醒来轮也弹**（10-29 机主拍板：醒来要防的只有安全面，卡有
+    Bark 推送、app 回前台也拉得到；原来「醒来没人看、一律拒」那条退役）。醒来档超时另设
+    （permits.WAKE_TIMEOUT_SEC），TA 的消息一到卡自动让路（_yield_wake_cards）。
+    门里的拒只是兜底：主路是菜单把规矩讲清楚（「动手改东西」「提一个 PR」两块）。"""
     import pipeline
     import prs
-    u = config.user_name()
-    wake = handle.meta.get("turn_kind") == "wake"
-    prs_on = pipeline._prs_mounted(handle.char_id)
     if tool == "Bash":
-        if not wake:
-            return "ask", ""
-        if prs_on:
-            return "deny", ("醒着的时候不跑命令。要改代码：pr_start 拿到你自己的工作副本，"
-                            "在里面用 Edit/Write 改，pr_test 跑测试，pr_open 提 PR。")
-        return "deny", f"醒着的时候不跑命令——留到{u}跟你说话的时候。"
+        return "ask", ""
     paths = [p for p in pipeline.tool_paths(tool_input) if p is not None]
     owners = {prs.worktree_owner(p) for p in paths}
     if owners and owners != {None}:
@@ -350,14 +344,38 @@ def _write_route(handle: session_mgr.LoopHandle, tool: str,
         root = prs.worktree_path(handle.char_id).resolve()
         if any(".git" in p.relative_to(root).parts for p in paths):
             return "deny", "工作副本里的 .git 不能动——切分支、提交这些交给 PR 工具。"
-        if prs_on:
+        if pipeline._prs_mounted(handle.char_id):
             return "allow", "本角色工作副本（PLAN_prs）"
-    if not wake:
-        return "ask", ""
-    if prs_on:
-        return "deny", ("醒着的时候不改正在跑的代码。用 pr_start 在你自己的工作副本里改，"
-                        f"改完 pr_open 提一个 PR，合不合并由{u}决定。")
-    return "deny", f"醒着的时候不改东西——留到{u}跟你说话的时候。"
+    return "ask", ""
+
+
+def _absent_set(handle: session_mgr.LoopHandle) -> dict[str, str]:
+    """开场探活记下的缺席工具（§5.1）：全名 → server 名。空 dict = 全在。"""
+    out: dict[str, str] = {}
+    for srv, rec in (handle.meta.get("absent_tools") or {}).items():
+        for t in rec.get("tools") or ():
+            out[t] = srv
+    return out
+
+
+def _absent_hit(handle: session_mgr.LoopHandle, tool: str, tool_input: dict) -> Optional[str]:
+    """这次调用碰没碰缺席的工具（§5.1 ④）：直接调缺席工具 → 那个 server 的那句；
+    ToolSearch 的 query 里 select: 了缺席全名 → 同一句（不拦的话他先白跑一跳取 schema、
+    再被拒）。只认整串全名，不做别的模式匹配。"""
+    absent = _absent_set(handle)
+    if not absent:
+        return None
+    import pipeline
+    if tool in absent:
+        return pipeline.absent_note([absent[tool]])
+    if tool == pipeline.TOOL_SEARCH_TOOL:
+        q = str((tool_input or {}).get("query") or "")
+        if q.strip().lower().startswith("select:"):
+            picked = {s.strip() for s in q.split(":", 1)[1].split(",")}
+            hit = sorted({absent[t] for t in picked if t in absent})
+            if hit:
+                return pipeline.absent_note(hit)
+    return None
 
 
 def _wake_gate(handle: session_mgr.LoopHandle):
@@ -365,11 +383,14 @@ def _wake_gate(handle: session_mgr.LoopHandle):
     判定跑；hook 放过（{}）的写类因为不进 allowed_tools 会落 CLI 的 ask，
     路由到 can_use_tool（_permit_gate）弹卡——两层是组合，不是二选一。
 
+    0. 缺席门（PLAN_toolmount §5.1）：开场探活记下连不上的 server，它的工具（和
+       ToolSearch 取它的用法）任何轮都拒，原话就是注入里那句知觉白描。
     1. 路径闸：Read/Grep/Glob 和 Edit/Write 都过（限仓根+黑名单）。Bash 没有
        路径参数，闸对它放空——机主看得到命令原文，拍板本身就是闸。
        写类过了路径闸再按路径分路（_write_route，PLAN_prs §4）：本角色工作副本
-       直接 allow 不弹卡；工作副本以外 chat 轮落 ask 弹卡、wake 轮拒；Bash 醒来轮拒。
-    2. wake 禁用面照 PR12：turn_kind=wake 查 wake_tools。
+       直接 allow 不弹卡；工作副本以外落 ask 弹卡——醒来轮也弹（10-29 拍板）。
+    2. wake 禁用面照 PR12：turn_kind=wake 查 wake_tools。AskUserQuestion 不在表里
+       但放行：它的闸是卡本身（can_use_tool），醒来也能弹（10-29 拍板）。
     3. game 泵门：mcp__game__* 只在泵开着时放行；泵没开一律拒——任务引擎
        互斥由此顺带成立（拿不到锁就开不了泵）。
     聊天轮/巩固轮 → 其余全放行，行为与没挂 hook 一字不差。"""
@@ -383,6 +404,9 @@ def _wake_gate(handle: session_mgr.LoopHandle):
     async def gate(hook_input, tool_use_id, ctx) -> dict:
         tool = (hook_input or {}).get("tool_name") or ""
         tool_input = (hook_input or {}).get("tool_input") or {}
+        gone = _absent_hit(handle, tool, tool_input)
+        if gone:
+            return _deny(gone)
         if tool in pipeline.READONLY_BUILTINS:
             # 只读常驻（PR14-b）：任何轮来源都能看一眼（§2 核实纪律），
             # 但过路径闸（限根目录+黑名单，§5.3 安全面）——先于醒来禁用面，
@@ -408,6 +432,8 @@ def _wake_gate(handle: session_mgr.LoopHandle):
             return _deny("游戏这会儿不在手边——想玩的话先用 game_start 把游戏拿过来。")
         if handle.meta.get("turn_kind") != "wake":
             return {}
+        if tool == "AskUserQuestion":
+            return {}                    # 卡就是它的闸（_permit_gate），醒来也弹
         if tool in (handle.meta.get("wake_tools") or set()):
             return {}
         return _deny("这会儿是你自己醒着的时间，这个工具不在手边（醒来那条路不挂它）"
@@ -420,21 +446,26 @@ def _permit_gate(handle: session_mgr.LoopHandle):
     ask 路由到这儿——那次调用原地挂起，permits 弹卡给机主。批了返回 Allow，
     工具原地执行、同一轮继续；拒了/超时返回 Deny(理由)，模型接着说话。
     安全面（路径闸/wake 面/泵门）在 PreToolUse 门里，先于这儿跑；这儿只管
-    「机主批不批」一件事。醒来轮没有卡（PLAN_prs §4，旧的 wake 快拒超时退役）。"""
+    「机主批不批」一件事。醒来轮也弹卡（10-29 机主拍板）：超时走醒来档
+    （permits/questions.WAKE_TIMEOUT_SEC），卡标 wake——TA 的消息一到自动让路
+    （_yield_wake_cards）。"""
     async def can_use(tool: str, tool_input: dict, ctx) -> "PermissionResultAllow | PermissionResultDeny":
         import permits
         u2 = config.user_name()
+        wake = handle.meta.get("turn_kind") == "wake"
         if tool == "AskUserQuestion":
             # 问答卡（PLAN_chatui §3.5/U4）：卡本体在 assistant 事件流过
             # translate_events 时已推给 app（sse "question"），这儿只管挂起等答案，
             # 答案用 updated_input 回填（机制 09-01 探针实证，见 questions.py 卷首）。
             import questions
+            q_timeout = questions.WAKE_TIMEOUT_SEC if wake else questions.TIMEOUT_SEC
             got = await questions.ask(
                 handle.char_id,
                 questions=(tool_input or {}).get("questions") or [],
-                question_id=getattr(ctx, "tool_use_id", None))
+                question_id=getattr(ctx, "tool_use_id", None),
+                timeout=q_timeout, wake=wake)
             if got is None:
-                mins = max(1, questions.TIMEOUT_SEC // 60)
+                mins = max(1, int(q_timeout) // 60)
                 return PermissionResultDeny(
                     message=f"问题递到{u2}手机上，等了约 {mins} 分钟没等到回答——"
                             "先按你自己的判断来，TA 回头看到会说的。")
@@ -453,13 +484,10 @@ def _permit_gate(handle: session_mgr.LoopHandle):
             return PermissionResultAllow()
         if verdict == "deny":
             return PermissionResultDeny(message=why)
-        if handle.meta.get("turn_kind") == "wake":
-            return PermissionResultDeny(
-                message=why or "醒着的时候没有卡可弹，这一下没做。")
         said = await _await_said(handle, getattr(ctx, "tool_use_id", None))
         if said == "":
             return PermissionResultDeny(message=NO_SAID_MSG.format(u=u2))
-        timeout = permits.CHAT_TIMEOUT_SEC
+        timeout = permits.WAKE_TIMEOUT_SEC if wake else permits.CHAT_TIMEOUT_SEC
         verdict = await permits.ask(
             handle.char_id, tool=tool,
             summary=_tool_summary(tool, tool_input or {}),
@@ -467,7 +495,7 @@ def _permit_gate(handle: session_mgr.LoopHandle):
             permit_id=getattr(ctx, "tool_use_id", None),
             said=said or "",
             note=str((tool_input or {}).get("description") or "") if tool == "Bash" else "",
-            timeout=timeout)
+            timeout=timeout, wake=wake)
         u = config.user_name()
         if verdict is None:
             mins = max(1, int(timeout) // 60)
@@ -521,6 +549,11 @@ def _turn_prefix(handle: session_mgr.LoopHandle) -> list[str]:
     pump = handle.meta.get("game_pump")
     if pump and pump.pop("rhythm_due", False):
         parts.append(game_rhythm_note())
+    due = handle.meta.pop("absent_note_due", None)
+    if due:
+        # 开场探活的缺席告知（§5.1 ④）：每个 server 一句知觉白描，和门拒的原话同一句。
+        import pipeline
+        parts.append(pipeline.absent_note(due))
     return parts
 
 
@@ -548,28 +581,6 @@ def _shot_sink(handle: session_mgr.LoopHandle):
     return sink
 
 
-def _write_paths_text(char_id: str) -> str:
-    """改东西那段系统提示（PLAN_prs §4.1）：chat/wake 是同一条 session，一段话把两种
-    情形都写清——门（_write_route）只是兜底，主路是让他一开始就走对。
-    措辞照 him-facing 三规：只说权限来去，不说场所；用「工具」。"""
-    import pipeline
-    u = config.user_name()
-    card = ("每动一下（改文件、跑命令）都会先弹一张卡到TA手机上，批了就接着做，"
-            "拒了或没等到，你会收到一句原因。每次弹卡之前，先用一两句大白话告诉TA"
-            "你要动什么、为什么、TA会感觉到什么变化——这段话会印在卡上，TA看着它拍板；"
-            "没说就调，会被退回来让你先说。")
-    if not pipeline._prs_mounted(char_id):
-        return (f"改东西的工具（Edit/Write/Bash）也在手边，但只在{u}跟你说话的时候能用："
-                f"{card}你自己醒着、TA没在跟你说话的时候不改东西——想改的记下来，"
-                "等聊天时再说。")
-    return ("改代码有两条路：\n"
-            f"- {u}在跟你说话的时候，可以直接改：{card}\n"
-            "- 你自己醒着、TA没在跟你说话的时候，正在跑的代码不直接动，命令也不跑："
-            "用 pr_start 在你自己的工作副本里改（改副本不用等批），改完 pr_open 提一个 PR，"
-            "描述写给不读代码的人看。合不合并、什么时候生效，由TA决定。\n"
-            "- 改动大、要动很多下的，聊天时也用 PR，省得TA一张张批。")
-
-
 def build_options(char_id: str, catalog: Optional[list] = None,
                   handle: Optional[session_mgr.LoopHandle] = None) -> ClaudeAgentOptions:
     """口径对齐 pipeline.base_claude_args（chat 路）：人设+菜单+叮嘱进系统提示，
@@ -594,12 +605,16 @@ def build_options(char_id: str, catalog: Optional[list] = None,
         parts.append(sb)
     # 禁空头承诺那条二选一（§14.2，09-04 从每轮注入挪来）。**排在最尾**是有意的：
     # 它是离新消息最近的一句，也是被淹掉就等于没有的那一句（one_turn_hint 的复盘）。
+    # 10-29 第 6 步起这句话重新为真：文件工具段 / 问答卡段都进了菜单（§3.3 第二刀），
+    # 后面不再追加任何东西。
     parts.append(pipeline.one_turn_hint("chat_session"))
     system = "\n\n".join(p for p in parts if p)
 
     servers: dict = {}
     tools: list[str] = []
-    if pipeline.ombre_alive(char_id):
+    if pipeline.ombre_configured(char_id):
+        # 按配置挂、不探活（PLAN_toolmount §3.1）：连不连得上交给 _open_session 的开场
+        # 探活（§5.1）——探活判挂的话 Ombre 死着开的 session 里压根没有它，reconnect 无从调。
         import characters
         oc = characters.ombre_conf(char_id)
         server: dict = {"type": "http", "url": oc["mcp_url"]}
@@ -642,31 +657,19 @@ def build_options(char_id: str, catalog: Optional[list] = None,
         # 轮次）；写类四件 schema 也挂、但**不进 allowed_tools**——每次调用被
         # CLI 判 ask，路由到 can_use_tool 弹卡原地挂起。安全面在 PreToolUse
         # 闸里，handle=None（没门）就一概不挂。两个闸分开拨：schema token
-        # 成本逐段实测。
-        segs: list[str] = []
+        # 成本逐段实测。用法说明不在这儿拼（10-29 第 6 步，§3.3 第二刀）：归菜单
+        # 「翻代码和资料」「动手改东西」两块，按配置渲染（pipeline.configured_tool_names）。
         if config.READONLY_TOOLS_ENABLED:
             tools += sorted(pipeline.READONLY_BUILTINS)
-            segs.append("你手边常驻一套只读的文件工具（Read/Grep/Glob），看得到 "
-                        f"cassette 仓（{pipeline.CODE_ROOT}）的代码和资料，"
-                        f"还有{config.user_name()}的 casebook 仓（{pipeline.DOSSIER_ROOT}，求职案例站）"
-                        "——想核实什么随手翻，别背结论。凭据（.env）不在范围里；"
-                        "state/ 里只看得到你自己的房间（state/characters/<你>/）和"
-                        "求职 / 工作台的资料（state/jobhunt、workbench、webpages）。")
         if config.WRITE_TOOLS_ENABLED:
             tools += sorted(pipeline.WRITE_BUILTINS)
-            segs.append(_write_paths_text(char_id))
-        else:
-            segs.append("改文件的工具这会儿不在手边。")
-        system += "\n\n【" + "".join(segs) + "】"
 
     if handle is not None and config.QUESTION_CARDS_ENABLED:
         # 问答卡（PLAN_chatui §3.5/U4）：AskUserQuestion 挂载但不进 allowed_tools
         # → 每次调用落 ask → can_use_tool 挂起，app 弹卡机主作答（updated_input
-        # 回填）。wake 轮被 PreToolUse 门挡着（不在 wake_tools），问不了。
+        # 回填）。醒来轮也弹（10-29 拍板，_wake_gate 放行）。说明归菜单
+        # 「拿不准的事让 TA 选」块。
         tools = tools + ["AskUserQuestion"]
-        system += (f"\n\n【拿不准要{config.user_name()}拍板的事，可以用 "
-                   "AskUserQuestion 出一张选择卡：卡会弹到TA手机上，TA选完你"
-                   "同轮就拿到答案；等一阵没等到就先按自己的判断来。】")
 
     env = {}
     if tools and pipeline.tool_search_on("chat"):
@@ -782,9 +785,7 @@ def _said_reset(handle: session_mgr.LoopHandle) -> None:
 def _said_feed(handle: session_mgr.LoopHandle, msg: AssistantMessage) -> dict:
     """吃一条 assistant 消息，回 {tool_use_id: 人话}（只含要弹卡的调用）。"""
     import pipeline
-    out: dict = {}
-    if handle.meta.get("turn_kind") == "wake":
-        return out                         # 醒来轮没有卡
+    out: dict = {}                         # 醒来轮也弹卡（10-29）：认领不分轮
     for b in msg.content:
         if isinstance(b, TextBlock):
             t = pipeline.strip_markers(b.text or "").strip()
@@ -1389,11 +1390,101 @@ def _frame_activities(history: list[dict], char_id: str) -> list[dict]:
 # ---------- 见闻（记忆 vs 见闻轴的见闻侧，§5.2）----------
 
 def _ombre_on(char_id: str) -> bool:
+    """配了 Ombre 就算开（§3.1）：巩固轮 / 开局引子按配置发，此刻连不上由缺席门
+    拒 + 告知兜着（探活判的话 Ombre 一抖，巩固轮就静默跳过）。"""
     import pipeline
     try:
-        return pipeline.ombre_alive(char_id)
+        return pipeline.ombre_configured(char_id)
     except Exception:
         return False
+
+
+# ---------- 开 session 探活（PLAN_toolmount §5.1，10-29 第 6 步） ----------
+MCP_PROBE_TIMEOUT_SEC = float(os.environ.get("MCP_PROBE_TIMEOUT_SEC", "10"))
+
+
+async def _probe_mcp(client, options, handle: session_mgr.LoopHandle) -> None:
+    """connect() 之后对账：① get_mcp_status 每 0.2s 拍一次直到没有 pending（上限
+    MCP_PROBE_TIMEOUT_SEC；连不上的 server 首拍就是 failed，不经过 pending）；② failed 的
+    逐个 reconnect_mcp_server 一次——对连不上的它是**抛异常**（ECONNREFUSED 原话），
+    不是返回失败；③ 每个 server 的 tools 与配置（options.tools 里的 mcp__ 名）对账，缺的落
+    handle.meta["absent_tools"]（按 server：{"tools": [全名], "error": 原话}）；④ 置
+    absent_note_due，下一轮注入前缀告知（_turn_prefix），门对缺席工具 deny 同一句
+    （_absent_hit）。failed 的 server 没有 tools 键，按空处理。缺 Ombre 推 Bark。
+    探活本身任何异常都不影响开 session（按全在处理，顶多他撞一次门）。
+    假 client（测试 / 没这两个方法）直接跳过。"""
+    get_status = getattr(client, "get_mcp_status", None)
+    if get_status is None:
+        return
+    expected: dict[str, list[str]] = {}
+    for t in list(getattr(options, "tools", None) or []):
+        if t.startswith("mcp__"):
+            srv = t.split("__", 2)[1]
+            expected.setdefault(srv, []).append(t)
+    if not expected:
+        return
+    rows: dict[str, dict] = {}
+    errors: dict[str, str] = {}
+    try:
+        t0 = time.monotonic()
+        while True:
+            st = await get_status() or {}
+            rows = {r.get("name"): r for r in (st.get("mcpServers") or [])}
+            if not any(r.get("status") == "pending" for r in rows.values()):
+                break
+            if time.monotonic() - t0 > MCP_PROBE_TIMEOUT_SEC:
+                print(f"[chat_loop] 开场探活超时（{MCP_PROBE_TIMEOUT_SEC}s 仍有 pending："
+                      f"{[n for n, r in rows.items() if r.get('status') == 'pending']}）",
+                      file=sys.stderr)
+                break
+            await asyncio.sleep(0.2)
+        failed = [n for n, r in rows.items()
+                  if n in expected and r.get("status") == "failed"]
+        recon = getattr(client, "reconnect_mcp_server", None)
+        for n in failed:
+            errors[n] = str(rows[n].get("error") or "failed")
+            if recon is None:
+                continue
+            try:
+                await recon(n)
+            except Exception as e:
+                errors[n] = f"{type(e).__name__}: {e}"[:200]
+        if failed:
+            st = await get_status() or {}
+            rows = {r.get("name"): r for r in (st.get("mcpServers") or [])}
+    except Exception as e:
+        print(f"[chat_loop] 开场探活失败（按全在处理）: {e}", file=sys.stderr)
+        return
+    absent: dict[str, dict] = {}
+    for srv, want in expected.items():
+        r = rows.get(srv)
+        got = {(t.get("name", "") if isinstance(t, dict) else str(t)).rsplit("__", 1)[-1]
+               for t in ((r or {}).get("tools") or [])}
+        missing = [t for t in want if t.rsplit("__", 1)[-1] not in got]
+        if not missing:
+            continue
+        if r is None:
+            err = "status 里没有这个 server"
+        elif r.get("status") == "connected" and got:
+            err = "连上了但没有这几个工具"       # 版本漂移：server 在、个别工具不在
+        else:
+            err = errors.get(srv) or str(r.get("error") or r.get("status") or "")
+        absent[srv] = {"tools": missing, "error": err}
+    handle.meta["absent_tools"] = absent
+    if not absent:
+        return
+    print(f"[chat_loop] 开场探活缺席（char={handle.char_id}）："
+          + "；".join(f"{s}（{len(v['tools'])} 个工具）{v['error']}" for s, v in absent.items()),
+          file=sys.stderr)
+    handle.meta["absent_note_due"] = sorted(absent)
+    if "ombre-brain" in absent:
+        try:
+            import characters
+            from notify import bark_push_bg
+            bark_push_bg(f"{characters.display_name(handle.char_id)}的记忆（Ombre）连不上："
+                         f"{absent['ombre-brain']['error'][:80]}", title="cassette")
+        except Exception:
+            pass
 
 
 # 见闻快照/增量（_seen_block + seen_cursor）09-02 删了（机主拍板）：SDK 路的
@@ -1514,6 +1605,7 @@ async def run(handle: session_mgr.LoopHandle, *,
             sid = None
         c = factory(options)
         await c.connect()
+        await _probe_mcp(c, options, handle)          # §5.1 开场探活（缺席进 meta）
         ledger = [{"r": m["role"], "h": _h(m["text"]), "ts": m.get("ts")}
                   for m in history]
         handle.meta["ledger"] = ledger
@@ -2134,6 +2226,21 @@ def start_game_pump(char_id: str, *, note: str,
     return {"ok": True, "seg_id": seg}
 
 
+YIELD_MSG = "TA 来了，先聊——这件事当面说。"
+
+
+def _yield_wake_cards(char_id: str) -> None:
+    """TA 的消息到了：醒来轮挂着等批的卡让路（10-29 机主拍板）。卡挂着时整条 session
+    被那一轮占着，TA 不答卡直接聊的话消息要等到卡超时才轮到——所以卡自动拒、醒来轮
+    收尾、聊天轮接上；他聊天时想做可以当场再弹。只拒醒来轮的卡（聊天轮的卡 TA 正看着）。
+    线程安全（/code/send 的 REST 线程也调）。"""
+    import permits
+    import questions
+    n = permits.yield_wake(char_id, YIELD_MSG) + questions.yield_wake(char_id, YIELD_MSG)
+    if n:
+        print(f"[chat_loop] TA 来了，醒来轮 {n} 张卡让路（char={char_id}）", file=sys.stderr)
+
+
 def inject_pump_user(char_id: str, text: str, ledger_text: str = "") -> None:
     """泵开着时接住 /code/send 来的 TA 消息（08-31 实锤：app 游戏态把聊天框
     消息也走终端口，iOS 改路由前这是插话唯一通道）。轮尾吃掉、回复走 outbox；
@@ -2141,6 +2248,7 @@ def inject_pump_user(char_id: str, text: str, ledger_text: str = "") -> None:
     handle = session_mgr.get(char_id, SCENE)
     if handle is None or not handle.meta.get("game_pump"):
         raise RuntimeError("游戏不在手边（泵没开）——这条走聊天正路就行")
+    _yield_wake_cards(char_id)
     handle.put_threadsafe(PumpNote(text=text, ledger_text=ledger_text,
                                    ts=int(time.time())))
 
@@ -2173,6 +2281,7 @@ async def stream_turn(*, char_id: str, rid: str, messages: list[dict],
                 injection=injection, finalize=finalize, images=images,
                 file_blocks=file_blocks, catalog=catalog)
     handle = _ensure_loop(char_id)
+    _yield_wake_cards(char_id)      # 醒来轮挂着的卡让路（10-29）
     handle.queue.put_nowait(turn)   # 同一事件循环上，不需要过桥
     while True:
         chunk = await turn.out.get()
