@@ -109,6 +109,7 @@ struct ContentView: View {
     @State private var confirmStopBusy = false        // 退出时那边正干着活 → 先问一句
     // 游戏（game_bridge）：剧情会话复用 code 的消息改道；急停/引擎状态给顶栏 ⏸。
     @State private var gameSessionActive = false      // 剧情会话活着（/code/status 的 profile=game）
+    @State private var gameEngine = ""                // 游戏会话的引擎（/code/status 的 engine；"pump" 才走聊天路）
     @State private var gamePaused = false             // 急停锁状态（真相在后端 /game）
     @State private var gameEngineRunning = false      // 任务引擎正在跑
     @State private var gamePauseSwitching = false     // ⏸ 切换中：转圈 + 挡连点
@@ -124,8 +125,13 @@ struct ContentView: View {
     /// 走的还是 sessionMode=true 那条路，整句话被塞进 A 的 tmux，B 从没收到过。
     private var codeMine: Bool { codeMode && sessionMine }
     private var gameMine: Bool { gameSessionActive && sessionMine }
-    /// 消息该改道 tmux 会话吗（code 和游戏剧情共用同一条管道）。
+    /// 会话（code / 游戏）活着且是我这边的：UI（顶栏、轮询节奏、编辑禁用）看这个。
     private var sessionMode: Bool { codeMine || gameMine }
+    /// 消息该改道终端口 /code/send 吗（PLAN_gamechat §3.2）：Code 会话一律改道；游戏会话只有
+    /// 回退路（独立 loop / tmux，engine != "pump"）才改道——unified 泵骑在聊天 session 上，
+    /// 游戏中的消息走正常的 /chat/stream（流式、pumpOutbox 串行、快照、rescue 全复用）。
+    /// 旧后端不下发 engine → 空串 → 照旧走终端口，两个方向都自然退化。
+    private var terminalRoute: Bool { codeMine || (gameMine && gameEngine != "pump") }
 
     // 编辑消息弹窗状态
     @State private var editingMessage: ChatMessage? = nil
@@ -915,8 +921,9 @@ struct ContentView: View {
         codeOwner = st.owner ?? ""
         codeOwnerName = st.owner_name ?? ""
         // 活着的会话可能是游戏档案（TA 自己 game_start 切的）——那不是 Code 模式，
-        // 别翻 codeMode、也别报「已切进 Code 模式」。终端面板走 gameMine 亮起。
+        // 别翻 codeMode、也别报「已切进 Code 模式」。顶栏 ⏸ 走 gameMine 亮起。
         let isGame = (st.profile ?? "code") == "game"
+        gameEngine = st.engine ?? ""
         // 会话归谁**不进** codeMode/gameSessionActive 的算式——那两个只管"会话活着、什么档案"。
         // 归属单独存进 sessionChar，由派生的 sessionMine/codeMine/gameMine 当场判。
         // 从前是把归属揉进这里的：切走一次、回前台一次，codeMode 就翻一次，
@@ -994,9 +1001,9 @@ struct ContentView: View {
         guard !trimmed.isEmpty || pendingSticker != nil
                 || !pendingImages.isEmpty || !pendingFiles.isEmpty else { return }
 
-        // 会话模式（code/游戏）：走 tmux 会话那条管道。表情没接——在那种会话里没什么
-        // 意义，挡住说清楚就行。
-        if sessionMode {
+        // 终端口（Code 会话 / 游戏回退路）：走 /code/send。表情没接——在那种会话里没什么
+        // 意义，挡住说清楚就行。泵引擎的游戏会话不进这儿，走下面正常的聊天路。
+        if terminalRoute {
             if pendingSticker != nil {
                 errorText = "会话模式发不了表情，等 TA 回聊天再发。"
                 return
@@ -1317,11 +1324,14 @@ struct ContentView: View {
             sessionChar = char   // 会话归这轮的角色（同 toggleCodeMode）
             chatStore.appendSystemMessage("已切进 Code 模式", conversation: char)
         }
-        // 他这轮自己切去玩游戏了（调了 game_start）→ 终端面板亮起，后续消息改道会话。
+        // 他这轮自己切去玩游戏了（调了 game_start）→ 顶栏 ⏸ 亮起。消息走哪条路看 terminalRoute：
+        // engine 只从 /code/status 来，这一刻还是空（= 走终端口）——先拉一次 status 再路由，
+        // 别让头一两条消息按「空 → 走终端口」（PLAN_gamechat §3.2；泵分支退役后那条就是 409）。
         if resp.game_started == true, !gameSessionActive {
             gameSessionActive = true
             sessionChar = char
             chatStore.appendSystemMessage("去玩游戏了", conversation: char)
+            Task { await syncCodeMode() }
         }
         // 他这轮做/改的网页 → 网页卡片消息（stored 只有标题，从后端反查 id）。
         // 只认真做成了的（ok=false 的那次页面根本没生成，反查 id 只会挂错一张卡片）。

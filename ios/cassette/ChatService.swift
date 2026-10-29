@@ -482,6 +482,9 @@ struct ChatService {
         let cwd: String        // 会话默认工作目录，显示用
         let busy: Bool?        // TA 正在跑活吗（只有 probeBusy 时才是真值）
         let profile: String?   // 活着的是哪个档案：code / game（游戏剧情会话共用这套路由）
+        /// 游戏会话骑在哪个引擎上（PLAN_gamechat §3.1）：pump = unified 泵（骑在聊天 session 上，
+        /// 游戏中的消息走 /chat/stream）；loop / tmux = 回退路，只能走终端口。旧后端没有 → nil → 走终端口。
+        let engine: String?
         // 「电脑上的会话」这样独占资源现在归谁（后端 plugins.EXCLUSIVE 的 tmux）。
         // 会话全机只有一个，不归当前角色时按钮要禁掉——不禁的话按下去只吃一个 409。
         let owner: String?

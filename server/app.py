@@ -1526,10 +1526,16 @@ def code_status(busy: int = 0, x_auth: Optional[str] = Header(default=None, alia
     h = code_bridge.sdk_loop_handle()
     busy_val = ((h.awaiting_user_since is None) if h is not None
                 else (bool(busy) and code_bridge.is_busy()))
+    # engine（PLAN_gamechat §3.1）：会话骑在哪个引擎上。只有 "pump"（unified 泵，骑在
+    # 聊天 session 上）时 /chat/stream 够得着游戏，新包据此把游戏中的消息改走聊天路；
+    # 独立 SDK loop / tmux 回退路仍只能走终端口 /code/send。旧包不读这个字段。
+    engine = (("pump" if getattr(h, "is_pump", False) else "loop")
+              if h is not None else "tmux")
     return {"enabled": config.CODE_MODE_ENABLED, "alive": code_bridge.session_alive(),
             "tmux": code_bridge.tmux_available(), "cwd": config.CODE_CWD,
             "busy": busy_val,
             "profile": code_bridge.active_profile(),
+            "engine": engine,
             "owner": owner, "owner_name": characters.display_name(owner),
             "session_char": code_bridge.session_char()}
 
@@ -1807,8 +1813,12 @@ def code_send(inp: CodeSendIn, char: Optional[str] = None,
     if sdk_handle is not None:
         try:
             if getattr(sdk_handle, "is_pump", False):
-                # PR13 泵：app 游戏态把聊天框消息也走这口（08-31 实锤）——
+                # PR13 泵：旧包游戏态把聊天框消息也走这口（08-31 实锤）——
                 # 包成 PumpNote 轮尾吃掉，账里逐字记 app 历史里的原文。
+                # 新包（PLAN_gamechat §3.2）游戏中的消息走 /chat/stream，不再到这儿；
+                # 这行日志是 §3.3 退役判据：两周没见它就能拆泵分支。
+                print(f"[code_send] 旧包仍在走终端口（char={sdk_handle.char_id}）",
+                      file=sys.stderr)
                 chat_loop.inject_pump_user(sdk_handle.char_id, msg, inp.text or "")
             else:
                 sdk_handle.put_threadsafe(msg)    # SDK loop：进队列，loop 里 query() 注入

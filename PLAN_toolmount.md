@@ -425,8 +425,9 @@ SDK 升级会连带换掉它自带的 CLI（10-29 晚起 2.1.310，与 PATH 同�
    里分出来，两类一起修。
 4. ~~**泵开着时的重开统一收口**~~ **已落码（10-29 深夜，未重启；施工记录在 §4.1 末）**：图回填 + 节奏补注 +
    shots 归零 + 感知白描前置全收进 `_open_session` / `_pump_note_round`，用法铸回等第 9 步接上。
-5. **游戏改走 /chat/stream**（PLAN_gamechat）：后端 `/code/status` 加 `engine` → app 改路由（含
-   game_started 到手时先拉一次 status）→ 观察旧包 → 退役终端口泵分支。
+5. ~~**游戏改走 /chat/stream**~~ **已落码（10-29 深夜，未重启、app 未装真机；施工记录在 PLAN_gamechat §5 末）**：
+   后端 `/code/status` 加 `engine` + 终端口泵分支加退役判据日志 → app `terminalRoute` 只在 `send()` 改道（含
+   game_started 到手时先拉一次 status）。剩：观察旧包日志 → 两周后退役终端口泵分支（§3.3）。
 6. **固定菜单 + 开场探活同批**（toolmount §3.1 / §3.2 / §3.3 第二刀 / §5.1）：菜单摘掉 `ombre_alive`
    过滤的同一批**必须**带上缺席告知 + 门拒，否则中间 Ombre 掉线菜单在说谎（`pipeline.py:1067-1070`
    自己定的「绝不提不在场的能力」）。§5.2 中途探活可以放到第 8 步。

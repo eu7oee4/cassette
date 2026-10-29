@@ -1,6 +1,6 @@
 # Plan：游戏态的聊天框改走 /chat/stream
 
-> 2026-10-29 机主与 Claude Code 会话立稿，**未动工**。起点是对 PLAN_toolmount / PLAN_interject
+> 2026-10-29 机主与 Claude Code 会话立稿。**10-29 深夜第 1、2 步已落码（未重启、app 未装真机），施工记录在 §5 末。**起点是对 PLAN_toolmount / PLAN_interject
 > 交界的复查：游戏态里机主的消息走的是 tmux 时代留下的「终端口」`/code/send`，
 > 而 PR13 之后游戏早就骑在聊天 session 上了——这条岔路只剩历史原因。
 > 依赖：PLAN_interject P1（账按气泡记）、PLAN_toolmount §4.1（泵开着时的重开统一收口）。
@@ -107,9 +107,21 @@
 
 整体顺序见 PLAN_toolmount §9（三份计划合并排的）。本计划自己的步骤：
 
-1. 后端 `/code/status` 加 `engine`（无副作用，可先上）。
-2. 前置两项到位后（PLAN_interject P1、PLAN_toolmount §4.1），app 改路由。
+1. ~~后端 `/code/status` 加 `engine`~~ **已落码（10-29）**。
+2. ~~前置两项到位后（PLAN_interject P1、PLAN_toolmount §4.1），app 改路由。~~ **已落码（10-29，模拟器编译过、未装真机）**。
 3. 旧包兼容期观察终端口日志；两周后做 §3.3 退役。
+
+**10-29 施工记录**：
+- 后端：`code_status` 返回 `engine`（`sdk_loop_handle()` 有且 `is_pump` → `pump`；有但不是泵 → `loop`；没有 → `tmux`），
+  老字段一个没动；`/code/send` 泵分支加一行 `[code_send] 旧包仍在走终端口（char=…）`，§3.3 退役看它。
+  `tests/test_code_status.py` 两条（三种 engine + 老字段还在）。
+- app：`CodeStatus.engine: String?`；`ContentView` 新增 `gameEngine`（`syncCodeMode` 里从 status 取）和派生值
+  `terminalRoute = codeMine || (gameMine && gameEngine != "pump")`，**只有 `send()` 的改道判断换成它**；
+  `sessionMode` 保留原义（会话活着且是我的）给顶栏 / 3s 轮询 / 编辑禁用——待拍 1 按默认「泵开着时仍禁用编辑」落的。
+  `game_started` 到手时 `Task { await syncCodeMode() }` 先拉一次 status 再路由。两处「终端面板」旧注释顺手改。
+- §4 第一条单测不用另写：`test_multi_segment_reply_ledgers_per_bubble` 在 `GamePumpLoopTest` 里被继承、泵开着时也跑；
+  第二条是 PLAN_toolmount 第 4 步的 `test_dirty_reforge_in_game_carries_same_as_segment_reforge`。
+- 待拍 3（游戏中消息不另加「〔现在是 …〕」）、待拍 4（chat 注入照带）都按本稿默认落的，玩一局再看。
 
 ## 6. 待拍
 
