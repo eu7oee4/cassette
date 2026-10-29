@@ -1478,10 +1478,14 @@ async def run(handle: session_mgr.LoopHandle, *,
     ledger: list[dict] = []
     handle.meta["ledger"] = ledger    # 测试/观测窗口
 
-    async def _open_session(history: list[dict], catalog, render_tail=None):
-        """render_tail（PR13）：只进铸造输入、不进账的渲染尾巴（近 K 张图回填）。
+    async def _open_session(history: list[dict], catalog):
+        """开/重开 session 的唯一入口。泵开着时（§4.1，10-29 第 4 步）不管哪条路
+        触发的重开，一律自己带上：① 近 K 张图回填（只进铸造输入、不进账的渲染
+        尾巴）② rhythm_due 置位 ④ shots 归零。⑤ 重开**之前**的白描轮归调用方
+        （_pump_note_round，client 还活着才有得调）；③ 用法铸回等 §6 接上。
         账永远对权威原文；ctx_est 这里只落一个占位，真值走 usage（见下）。"""
         nonlocal client, sid, ledger
+        pump = handle.meta.get("game_pump")
         await _safe_disconnect(client)
         client = None
         options = opts_factory(handle.char_id, catalog)
@@ -1497,8 +1501,10 @@ async def run(handle: session_mgr.LoopHandle, *,
                 handle.char_id),
             handle.char_id)
             if history else [])
-        if render_tail and rendered:
-            rendered = rendered + list(render_tail)
+        if pump and rendered:
+            tail = _game_shot_tail(pump["seg_id"])       # §4.1 ①
+            if tail:
+                rendered = rendered + list(tail)
         if rendered:
             sid = forge.render(rendered, cwd=str(options.cwd),
                                model=config.MODEL)
@@ -1517,11 +1523,13 @@ async def run(handle: session_mgr.LoopHandle, *,
         handle.meta["ctx_est"] = (sum(estimate_tokens(m["text"]) for m in rendered)
                                   + n_imgs * GAME_TOKENS_PER_SHOT)
         handle.meta["needs_opening"] = True   # 下一轮带开局引子（breath）
-        pump = handle.meta.get("game_pump")
         if pump:
-            # 重铸冲掉了 game_start 返回值里的节奏（工具返回不进账）：下一个新起的
+            # ② 重铸冲掉了 game_start 返回值里的节奏（工具返回不进账）：下一个新起的
             # 轮（tick / TA 的消息 / 醒来，哪个先到算哪个）补在注入前（§4）。
             pump["rhythm_due"] = True
+            # ④ 图只回填了近 K 张，段计数从头数——不清的话冷却一过 loop 顶又撞
+            # 边界，连铸两回（§4.1 复审）。
+            handle.meta["shots"] = 0
         handle.last_reopen = time.time()
         client = c
 
@@ -1537,7 +1545,11 @@ async def run(handle: session_mgr.LoopHandle, *,
               file=sys.stderr)
         handle.reopening = True
         try:
-            if _ombre_on(handle.char_id):
+            if handle.meta.get("game_pump"):
+                # 泵开着：白描轮（记进度 + hold）顶替巩固轮——目的相同，别连跑两个。
+                if not await _pump_note_round():
+                    raise RuntimeError("白描轮没收尾")
+            elif _ombre_on(handle.char_id):
                 await client.query(CONSOLIDATE_PROMPT)
                 flags: dict = {}
                 async for _ in _turn_events(client, handle, flags):
@@ -1729,42 +1741,52 @@ async def run(handle: session_mgr.LoopHandle, *,
             prompt = f"{GAME_TICK_PROMPT}\n【{pipeline.stamp_str(int(time.time()))}】"
         await _pump_round(prompt, "wake")
 
-    async def _game_reforge() -> None:
-        """N 张段内重铸（§4 节奏；唯一保留的边界）：巩固轮（感知白描，无感）→
-        从镜像重铸 + 近 K 张图回填 → resume。铸完还是 chat options（无 flavor）。
-        ping＝下一 tick（FIRST_REQUEST_OK：接不上 → _pump_tick 按死处理自愈）。"""
-        nonlocal client, ledger
+    async def _pump_note_round() -> bool:
+        """§4.1 ⑤ 重开**之前**的感知白描轮（REOPEN_NOTE_PROMPT：记进度、hold）。
+        泵开着且 client 活着才有意义——谁要换 session 谁先调它（段内重铸 / 判脏路 /
+        轮间隙）；引擎打嗝、醒来 client None 那两条 client 已死，直接 True 跳过。
+        False=没收尾，调用方自定（段内重铸按死；判脏路照样换 client）。"""
+        if client is None or not handle.meta.get("game_pump"):
+            return True
         import game_loop
+        import pipeline
+        handle.meta["turn_kind"] = "wake"
+        handle.meta["wake_tools"] = set(
+            pipeline.mounted_tool_names("wake", handle.char_id))
+        try:
+            await client.query(game_loop.REOPEN_NOTE_PROMPT)
+            return await _pump_drain()
+        finally:
+            handle.meta.pop("turn_kind", None)
+
+    async def _game_reforge() -> None:
+        """N 张段内重铸（§4 节奏；唯一保留的边界）：白描轮 → 从镜像重铸（图回填 /
+        节奏 / shots 归零都在 _open_session 里，§4.1）→ resume。铸完还是 chat
+        options（无 flavor）。ping＝下一 tick（FIRST_REQUEST_OK：接不上 →
+        _pump_tick 按死处理自愈）。"""
+        nonlocal client, ledger
         pump = handle.meta.get("game_pump")
         if not pump or client is None:
             return
         shots = int(handle.meta.get("shots", 0))
         handle.reopening = True
-        handle.meta["turn_kind"] = "wake"
-        import pipeline
-        handle.meta["wake_tools"] = set(
-            pipeline.mounted_tool_names("wake", handle.char_id))
         try:
-            await client.query(game_loop.REOPEN_NOTE_PROMPT)
-            if not await _pump_drain():
-                raise RuntimeError("巩固轮没收尾")
+            if not await _pump_note_round():
+                raise RuntimeError("白描轮没收尾")
             history = norm_history(state_store.read_recent_window(handle.char_id))
             if not history:
                 print("[chat_loop] 镜像空白，game 重铸放弃", file=sys.stderr)
                 return
-            tail = _game_shot_tail(pump["seg_id"])
             cat = (handle.meta.get("catalog")
                    or state_store.read_sticker_catalog())
             try:
-                await _open_session(history, cat, render_tail=tail)
+                await _open_session(history, cat)
             except Exception as e:
                 print(f"[chat_loop] game 重铸首试失败，重试一次: {e}", file=sys.stderr)
-                await _open_session(history, cat, render_tail=tail)
-            handle.meta["shots"] = 0
+                await _open_session(history, cat)
             print(f"[chat_loop] game 段内重铸完成（char={handle.char_id}，"
                   f"{shots} 张边界）", file=sys.stderr)
         finally:
-            handle.meta.pop("turn_kind", None)
             handle.reopening = False
 
     try:
@@ -1878,6 +1900,11 @@ async def run(handle: session_mgr.LoopHandle, *,
                                else dirty_reason(led_s, ts_sorted(turn.history)))
                         print(f"[chat_loop] 重铸（char={handle.char_id}）：{why}",
                               file=sys.stderr)
+                        # 泵开着：换 client 前先让他把进度记一笔（§4.1 ⑤）。没收尾
+                        # 也照样换——铸的是权威窗口，这轮产物本来就不进账。
+                        if not await _pump_note_round():
+                            print("[chat_loop] 重铸前白描轮没收尾，照样换 session",
+                                  file=sys.stderr)
                         await _open_session(turn.history, turn.catalog)
                     handle.meta["turn_kind"] = "chat"
                 if turn.catalog is not None:

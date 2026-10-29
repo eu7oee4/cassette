@@ -1098,6 +1098,98 @@ class GamePumpLoopTest(ChatLoopTest):
         self.assertTrue(await self._wait(
             lambda: self._has_tick()))
 
+    async def test_edit_triggers_reforge(self):
+        """基类同名用例的泵版：判脏重铸前多一个白描轮（§4.1 ⑤），喂法不同——
+        旧 client 上多喂一发收白描（再多一发兜可能在飞的 tick），新 client 上才喂回复。"""
+        hist = [_m("user", "早"), _m("assistant", "早，小狗")]
+        await self._play(self._turn(hist, "在吗"),
+                         *_text_events("在。"), _result("在。"))
+        c0 = self.clients[-1]
+        hist2 = [_m("user", "早"), _m("assistant", "改过的话"),
+                 _m("user", "在吗", 2000), _m("assistant", "在。", 2001)]
+        turn = self._turn(hist2, "陪我")
+        self.handle.queue.put_nowait(turn)
+        c0.feed(self._Asst(content=[self._Text(text="记好了")], model="t"),
+                _result("x"), _result("x"))
+        self.assertTrue(await self._wait(
+            lambda: len(self.clients) >= 2 and self.clients[-1].queries))
+        self.clients[-1].feed(*_text_events("嗯。"), _result("嗯。"))
+        while await asyncio.wait_for(turn.out.get(), timeout=2) is not None:
+            pass
+        self.assertEqual(len(self.clients), 2)
+        self.assertTrue(c0.disconnected)
+        self.assertIn("把进度记一笔",
+                      "".join(q for q in c0.queries if isinstance(q, str)))
+        self.assertEqual([m["text"] for m in self.forged[-1]],
+                         [_stamp("早"), "改过的话", _stamp("在吗", 2000), "在。"])
+
+    async def test_dirty_reforge_in_game_carries_same_as_segment_reforge(self):
+        """§4.1（10-29 第 4 步）：泵开着时 chat 路判脏重铸和段内重铸带的东西一样——
+        换 client 前白描轮、铸造材料末尾近 K 张图、shots 归零、下一轮带节奏。"""
+        import activity_log
+        import base64
+        import os
+        import tempfile
+        self.assertTrue(await self._wait(
+            lambda: self.clients and self._has_tick()))
+        c0 = self.clients[-1]
+        with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as f:
+            f.write(b"fakejpg")
+            ref = f.name
+        activity_log.recent_shot_refs = lambda seg, k: [ref]
+        self.handle.meta["shots"] = 5
+        self.handle.meta["game_pump"]["rhythm_due"] = False
+        # 分歧的权威窗口（TA 在 app 里把第一条改了）→ 判脏
+        turn = self._turn([_m("user", "改读三章", 1000),
+                           _m("assistant", "好，我去拿游戏", 1001)], "开始吧")
+        self.handle.queue.put_nowait(turn)
+        # 一发收在飞的 tick、一发收白描轮
+        c0.feed(self._Asst(content=[self._Text(text="点评")], model="t"),
+                _result("x"), _result("x"))
+        self.assertTrue(await self._wait(lambda: len(self.clients) >= 2))
+        self.assertIn("把进度记一笔",
+                      "".join(q for q in c0.queries if isinstance(q, str)))
+        tail = self.forged[-1][-1]
+        self.assertIn("眼前的画面", tail["text"])
+        self.assertEqual(tail["images"][0]["data"],
+                         base64.b64encode(b"fakejpg").decode())
+        self.assertEqual(int(self.handle.meta["shots"]), 0)
+        # 账=权威窗口投影（2 条），尾巴不入账
+        self.assertEqual([e["h"] for e in self.handle.meta["ledger"]],
+                         [chat_loop._h("改读三章"), chat_loop._h("好，我去拿游戏")])
+        # 新 client 上的这一轮注入前带节奏补注，旗消费掉
+        c1 = self.clients[-1]
+        self.assertTrue(await self._wait(lambda: c1.queries))
+        self.assertIn("短轮", json.dumps(c1.queries[0], ensure_ascii=False))
+        self.assertFalse(self.handle.meta["game_pump"].get("rhythm_due"))
+        c1.feed(*_text_events("开。"), _result("开。"))
+        while await asyncio.wait_for(turn.out.get(), timeout=2) is not None:
+            pass
+        os.unlink(ref)
+
+    async def test_hiccup_reopen_carries_tail_skips_note(self):
+        """§4.1：引擎打嗝（流断）后的泵重开也带近 K 张图；client 已死，白描轮跳过。"""
+        import activity_log
+        import os
+        import tempfile
+        self.assertTrue(await self._wait(
+            lambda: self.clients and self._has_tick()))
+        c0 = self.clients[-1]
+        with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as f:
+            f.write(b"fakejpg")
+            ref = f.name
+        activity_log.recent_shot_refs = lambda seg, k: [ref]
+        self.handle.meta["shots"] = 5
+        c0.feed(None)                      # 流断 → session 按死 → 下一 tick 重起
+        self.assertTrue(await self._wait(lambda: len(self.clients) >= 2))
+        self.assertIn("眼前的画面", self.forged[-1][-1]["text"])
+        self.assertNotIn("把进度记一笔",
+                         "".join(q for q in c0.queries if isinstance(q, str)))
+        self.assertEqual(int(self.handle.meta["shots"]), 0)
+        self.assertTrue(self.handle.meta["game_pump"].get("rhythm_due")
+                        or any("短轮" in q for q in self._ticks()))
+        os.unlink(ref)
+
     async def test_reforge_image_tail_not_in_ledger(self):
         """图尾巴：铸造材料末尾多一行带 images 的 user 框；账里没有它。"""
         import activity_log

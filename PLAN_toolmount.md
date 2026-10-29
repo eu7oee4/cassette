@@ -251,6 +251,15 @@ AskUserQuestion 进去就在醒来轮放行了。
 - 不管哪条路触发的重开，带的东西都一样——「某条路漏带一样」这类问题从结构上消失。
 - game_end 后 transcript 里残留那段到下次重铸为止——措辞本就是「拿着游戏的时候」，不清。
 
+**10-29 第 4 步施工记录（已落码，未重启）**：`_open_session(history, catalog)` 去掉 `render_tail` 参数，自己判
+`handle.meta["game_pump"]`：在就 ①铸造材料末尾接 `_game_shot_tail` ②`rhythm_due=True` ④`shots=0`。
+⑤ 抽成 `_pump_note_round()`（client 活着且泵开着才跑 `REOPEN_NOTE_PROMPT`，否则直接 True），三处调用：
+`_game_reforge`（没收尾按死，同旧）、chat 路判脏重铸（换 client 前调，没收尾照样换——铸的是权威窗口）、
+`_consolidate_and_reforge`（泵开着时白描轮**顶替** Ombre 巩固轮，两轮目的相同不连跑）。引擎打嗝 / 醒来 client None
+两条 client 已死，白描自然跳过，图和节奏照带。③ 用法铸回等第 9 步；§5.2 配置变了的重铸（第 8 步）落码时直接调
+`_open_session` 就全带上，不用另写。测试：GamePumpLoopTest 新增判脏路 / 打嗝路两条，基类 `test_edit_triggers_reforge`
+在泵子类里覆盖成多喂一发白描的版本；678 绿（jobhunt 一条旧账）。
+
 ## 5. 开 session 探活
 
 ### 5.1 开场
@@ -414,8 +423,8 @@ SDK 升级会连带换掉它自带的 CLI（10-29 晚起 2.1.310，与 PATH 同�
 3. ~~**账按气泡记**~~ **已落码（10-29 晚，未重启；interject §4.3 / gamechat §2.2 ① 有施工记录）**：单独上线也能减少现在的重铸；gamechat 和本稿 §6 的锚点都等它。
    P1 第一步核对时把「tick 点评与用户消息 ts 交错」那类（PLAN_gamechat §2.2 第 3 条）从「多段回复」
    里分出来，两类一起修。
-4. **泵开着时的重开统一收口**（toolmount §4.1 五样）：图回填 + 节奏补注 + shots 归零 + 感知白描前置，
-   用法铸回等第 9 步接上。
+4. ~~**泵开着时的重开统一收口**~~ **已落码（10-29 深夜，未重启；施工记录在 §4.1 末）**：图回填 + 节奏补注 +
+   shots 归零 + 感知白描前置全收进 `_open_session` / `_pump_note_round`，用法铸回等第 9 步接上。
 5. **游戏改走 /chat/stream**（PLAN_gamechat）：后端 `/code/status` 加 `engine` → app 改路由（含
    game_started 到手时先拉一次 status）→ 观察旧包 → 退役终端口泵分支。
 6. **固定菜单 + 开场探活同批**（toolmount §3.1 / §3.2 / §3.3 第二刀 / §5.1）：菜单摘掉 `ombre_alive`
@@ -433,6 +442,9 @@ SDK 升级会连带换掉它自带的 CLI（10-29 晚起 2.1.310，与 PATH 同�
 
 > 派活提 PR（PLAN_delegate，10-29 立稿）独立于上面各步，可插在任意位置；建议排在第 6 步（固定菜单）之后，
 > 菜单块一次写好。
+>
+> **换真相源（PLAN_truthsource，10-29 立稿）不在合排里**：重铸读回旧 session、手机历史降级成恢复源、判脏改事件。
+> 机主拍板合排照走，灰度跑出「对不上」频率再决定开不开工。它做了之后第 9 步（留用法）大半不用做、第 3 步退成恢复路校验。
 
 ## 10. 待拍
 
