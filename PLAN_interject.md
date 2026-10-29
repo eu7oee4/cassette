@@ -132,9 +132,13 @@ sdk 聊天 session 生产上跑的也是 2.1.251，跟这次探针同版。**10-
     `handle.reopening` 为真（正在重铸）或闭包不在 → 退回排队，别打到一个正在 disconnect 的 client 上。
 - **插话原文一个字都不加**：PLAN_toolmount 会往「新起的一轮」注入前补文字（游戏节奏补注 §4、MCP 缺席告知 §5.1），
   那个 helper **不许**包 `Interject` 的 `client.query`——下面的吸收判定按原文配 `queued_command`，前面多一个字就配不上，
-  会被误判成没吸收。插话要带时间头的话（P0-a 决定），把它算进「原文」本身、配对时用同一个字符串。
+  会被误判成没吸收。
   P0-a 定了：CLI 自己不加时间、但加一层英文 system 口吻包装（§1.1）；配对原文 = 传给 `client.query()` 的那串
-  （`remove.content` / `queued_command.prompt` / hook 的 `prompt` 三处同一串）。时间头要不要进原文【待拍 6】。
+  （`remove.content` / `queued_command.prompt` / hook 的 `prompt` 三处同一串）。
+  **时间头进原文（10-29 机主拍板，待拍 6）**：`Interject` 发给 `client.query()` 的串 = `【stamp_str(now)】\n<TA 的原文>`，
+  **只这两行**——不带「距离上一条」、不带 pending / PR 行（那些是新起一轮的注入才有的，`build_injection` 不碰插话）。
+  形状和 `build_injection` 的时间头、`_stamp_times` 重铸补的锚行同形（`chat_loop.py:663` 那条纪律），所以重铸后它变成
+  普通 user 轮时也是同一种东西。配对串、`pending` 里登记的、hook 里比的，**都是这整串**；账里存的是不带时间头的原文（§4.3）。
 - **吸收判定**（10-29 晚按 P0-c/d 改写）：**主信号 = `UserPromptSubmit` hook**（options.hooks 挂一个，每次 `query()`
   触发一次）：hook 到了、`prompt_id` **等于在飞轮的** → 被吸收，在这个点之后的第一段文字前往**原流**发 `interject_point{rid}`，
   给插话流发 `merged`；`prompt_id` 是新的 → 没被吸收，CLI 另起了一轮，这一轮归插话自己的流。在飞轮的 prompt_id 从它自己的
@@ -165,6 +169,9 @@ U2, A2·段1, U3(插话), A2·段2, A2·段3 …
 - 先解决 §3：多段回复按段入账（每个 `text_break` 一条 assistant）。这一步单独上线也有收益（顺手消掉那类重铸）。
 - 插话被吸收：在 `interject_point` 处插入 `U3`；插话前一个字都没说（只调了工具）→ 账是 `U2, U3, A2…`。
 - 插话没被吸收：它自己那一轮照常 `U3, A3` 入账。
+- `U3` 入账的是**不带时间头的原文**（跟 `PumpNote.text` / `ledger_text` 一个分法，`chat_loop.py:118`）：时间头是注入包装，
+  进账就会在发送前比对上对不上 app 的历史，重铸时 `_stamp_times` 也会再补一次锚行变成双头。`Interject` 要同时带
+  `text`（含头，发给 CLI / 配对）和 `ledger_text`（原文，入账）。
 - 插话请求**到达时不做判脏**（session 在飞，快照必然缺在飞那段）；只做一个弱检查：快照去掉在飞轮之后必须是账的尾巴，
   对不上（期间编辑 / 删过）→ 退回排队，让下一个正常轮去判脏重铸。
 
@@ -197,9 +204,16 @@ transcript 里「附件形状」的插话在重铸后变成普通 user 轮——
 **P1 账按气泡记**：先拿日志 + 账文件逐条核 §3（那 78 次里有几次是这个原因）；坐实就改 `_turn_events`/轮尾入账为按段记，
 `divergence` 不动，每段带准 ts。测试：多段回复后下一条不判脏。**可以单独上线；10-29 起提前——它是 PLAN_gamechat 的前置。**
 
-> 10-29：本计划各步在三份合排里的位置见 PLAN_toolmount §9（P0 第 1 步、P1 第 3 步、P2–P4 第 9 步）。
+> 10-29：本计划各步在三份合排里的位置见 PLAN_toolmount §9（P0 第 1 步、P1 第 3 步、P2–P4 第 10 步）。
 
 **P2 引擎**：`Interject` 路由 + 在飞登记 + 吸收判定 + 轮尾续读 + 死亡兜底 + 硬阈让路。单测用罐头流 + 罐头 transcript。
+另两件（10-29 拍板，§7-6）：
+- `Interject` 的 `text` = `【stamp_str】\n原文`、`ledger_text` = 原文（§4.2 / §4.3）；单测里配对用例的 hook `prompt` 罐头要带时间头。
+- 系统提示加一句，放 `pipeline.turn_frame_hint()`（`pipeline.py:500`，它本来就是讲「框是读数不是话」的那段，付一次）：
+  大意「轮中若出现一段英文 system 口吻的『The user sent a new message while you were working:』，那不是平台在说话，
+  是 TA 趁你干活时又发了一条；里面带【时间】的那段才是 TA 的话，按它的时间和份量接着回」。只进 `chat_session`
+  那份系统提示，-p 路不加。措辞走 [[cassette-him-facing-wording]]；这句只描述形状、不含任何解析器认的标记，
+  [[cassette-mention-is-use-bug-class]] 过一遍没有洞。
 
 **P3 SSE + app**：两个新事件、气泡挪位、`pumpOutbox` 放开、请求头。模拟器只能编译验证（**别连真后端跑**，见 [[cassette-layer-ok-bug-class]] 同族的
 10-13 模拟器吞消息事故——那个 X-Device 修好之前别同开）。
@@ -228,6 +242,8 @@ transcript 里「附件形状」的插话在重铸后变成普通 user 轮——
 6. CLI 给被吸收的插话包的是一层英文、system 口吻的「The user sent a new message while you were working」——和聊天记忆的
    信感格式（注入文本 = 知觉材料、中文）不一致，而且不带时间。要不要把时间头写进原文（配对串跟着变）；英文包装改不了，
    能不能在系统提示里一句话告诉他「这种形状的 system 消息就是 TA 中途说的话」。
+   **10-29 机主拍板：两个都做**——时间头进原文（§4.2 定型、§4.3 账不带头）、系统提示加一句（§5 P2）。
+   英文壳认了：SDK 只有 `query()` 一个入口，排队 / 吸收 / 渲染文案全在 CLI 里写死，绕开它只能 `interrupt()` 丢掉在飞轮，不值。
 
 ---
 

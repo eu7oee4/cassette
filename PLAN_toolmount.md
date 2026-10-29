@@ -227,8 +227,9 @@ AskUserQuestion 进去就在醒来轮放行了。
   现成的 `needs_opening` 旗就是「各处手写」的后果：`_open_session` 置位（`:1498`），只在 Turn 路消费
   （`:1869`）——泵从 client None 重开后它一直悬着，到下一个聊天轮才把 OPENING_NUDGE 塞进去。
   `rhythm_due` 和 `needs_opening` 一起收进这个 helper；巩固轮不消费任何旗，只透传。
-- ⚠️ **在飞插话（PLAN_interject 的 `Interject`）一律不加任何前缀**——插话靠原文跟 transcript 里
+- ⚠️ **在飞插话（PLAN_interject 的 `Interject`）本 helper 一律不碰**——插话靠自己那串跟 hook / transcript 里
   `queued_command` 配对，前面多一个字就配不上，会被误判成「没吸收」（§11）。§5.1 的缺席告知同此。
+  插话自带的时间头（interject §4.2，10-29 拍板）是 `Interject` 自己拼的、算在配对串里，不经过这个 helper。
 
 ### 4.1 泵开着时的重开统一收口
 
@@ -437,7 +438,7 @@ SDK 升级会连带换掉它自带的 CLI（10-29 晚起 2.1.310，与 PATH 同�
 
 | # | 交界 | 规矩 | 落在哪 |
 |---|---|---|---|
-| 1 | 往 session 里补文字（节奏 §4、缺席告知 §5.1） vs 插话靠原文配对 | 只补在**新起的一轮**的注入里；在飞插话一律不加前缀 | 本稿 §4；interject §4.2 |
+| 1 | 往 session 里补文字（节奏 §4、缺席告知 §5.1） vs 插话靠原文配对 | 只补在**新起的一轮**的注入里；在飞插话只带自己的时间头，helper 不碰 | 本稿 §4；interject §4.2 |
 | 2 | 铸回用法挂哪条 vs 账按气泡记 | 挂「接触之后的第一段 assistant」，P1 给每段准 ts | 本稿 §6；interject §4.3 |
 | 3 | 配置变了的重铸 vs pending 插话不铸 | 只在无在飞轮、pending 空时铸；泵开着推迟到 game_end | 本稿 §5.2；interject §4.2 |
 | 4 | 都靠 CLI 内部行为 | 升级前必跑清单共用（§8） | 本稿 §8；interject §6 |
