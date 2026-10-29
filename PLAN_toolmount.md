@@ -308,6 +308,12 @@ AskUserQuestion 进去就在醒来轮放行了。
   返回时置 `handle.meta["game_toggle"]="on"`，下个轮边界（泵 tick 之间）toggle on；game_end 置 off 同理。
   泵开着时轮边界就是 tick 间隙，不必等 game_end。toggle 失败（抛异常）→ 打日志、下一拍再试，不堵泵。
 
+**施工记录（10-30，第 8 步；细目在 §9 第 8 步）**：三件事（中途探活 / 插件开关 toggle 或重铸 / game 开关）都落了。
+旗的实际形状是 `meta["mcp_toggle_want"]`（name → on）+ `meta["mcp_off"]`，不是上面写的 `game_toggle`。toggle 口子和
+「关着的插件也挂」都挂在 `CHAT_TOOL_DEFER` 这一把闸上（关 = 一切照旧全量，回退一行）；闸关时插件开关仍走「配置变了 →
+轮间隙重铸」——这条不依赖闸，今天之前 sdk 路上拨插件开关要等下次重铸才生效（plugins.toggle 那句「下一轮即时生效」只对
+-p 路为真）。「泵开着推迟到 game_end」靠 60s 看守只在泵关着时走到这个事实实现，没另写判断。
+
 ### 5.3 为什么不用 toggle
 
 **（10-29 晚翻案：2.1.310 上可以用 toggle。）** 原因是 2.1.251 上进程内 server 不吃、stdio/http toggle 回来后
@@ -465,9 +471,30 @@ SDK 升级会连带换掉它自带的 CLI（10-29 晚起 2.1.310，与 PATH 同�
    `/permits/pending` `/questions/pending` 多 `closed` 列）+ app 卡片置灰标「已让路，你发送了新消息」/
    「已让路，他醒来了」/「已超时」（`CardOutcome.label`，ContentView `cardOutcomes`）。测试 `tests/test_cards_closed.py`。
    上电前 `.env` 写 `DELEGATE_CHARS=cass`（灰度）。
-8. **延迟 + 常驻**（toolmount §2）+ **§5.2 中途探活 / 配置变了的重铸 / game 开关**：`CHAT_TOOL_DEFER` 默认关，
+8. ~~**延迟 + 常驻**（toolmount §2）+ **§5.2 中途探活 / 配置变了的重铸 / game 开关**~~ **已落码（10-30，未重启）**：`CHAT_TOOL_DEFER` 默认关，
    cass 先开跑几天看 ToolSearch 频率。预期：第 9 步接上之前，游戏里每次段内重铸（70 张）之后开头
    多一跳取用法，正常现象，别当 bug 修。
+   施工记录：
+   - §2：`config.CHAT_TOOL_DEFER`（"0" 关 / "1" 全角色 / "cass,default" 按角色）→ `config.chat_tool_defer(cid)`；
+     `pipeline.tool_search_on(context, char_id)` 对 `SESSION_CONTEXT="chat_session"` 问它、其余照旧问
+     `TOOL_SEARCH_CONTEXTS`（-p 老路一字没动）；`pipeline.scene_of` 把 chat_session 当 chat（插件 / skills / 菜单
+     when 一处 alias）。`build_options` 三处同问（菜单 / tools+allowed / env）；`ALWAYS_LOAD_SERVERS =
+     {ombre-brain, basics, game}` 开闸时加 `alwaysLoad: True`（进程内 sdk 的 game 也只是多一个键，同探针 D1）。
+   - 轮间隙 toggle 口子（§5.2 / §10，同一把闸）：`_want_toggle` 记想做的、`_apply_toggles` 在 loop 顶每个轮边界做
+     （失败打日志下一拍再试，不堵泵）；做成的落 `meta["mcp_off"]`，门 `_off_hit` 按它拒并说人话（game：「下一轮才到手」/
+     「不在手边」；插件：「在 app 里关着」）。`_open_session` 探活后：关着的插件（`plugins.mounted_all` 挂全集、
+     `meta["mcp_plug_off"]` 带名单）+ 泵没开时的 game 随即 off；`start_game_pump` 置 game on、`_pump_close` 置 off；
+     app 的 game_start 返回值在 server 还 off 时补一句「游戏工具下一轮才到手」（`chat_loop.game_tools_pending`）。
+   - §5.2 中途探活：`_probe_mcp` 拆成 `_expected_mcp / _mcp_rows / _absent_of`，`_recheck_mcp` 复用（只拍一次不等
+     pending；off 的 server 不算；pending 维持上一拍判断）；60s 看守 + 泵每 `MCP_RECHECK_TICKS`（默认 30）个 tick 各调一次。
+     新缺席 → 进 absent + `absent_note_due` + 缺 Ombre 推 Bark；恢复 → `absent_recovered_due`（`_turn_prefix` 渲染
+     ABSENT_NOTES 第二句）；缺席还没来得及告知就恢复 → 两句都不说。
+   - 配置变了：`_mount_signature(cid)` =（插件开关表, Ombre 配没配）只读不渲染，开 session 时记 `meta["mount_sig"]`，
+     60s 看守比一次（队列空 = 没有在飞的轮；泵开着不比，推迟到 game_end）。变的插件全在这条 session 里且闸开 → toggle；
+     否则（新装的 / Ombre 接线 / 闸关）→ `_consolidate_and_reforge("配置变了")`，`_open_session` 全带上（§4.1）。
+   - 测试 `tests/test_toolmount_step8.py`（17 条）；`test_chat_loop` 基类桩掉 `_mount_signature`（不读生产开关表）。
+     `.env.example` 补 `CHAT_TOOL_DEFER` / `DELEGATE_CHARS`。**上电顺序**：先 `CHAT_TOOL_DEFER=cass`，看日志里
+     `toggle game → off` 和 ToolSearch 频率，再决定全开。
 9. **重铸留用法**（toolmount §6）。
 10. **插话**（interject P2–P4，含泵开着时的 chat 轮）。
 11. **阈值复核**：基线降 ~28k 后 `CHAT_SOFT/HARD/PANIC_TOKENS` 是否下调（量的是含 schema 的

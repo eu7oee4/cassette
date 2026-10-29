@@ -133,6 +133,26 @@ DELEGATE_DAILY_WAKE = int(os.environ.get("DELEGATE_DAILY_WAKE", "2"))
 # 灰度（§7 第 5 步）：逗号分隔的角色 id，只这些角色能派；空 = 都能。先只给 cass 开一周。
 DELEGATE_CHARS = {s.strip() for s in os.environ.get("DELEGATE_CHARS", "").split(",") if s.strip()}
 
+# 工具延迟 + 常驻（PLAN_toolmount §2，10-30 第 8 步）：sdk 聊天 session 挂 ToolSearch，
+# 工具用法（schema）按名字取、常驻名单（pipeline.ALWAYS_LOAD_SERVERS）照旧全量。
+# 同一把闸也管「轮间隙 toggle」那个口子（§5.2 / §10）：game 平时 toggle off、插件在 app 里
+# 开关走 toggle、关着的插件也挂上随即 toggle off。
+#   "0" / 空（默认）= 关：一切照旧全量，回退一行；"1" = 全角色；"cass,default" = 只这些角色。
+# 只管常驻 session 路（context="chat_session"）；-p 老路（wake.py / cohabit）口径照旧
+# （pipeline.TOOL_SEARCH_CONTEXTS）。先给 cass 开几天看 ToolSearch 频率。
+CHAT_TOOL_DEFER = os.environ.get("CHAT_TOOL_DEFER", "0").strip()
+
+
+def chat_tool_defer(char_id) -> bool:
+    """这个角色的常驻聊天 session 开不开工具延迟（含轮间隙 toggle 口子）。"""
+    v = CHAT_TOOL_DEFER
+    if v in ("", "0", "false", "off"):
+        return False
+    if v in ("1", "true", "on", "all"):
+        return True
+    return bool(char_id) and char_id in {s.strip() for s in v.split(",") if s.strip()}
+
+
 # 问答卡（PLAN_chatui §3.5/U4）：AskUserQuestion 挂进 sdk 聊天 session（不进
 # allowed_tools → 每问一卡，can_use_tool 挂起等机主作答，updated_input 回填）。
 # 默认关，上电硬前置：iOS 问答卡先做出来——卡没人答只会白等一阵超时拒。

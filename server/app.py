@@ -2745,9 +2745,11 @@ def _game_story_start_unified(cid: str):
         return r
     game_loop.ensure_default_tips()   # 小抄空白才播种（出厂机制事实，机主可改）
     logerr(f"拿到游戏(unified)：char={cid} seg={r.get('seg_id')}")
-    return {"ok": True, "session": "unified",
-            "hint": chat_loop.game_rhythm_note()
-                    + "\n〔先 game_notes_read 翻翻剧情本看看上次到哪了。〕"}
+    hint = chat_loop.game_rhythm_note() + "\n〔先 game_notes_read 翻翻剧情本看看上次到哪了。〕"
+    if chat_loop.game_tools_pending(cid):
+        # §10 轮间隙 toggle：game server 这一轮还 off 着，工具下一轮才到手
+        hint += "\n〔游戏工具下一轮才到手——这句说完目光就能落回屏幕。〕"
+    return {"ok": True, "session": "unified", "hint": hint}
 
 
 def _game_story_start_sdk(inp: GameStoryStartIn):

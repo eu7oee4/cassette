@@ -258,6 +258,9 @@ class ChatLoopTest(unittest.IsolatedAsyncioTestCase):
         chat_loop._ombre_on = lambda cid: False
         self._frame_orig = chat_loop._frame_activities
         chat_loop._frame_activities = lambda h, cid: h
+        # 配置签名（§5.2 第 8 步）读的是生产插件开关表：桩成常量，单测不读生产状态也不触发重铸
+        self._sig_orig = chat_loop._mount_signature
+        chat_loop._mount_signature = lambda cid: ((), True)
 
         def factory(options):
             c = FakeClient(options)
@@ -281,6 +284,7 @@ class ChatLoopTest(unittest.IsolatedAsyncioTestCase):
         chat_loop.CHAT_PANIC_TOKENS = self._panic_orig
         chat_loop.HARD_FORGE_GRACE_SEC = self._grace_orig
         chat_loop._frame_activities = self._frame_orig
+        chat_loop._mount_signature = self._sig_orig
         if not self.task.done():
             self.handle.stop_reason = "test-teardown"
             self.task.cancel()

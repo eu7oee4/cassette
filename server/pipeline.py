@@ -1003,15 +1003,34 @@ TOOL_SEARCH_TOOL = "ToolSearch"   # CLI 内置：按名字取延迟工具的 sch
 # 或者让插件自己按场景少注册那个工具。
 TOOL_SEARCH_CONTEXTS: set[str] = {"wake"}
 
+# 常驻 session 路（PLAN_toolmount §2，第 8 步）的延迟开关另有一把：config.CHAT_TOOL_DEFER
+# 按角色灰度。它**不接进 TOOL_SEARCH_CONTEXTS**——接了 -p 聊天老路（sse.py → base_claude_args
+# 默认 context="chat"）跟着延迟，和「老路不动」顶牛。常驻路自报 context="chat_session"，
+# 按场景分挂的地方（插件 / skills / 菜单的 when）把它当 chat（scene_of，一处 alias）。
+SESSION_CONTEXT = "chat_session"
 
-def tool_search_on(context: str) -> bool:
-    """这条路要不要开工具延迟。
+# 延迟开着时照旧全量常驻的 server（§2）：Ombre 几乎每轮都用（开场浮记忆、hold）7.4k 值得；
+# basics 0.8k 高频；game 2.3k 进名单但平时 toggle off（§10 10-29 拍板：免 ToolSearch、
+# game_start 时 toggle on、重铸也不丢，§6 不用记游戏工具）。
+ALWAYS_LOAD_SERVERS: set[str] = {"ombre-brain", "basics", "game"}
+
+
+def scene_of(context: str) -> str:
+    """按场景分挂的口径：chat_session（常驻 session 路）就是 chat。"""
+    return "chat" if context == SESSION_CONTEXT else context
+
+
+def tool_search_on(context: str, char_id: Optional[str] = None) -> bool:
+    """这条路要不要开工具延迟。chat_session 按角色问 config.chat_tool_defer，其余看
+    TOOL_SEARCH_CONTEXTS。
 
     ⚠️ base_claude_args 和 _subprocess_env **必须拿同一个 context 问这里**，两边一致才有效：
     只把 ToolSearch 加进白名单、不给环境变量 = 白搭一份 schema 进去；
     只给环境变量、不把 ToolSearch 加进白名单 = 延迟静默不生效（CLI 退回全量 schema，
     日志里那句 "ToolSearchTool is not available" 是唯一线索）。两种都不报错，所以写死在
     一个判据里，别在调用点各判一次。"""
+    if context == SESSION_CONTEXT:
+        return config.chat_tool_defer(char_id)
     return context in TOOL_SEARCH_CONTEXTS
 
 
@@ -1020,22 +1039,23 @@ def mounted_tool_names(context: str = "chat", char_id: Optional[str] = None) -> 
     口径必须和 base_claude_args 一致——菜单按它过滤，对不上就会跟 TA 提不在场的能力。
     不复用 base_claude_args 的返回值是因为那边还要拼参数、且引擎不对时会抛。"""
     import plugins
+    scene = scene_of(context)
     names: list[str] = list(BASICS_MCP_TOOLS)   # 无条件挂（钟 + 取公开资料）
     if ombre_configured(char_id):               # 按配置不探活（§3.1；-p 路仍探活）
         names += OMBRE_TOOLS
-    _, plug_tools = plugins.mounted(context, char_id)
+    _, plug_tools = plugins.mounted(scene, char_id)
     names += plug_tools
     if _pet_mcp_mounted(char_id):
         names += PET_MCP_TOOLS
-    if _skills_mounted(context, char_id):
+    if _skills_mounted(scene, char_id):
         import skills
         names += skills.SKILLS_MCP_TOOLS
     if _prs_mounted(char_id):
         names += PRS_MCP_TOOLS
-    # ToolSearch 也得算进来，条件跟 base_claude_args 一模一样——菜单头那句「用法默认
-    # 没加载，先去取」正是按它在不在场决定说不说的。漏了它＝延迟开着却不告诉 TA 要先
-    # 取用法，他直接调必失败（静默失效，只能靠肉眼看菜单头才发现）。
-    if names and tool_search_on(context):
+    # ToolSearch 也得算进来，条件跟 base_claude_args / build_options 一模一样——菜单头那句
+    # 「用法默认没加载，先去取」正是按它在不在场决定说不说的。漏了它＝延迟开着却不告诉 TA
+    # 要先取用法，他直接调必失败（静默失效，只能靠肉眼看菜单头才发现）。
+    if names and tool_search_on(context, char_id):
         names.append(TOOL_SEARCH_TOOL)
     return names
 
@@ -1152,6 +1172,7 @@ def tool_menu_block(context: str = "chat", char_id: Optional[str] = None) -> str
         return ""
 
     mounted = configured_tool_names(context, char_id)
+    context = scene_of(context)    # 下面全是按场景的事（when / 注记 / 喊话）；延迟已算进 mounted
     # 全名按尾段建索引：菜单里写裸名（dream），配置里是全名（mcp__ombre-brain__dream）
     by_short: dict[str, str] = {}
     for full in mounted:

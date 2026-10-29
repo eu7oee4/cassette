@@ -426,6 +426,9 @@ def _wake_gate(handle: session_mgr.LoopHandle):
                                                "permissionDecision": "allow",
                                                "permissionDecisionReason": why}}
             return {} if verdict == "ask" else _deny(why)
+        off_why = _off_hit(handle, tool)
+        if off_why:
+            return _deny(off_why)
         if tool.startswith("mcp__game__"):
             if handle.meta.get("game_pump"):
                 return {}
@@ -551,9 +554,13 @@ def _turn_prefix(handle: session_mgr.LoopHandle) -> list[str]:
         parts.append(game_rhythm_note())
     due = handle.meta.pop("absent_note_due", None)
     if due:
-        # 开场探活的缺席告知（§5.1 ④）：每个 server 一句知觉白描，和门拒的原话同一句。
+        # 开场 / 中途探活的缺席告知（§5.1 ④ / §5.2）：每个 server 一句知觉白描，和门拒的原话同一句。
         import pipeline
         parts.append(pipeline.absent_note(due))
+    back = handle.meta.pop("absent_recovered_due", None)
+    if back:
+        import pipeline
+        parts.append(pipeline.absent_note(back, recovered=True))   # §5.2：「连上了」
     return parts
 
 
@@ -594,8 +601,11 @@ def build_options(char_id: str, catalog: Optional[list] = None,
         # 有 key 就拒开，绝不静默改成 API 计费（订阅纪律）。
         raise RuntimeError("环境里有 ANTHROPIC_API_KEY：SDK 聊天路会走 API 计费，拒开")
 
+    # 延迟 + 常驻（PLAN_toolmount §2，第 8 步）：按角色灰度（config.CHAT_TOOL_DEFER），
+    # 菜单 / 工具名单 / 环境变量三处同问 tool_search_on(SESSION_CONTEXT)——三处一致才有效。
+    defer = pipeline.tool_search_on(pipeline.SESSION_CONTEXT, char_id)
     parts = [pipeline.rendered_persona(char_id).read_text("utf-8")]
-    mb = pipeline.tool_menu_block("chat", char_id)
+    mb = pipeline.tool_menu_block(pipeline.SESSION_CONTEXT, char_id)
     if mb:
         parts.append(mb)
     parts += [pipeline.pronoun_hint(), pipeline._chat_next_hint(), _wake_contract(),
@@ -623,7 +633,15 @@ def build_options(char_id: str, catalog: Optional[list] = None,
         servers["ombre-brain"] = server
         tools += pipeline.OMBRE_TOOLS
     import plugins
-    plug_cfg, plug_tools = plugins.mounted("chat", char_id)
+    plug_off: list[str] = []
+    if defer and handle is not None:
+        # §5.2：装了但关着的插件也挂、开 session 后随即 toggle off（_open_session），
+        # app 里的开关从此永远有 toggle 对象。关着的名单经 handle.meta 交给 _open_session。
+        plug_cfg, plug_tools, plug_off = plugins.mounted_all(char_id)
+    else:
+        plug_cfg, plug_tools = plugins.mounted("chat", char_id)
+    if handle is not None:
+        handle.meta["mcp_plug_off"] = list(plug_off)
     _merge_mcp_file(servers, str(pipeline._basics_mcp_config(char_id)))
     tools += pipeline.BASICS_MCP_TOOLS       # 无条件：钟 + 取公开资料
     if plug_cfg:
@@ -672,9 +690,15 @@ def build_options(char_id: str, catalog: Optional[list] = None,
         tools = tools + ["AskUserQuestion"]
 
     env = {}
-    if tools and pipeline.tool_search_on("chat"):
+    if tools and defer:
+        # ToolSearch 必须进 tools（allowed_tools 从 tools 派生）且环境变量显式给——两边缺一
+        # 都是静默失效（见 pipeline.tool_search_on 的注释）。常驻名单上的 server 加 alwaysLoad
+        # （§1.4 / §1.6 实测：http / stdio / 进程内 sdk 三种都吃；单给 false 做不到，所以只加 True）。
         tools = tools + [pipeline.TOOL_SEARCH_TOOL]
         env["ENABLE_TOOL_SEARCH"] = "true"
+        for name in list(servers):
+            if name in pipeline.ALWAYS_LOAD_SERVERS:
+                servers[name] = {**servers[name], "alwaysLoad": True}
 
     return ClaudeAgentOptions(
         system_prompt=system,
@@ -1399,62 +1423,60 @@ def _ombre_on(char_id: str) -> bool:
         return False
 
 
-# ---------- 开 session 探活（PLAN_toolmount §5.1，10-29 第 6 步） ----------
+# ---------- 开 session 探活（PLAN_toolmount §5.1，10-29 第 6 步）+ 中途（§5.2，10-30 第 8 步） ----------
 MCP_PROBE_TIMEOUT_SEC = float(os.environ.get("MCP_PROBE_TIMEOUT_SEC", "10"))
+MCP_RECHECK_TICKS = int(os.environ.get("MCP_RECHECK_TICKS", "30") or "30")   # 泵开着时每 N 个 tick 拍一次
 
 
-async def _probe_mcp(client, options, handle: session_mgr.LoopHandle) -> None:
-    """connect() 之后对账：① get_mcp_status 每 0.2s 拍一次直到没有 pending（上限
-    MCP_PROBE_TIMEOUT_SEC；连不上的 server 首拍就是 failed，不经过 pending）；② failed 的
-    逐个 reconnect_mcp_server 一次——对连不上的它是**抛异常**（ECONNREFUSED 原话），
-    不是返回失败；③ 每个 server 的 tools 与配置（options.tools 里的 mcp__ 名）对账，缺的落
-    handle.meta["absent_tools"]（按 server：{"tools": [全名], "error": 原话}）；④ 置
-    absent_note_due，下一轮注入前缀告知（_turn_prefix），门对缺席工具 deny 同一句
-    （_absent_hit）。failed 的 server 没有 tools 键，按空处理。缺 Ombre 推 Bark。
-    探活本身任何异常都不影响开 session（按全在处理，顶多他撞一次门）。
-    假 client（测试 / 没这两个方法）直接跳过。"""
-    get_status = getattr(client, "get_mcp_status", None)
-    if get_status is None:
-        return
+def _expected_mcp(options) -> dict[str, list[str]]:
+    """options.tools 里的 mcp__ 全名按 server 分组——探活的对账全集。"""
     expected: dict[str, list[str]] = {}
     for t in list(getattr(options, "tools", None) or []):
         if t.startswith("mcp__"):
             srv = t.split("__", 2)[1]
             expected.setdefault(srv, []).append(t)
-    if not expected:
-        return
+    return expected
+
+
+async def _mcp_rows(client, expected: dict, poll_sec: float) -> tuple[dict, dict]:
+    """拍 get_mcp_status 直到没有 pending（上限 poll_sec；0 = 只拍一次），failed 的逐个
+    reconnect_mcp_server 一次（对连不上的它是**抛异常**，原话就是错误原话），再拍一次。
+    → (rows: name → status 行, errors: name → 原话)。任何异常往上抛，调用方定夺。"""
+    get_status = client.get_mcp_status
     rows: dict[str, dict] = {}
     errors: dict[str, str] = {}
-    try:
-        t0 = time.monotonic()
-        while True:
-            st = await get_status() or {}
-            rows = {r.get("name"): r for r in (st.get("mcpServers") or [])}
-            if not any(r.get("status") == "pending" for r in rows.values()):
-                break
-            if time.monotonic() - t0 > MCP_PROBE_TIMEOUT_SEC:
-                print(f"[chat_loop] 开场探活超时（{MCP_PROBE_TIMEOUT_SEC}s 仍有 pending："
+    t0 = time.monotonic()
+    while True:
+        st = await get_status() or {}
+        rows = {r.get("name"): r for r in (st.get("mcpServers") or [])}
+        if not any(r.get("status") == "pending" for r in rows.values()):
+            break
+        if time.monotonic() - t0 > poll_sec:
+            if poll_sec > 0:
+                print(f"[chat_loop] 探活超时（{poll_sec}s 仍有 pending："
                       f"{[n for n, r in rows.items() if r.get('status') == 'pending']}）",
                       file=sys.stderr)
-                break
-            await asyncio.sleep(0.2)
-        failed = [n for n, r in rows.items()
-                  if n in expected and r.get("status") == "failed"]
-        recon = getattr(client, "reconnect_mcp_server", None)
-        for n in failed:
-            errors[n] = str(rows[n].get("error") or "failed")
-            if recon is None:
-                continue
-            try:
-                await recon(n)
-            except Exception as e:
-                errors[n] = f"{type(e).__name__}: {e}"[:200]
-        if failed:
-            st = await get_status() or {}
-            rows = {r.get("name"): r for r in (st.get("mcpServers") or [])}
-    except Exception as e:
-        print(f"[chat_loop] 开场探活失败（按全在处理）: {e}", file=sys.stderr)
-        return
+            break
+        await asyncio.sleep(0.2)
+    failed = [n for n, r in rows.items() if n in expected and r.get("status") == "failed"]
+    recon = getattr(client, "reconnect_mcp_server", None)
+    for n in failed:
+        errors[n] = str(rows[n].get("error") or "failed")
+        if recon is None:
+            continue
+        try:
+            await recon(n)
+        except Exception as e:
+            errors[n] = f"{type(e).__name__}: {e}"[:200]
+    if failed:
+        st = await get_status() or {}
+        rows = {r.get("name"): r for r in (st.get("mcpServers") or [])}
+    return rows, errors
+
+
+def _absent_of(rows: dict, errors: dict, expected: dict) -> dict[str, dict]:
+    """对账：每个 server 的 tools 与配置全集比，缺的 → {server: {"tools": [全名], "error": 原话}}。
+    failed 的 server 没有 tools 键，按空处理；「连上了但少工具」（版本漂移）也算缺席。"""
     absent: dict[str, dict] = {}
     for srv, want in expected.items():
         r = rows.get(srv)
@@ -1470,6 +1492,43 @@ async def _probe_mcp(client, options, handle: session_mgr.LoopHandle) -> None:
         else:
             err = errors.get(srv) or str(r.get("error") or r.get("status") or "")
         absent[srv] = {"tools": missing, "error": err}
+    return absent
+
+
+def _bark_ombre_absent(handle: session_mgr.LoopHandle, absent: dict) -> None:
+    if "ombre-brain" not in absent:
+        return
+    try:
+        import characters
+        from notify import bark_push_bg
+        bark_push_bg(f"{characters.display_name(handle.char_id)}的记忆（Ombre）连不上："
+                     f"{absent['ombre-brain']['error'][:80]}", title="cassette")
+    except Exception:
+        pass
+
+
+async def _probe_mcp(client, options, handle: session_mgr.LoopHandle) -> None:
+    """connect() 之后对账：① get_mcp_status 每 0.2s 拍一次直到没有 pending（上限
+    MCP_PROBE_TIMEOUT_SEC；连不上的 server 首拍就是 failed，不经过 pending）；② failed 的
+    逐个 reconnect_mcp_server 一次——对连不上的它是**抛异常**（ECONNREFUSED 原话），
+    不是返回失败；③ 每个 server 的 tools 与配置（options.tools 里的 mcp__ 名）对账，缺的落
+    handle.meta["absent_tools"]（按 server：{"tools": [全名], "error": 原话}）；④ 置
+    absent_note_due，下一轮注入前缀告知（_turn_prefix），门对缺席工具 deny 同一句
+    （_absent_hit）。failed 的 server 没有 tools 键，按空处理。缺 Ombre 推 Bark。
+    探活本身任何异常都不影响开 session（按全在处理，顶多他撞一次门）。
+    假 client（测试 / 没这两个方法）直接跳过。对账全集留在 meta["mcp_expected"] 给中途探活。"""
+    if getattr(client, "get_mcp_status", None) is None:
+        return
+    expected = _expected_mcp(options)
+    handle.meta["mcp_expected"] = expected
+    if not expected:
+        return
+    try:
+        rows, errors = await _mcp_rows(client, expected, MCP_PROBE_TIMEOUT_SEC)
+    except Exception as e:
+        print(f"[chat_loop] 开场探活失败（按全在处理）: {e}", file=sys.stderr)
+        return
+    absent = _absent_of(rows, errors, expected)
     handle.meta["absent_tools"] = absent
     if not absent:
         return
@@ -1477,14 +1536,143 @@ async def _probe_mcp(client, options, handle: session_mgr.LoopHandle) -> None:
           + "；".join(f"{s}（{len(v['tools'])} 个工具）{v['error']}" for s, v in absent.items()),
           file=sys.stderr)
     handle.meta["absent_note_due"] = sorted(absent)
-    if "ombre-brain" in absent:
+    _bark_ombre_absent(handle, absent)
+
+
+async def _recheck_mcp(client, handle: session_mgr.LoopHandle) -> None:
+    """§5.2 中途探活：轮间隙（60s 看守）/ 泵开着每 MCP_RECHECK_TICKS 个 tick 拍一次（同一个
+    函数，别写两份）。只拍一次不等 pending；toggle off 的 server 不算（status 是 disabled）。
+    connected → failed：reconnect 一次，还不行进 absent + 下一轮告知；absent 里的恢复了：
+    出 absent + 下一轮告知「连上了」（ABSENT_NOTES 第二句）。任何异常只打日志，不堵轮。"""
+    if client is None or getattr(client, "get_mcp_status", None) is None:
+        return
+    expected = {s: t for s, t in (handle.meta.get("mcp_expected") or {}).items()
+                if s not in (handle.meta.get("mcp_off") or set())}
+    if not expected:
+        return
+    try:
+        rows, errors = await _mcp_rows(client, expected, 0)
+    except Exception as e:
+        print(f"[chat_loop] 中途探活失败（这拍跳过）: {e}", file=sys.stderr)
+        return
+    pending = {n for n, r in rows.items() if r.get("status") == "pending"}
+    absent = _absent_of(rows, errors, {s: t for s, t in expected.items() if s not in pending})
+    before = handle.meta.get("absent_tools") or {}
+    for s in sorted(set(before) & pending):
+        absent[s] = before[s]              # 还在重连：维持原判，别一拍一变
+    newly = sorted(s for s in absent if s not in before)
+    back = sorted(s for s in before if s not in absent)
+    if not newly and not back:
+        if absent != before:
+            handle.meta["absent_tools"] = absent   # 同一 server 缺的工具变了：只更新账
+        return
+    handle.meta["absent_tools"] = absent
+    if newly:
+        print(f"[chat_loop] 中途探活缺席（char={handle.char_id}）："
+              + "；".join(f"{s}（{len(absent[s]['tools'])} 个工具）{absent[s]['error']}" for s in newly),
+              file=sys.stderr)
+        due = list(handle.meta.get("absent_note_due") or [])
+        handle.meta["absent_note_due"] = due + [s for s in newly if s not in due]
+        _bark_ombre_absent(handle, {s: absent[s] for s in newly})
+    if back:
+        print(f"[chat_loop] 中途探活恢复（char={handle.char_id}）：{'、'.join(back)}", file=sys.stderr)
+        # 缺席还没来得及告知就恢复了：两句都不说，等于没发生
+        note_due = list(handle.meta.get("absent_note_due") or [])
+        quiet = [s for s in back if s in note_due]
+        if quiet:
+            left = [s for s in note_due if s not in quiet]
+            if left:
+                handle.meta["absent_note_due"] = left
+            else:
+                handle.meta.pop("absent_note_due", None)
+        rec = list(handle.meta.get("absent_recovered_due") or [])
+        rec += [s for s in back if s not in quiet and s not in rec]
+        if rec:
+            handle.meta["absent_recovered_due"] = rec
+
+
+# ---------- 轮间隙 toggle 口子（PLAN_toolmount §5.2 / §10，10-30 第 8 步） ----------
+# 同一把闸 config.CHAT_TOOL_DEFER（_toggle_on）管三件事：game 平时 toggle off（game_start 置旗、
+# 下个轮边界 on；game_end 同理 off）、插件在 app 里开 / 关走 toggle（不换 client、不重铸）、
+# 关着的插件开 session 时也挂随即 off。想做的改动记在 meta["mcp_toggle_want"]（name → on），
+# 轮边界 _apply_toggles 统一做；失败打日志、下一拍再试，不堵泵。做成的落 meta["mcp_off"]，
+# 门（_off_hit）按它拒——CLI 那层本来就摘了 off 的工具，门是双保险也是给他一句人话。
+
+def _toggle_on(char_id: str) -> bool:
+    try:
+        return config.chat_tool_defer(char_id)
+    except Exception:
+        return False
+
+
+def _want_toggle(handle: session_mgr.LoopHandle, name: str, on: bool) -> None:
+    """记一笔「下个轮边界把 server 拨到 on/off」。server 不在这条 session 里 / 闸没开 = 不记。"""
+    if not _toggle_on(handle.char_id) or name not in (handle.meta.get("mcp_servers") or ()):
+        return
+    want = handle.meta.setdefault("mcp_toggle_want", {})
+    currently_off = name in (handle.meta.get("mcp_off") or set())
+    if on == (not currently_off):
+        want.pop(name, None)      # 已经是想要的状态：撤掉悬着的那笔
+    else:
+        want[name] = on
+
+
+async def _apply_toggles(client, handle: session_mgr.LoopHandle) -> None:
+    want = handle.meta.get("mcp_toggle_want") or {}
+    if not want or client is None:
+        return
+    tog = getattr(client, "toggle_mcp_server", None)
+    if tog is None:
+        want.clear()
+        return
+    off: set = handle.meta.setdefault("mcp_off", set())
+    for name, on in list(want.items()):
         try:
-            import characters
-            from notify import bark_push_bg
-            bark_push_bg(f"{characters.display_name(handle.char_id)}的记忆（Ombre）连不上："
-                         f"{absent['ombre-brain']['error'][:80]}", title="cassette")
-        except Exception:
-            pass
+            await tog(name, on)
+        except Exception as e:
+            print(f"[chat_loop] toggle {name} {'on' if on else 'off'} 失败，下一拍再试"
+                  f"（char={handle.char_id}）: {e}", file=sys.stderr)
+            continue
+        (off.discard if on else off.add)(name)
+        want.pop(name, None)
+        print(f"[chat_loop] toggle {name} → {'on' if on else 'off'}（char={handle.char_id}）",
+              file=sys.stderr)
+
+
+def _off_hit(handle: session_mgr.LoopHandle, tool: str) -> Optional[str]:
+    """调到了 toggle off 的 server 的工具：game 在拿起 / 放下的那一轮边界之前、插件在 app 里关着。"""
+    off = handle.meta.get("mcp_off") or set()
+    if not off or not tool.startswith("mcp__"):
+        return None
+    srv = tool.split("__", 2)[1]
+    if srv not in off:
+        return None
+    if srv == "game":
+        if handle.meta.get("game_pump"):
+            return "游戏工具下一轮才到手——这句说完目光就能落回屏幕。"
+        return "游戏这会儿不在手边——想玩的话先用 game_start 把游戏拿过来。"
+    return f"{srv} 这个插件在 app 里关着，这会儿用不了。"
+
+
+def game_tools_pending(char_id: str) -> bool:
+    """game_start 的返回值要不要补一句「工具下一轮到手」：泵开了、game server 还 off 着。"""
+    h = session_mgr.get(char_id, SCENE)
+    return bool(h is not None and h.meta.get("game_pump")
+                and "game" in (h.meta.get("mcp_off") or set()))
+
+
+def _mount_signature(char_id: str):
+    """「配置变了」的判据（§5.2）：这个角色的插件开关表 + Ombre 配没配。只读，不渲染不写文件
+    （mounted_tool_names 会写 mcp 配置文件，不能拿它当判据每分钟算一次）。算不出来返回 None，
+    调用方跳过比对。安装 / 卸载也会改开关表（toggle / uninstall 都写它）。"""
+    try:
+        import pipeline
+        import plugins
+        enabled = tuple(sorted((k, bool(v)) for k, v in plugins._read_enabled(char_id).items()))
+        return (enabled, bool(pipeline.ombre_configured(char_id)))
+    except Exception as e:
+        print(f"[chat_loop] 算配置签名失败（这拍不比）: {e}", file=sys.stderr)
+        return None
 
 
 # 见闻快照/增量（_seen_block + seen_cursor）09-02 删了（机主拍板）：SDK 路的
@@ -1606,6 +1794,17 @@ async def run(handle: session_mgr.LoopHandle, *,
         c = factory(options)
         await c.connect()
         await _probe_mcp(c, options, handle)          # §5.1 开场探活（缺席进 meta）
+        # §5.2 / §10 轮间隙 toggle 口子：记下这条 session 挂了哪些 server + 配置签名；关着的
+        # 插件和（泵没开时的）game 随即 toggle off。新 client 全是 on 的，旧的想做清单作废。
+        handle.meta["mcp_servers"] = sorted(getattr(options, "mcp_servers", None) or {})
+        handle.meta["mount_sig"] = _mount_signature(handle.char_id)
+        handle.meta["mcp_off"] = set()
+        handle.meta["mcp_toggle_want"] = {}
+        for name in handle.meta.pop("mcp_plug_off", None) or []:
+            _want_toggle(handle, name, False)
+        if not pump:
+            _want_toggle(handle, "game", False)
+        await _apply_toggles(c, handle)
         ledger = [{"r": m["role"], "h": _h(m["text"]), "ts": m.get("ts")}
                   for m in history]
         handle.meta["ledger"] = ledger
@@ -1656,6 +1855,40 @@ async def run(handle: session_mgr.LoopHandle, *,
             await _open_session(history, catalog)
         finally:
             handle.reopening = False
+
+    async def _config_changed(catalog) -> bool:
+        """§5.2 配置变了（插件在 app 里开 / 关 / 装 / 卸、Ombre 接线）：开 session 时就在这条
+        session 里的 server → 轮间隙 toggle（不换 client、不重铸）；不在的（新装的插件、新配的
+        Ombre）→ 巩固 + 重铸。只在轮间隙（队列空）调；泵开着不调（推迟到 game_end）。
+        True = 这拍做了事（调用方回 loop 顶）。"""
+        nonlocal client, ledger
+        sig = _mount_signature(handle.char_id)
+        old = handle.meta.get("mount_sig")
+        if sig is None or old is None or sig == old:
+            return False
+        handle.meta["mount_sig"] = sig
+        old_en, new_en = dict(old[0]), dict(sig[0])
+        changed = {k for k in set(old_en) | set(new_en) if old_en.get(k) != new_en.get(k)}
+        servers = set(handle.meta.get("mcp_servers") or ())
+        if (old[1:] == sig[1:] and changed and _toggle_on(handle.char_id)
+                and changed <= servers):
+            for k in sorted(changed):
+                _want_toggle(handle, k, bool(new_en.get(k)))
+            print(f"[chat_loop] 配置变了（char={handle.char_id}）：{'、'.join(sorted(changed))}"
+                  " 走 toggle", file=sys.stderr)
+            await _apply_toggles(client, handle)
+            return True
+        print(f"[chat_loop] 配置变了（char={handle.char_id}）："
+              f"{'、'.join(sorted(changed)) or 'Ombre 接线'}，轮间隙重铸", file=sys.stderr)
+        try:
+            await _consolidate_and_reforge("配置变了", catalog)
+        except Exception as e:
+            print(f"[chat_loop] 配置变了的重铸失败，session 关掉惰性重起: {e}", file=sys.stderr)
+            await _safe_disconnect(client)
+            client = None
+            ledger = []
+            handle.meta["ledger"] = ledger
+        return True
 
     # ---------- game 泵（PLAN_sdk 设计稿三；机器口径对齐 game_loop，回退路共用）----------
 
@@ -1749,6 +1982,7 @@ async def run(handle: session_mgr.LoopHandle, *,
         except Exception as e:
             print(f"[chat_loop] 释放模拟器锁失败: {e}", file=sys.stderr)
         handle.meta.pop("game_pump", None)
+        _want_toggle(handle, "game", False)     # §10：放下 → 下个轮边界 toggle off（0 token）
         print(f"[chat_loop] 放下游戏（char={handle.char_id}，{why}）", file=sys.stderr)
         try:
             import cohabit_queue
@@ -1900,6 +2134,8 @@ async def run(handle: session_mgr.LoopHandle, *,
                         ledger = []
                         handle.meta["ledger"] = ledger
                         handle.meta["shots"] = 0   # 镜像重开无图，别下轮又撞边界
+            # 轮边界的 toggle（§5.2 / §10）：game 拿起 / 放下、插件开关。失败不堵，下一拍再试。
+            await _apply_toggles(client, handle)
             pump_on = bool(handle.meta.get("game_pump"))
             try:
                 turn: Turn = await asyncio.wait_for(
@@ -1927,8 +2163,17 @@ async def run(handle: session_mgr.LoopHandle, *,
                     continue
             except asyncio.TimeoutError:
                 if pump_on:
+                    # §5.2：泵开着时 60s 看守走不到，每 MCP_RECHECK_TICKS 个 tick 拍一次探活
+                    n = int((handle.meta.get("game_pump") or {}).get("ticks", 0))
+                    if client is not None and MCP_RECHECK_TICKS > 0 and n and n % MCP_RECHECK_TICKS == 0:
+                        await _recheck_mcp(client, handle)
                     await _pump_tick()   # 队列空一拍 → 目光落回屏幕
                     continue
+                # 轮间隙看一眼（§5.2）：中途探活 + 配置变了（toggle / 重铸）。
+                if client is not None:
+                    await _recheck_mcp(client, handle)
+                    if await _config_changed(handle.meta.get("catalog")):
+                        continue
                 # 轮间隙看一眼：静默 ≥1h × 窗口超软阈 → 巩固+重铸（§4 chat 节奏；
                 # 铸完 ctx_est 回到纯对话体量，自然不会连环触发）。09-01 去掉了
                 # 「∨ 有可折活动段」那一支，见上面 _fold_pending 那条注释。
@@ -2219,6 +2464,7 @@ def start_game_pump(char_id: str, *, note: str,
     handle.meta["game_pump"] = {"seg_id": seg, "note": note,
                                 "start_ts": time.time(), "deliver": deliver,
                                 "strikes": 0}
+    _want_toggle(handle, "game", True)   # §10：拿起 → 下个轮边界 toggle on（game_start 那轮本身没有）
     try:
         handle.put_threadsafe(_KICK)   # 泵在轮间隙拿到时别等满空转周期才开弹
     except Exception:

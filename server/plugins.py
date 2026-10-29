@@ -692,7 +692,23 @@ def mounted(context: str = "chat", char_id=None) -> tuple[Optional[str], list[st
     认不出的 context 一律按 chat 处理——多挂比少挂容易被发现，静默少挂会让人以为工具坏了。
     独占插件只挂给归属角色：别的角色开关开着也跳过——那份资源不是它的。判据是
     plugin_owned_by（它吃的**每一样**资源都得归你），不是单看插件名。"""
-    cfg_path = _mcp_config_path(context, char_id)
+    cfg, tools, _ = _mount(context, char_id, include_disabled=False)
+    return cfg, tools
+
+
+def mounted_all(char_id=None) -> tuple[Optional[str], list[str], list[str]]:
+    """常驻 session 路的「配置全集」挂法（PLAN_toolmount §5.2，第 8 步）：**装了但关着**的插件
+    也挂上，开 session 后随即 toggle off——app 里的开关从此永远有 toggle 对象（不换 client、
+    不重铸）。归属 / 前提（PLUGIN_GATE）/ 清单合法照旧判，那些不是「开关」是「有没有」。
+    → (mcp-config 路径, 全部工具白名单, 关着的插件名)。配置文件另起一份（plugins.session.
+    mcp.json），别和 -p 老路的 plugins.mcp.json 互相覆盖。"""
+    return _mount("chat", char_id, include_disabled=True)
+
+
+def _mount(context: str, char_id, *, include_disabled: bool
+           ) -> tuple[Optional[str], list[str], list[str]]:
+    cfg_path = (state_store.char_state_dir(char_id) / "plugins.session.mcp.json"
+                if include_disabled else _mcp_config_path(context, char_id))
     me = char_id or state_store.DEFAULT_CHAR_ID
     wake_on: dict = {}
     if context == "wake":
@@ -704,10 +720,15 @@ def mounted(context: str = "chat", char_id=None) -> tuple[Optional[str], list[st
     else:
         blocked = set()
     enabled = _read_enabled(char_id)
+    if include_disabled and PLUGINS_DIR.is_dir():
+        for d in PLUGINS_DIR.iterdir():
+            if d.is_dir() and not d.name.startswith(".") and _NAME_RE.match(d.name):
+                enabled.setdefault(d.name, False)
     servers: dict = {}
     tools: list[str] = []
+    off: list[str] = []
     for name, on in sorted(enabled.items()):
-        if not on or name in blocked:
+        if name in blocked or (not on and not include_disabled):
             continue
         if not plugin_owned_by(name, me):
             continue
@@ -740,11 +761,13 @@ def mounted(context: str = "chat", char_id=None) -> tuple[Optional[str], list[st
         tools += [f"mcp__{name}__{t}" for t in m["tools"]
                   if context != "wake" or wake_on.get(name)
                   or t not in WAKE_TOOL_EXCLUDE.get(name, ())]
+        if not on:
+            off.append(name)
     if not servers:
-        return None, []
+        return None, [], []
     payload = json.dumps({"mcpServers": servers}, ensure_ascii=False)
     if not cfg_path.exists() or cfg_path.read_text("utf-8") != payload:
         tmp = cfg_path.with_name(f".{cfg_path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
         tmp.write_text(payload, "utf-8")
         tmp.replace(cfg_path)
-    return str(cfg_path), tools
+    return str(cfg_path), tools, off
