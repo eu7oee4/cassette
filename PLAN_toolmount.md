@@ -142,7 +142,9 @@ game 2,298、notion 1,692、prs 914、basics 756、mail 701、webpage 480、skil
   `_merge_mcp_file` / Ombre dict 组装时给这些 server 的配置加 `alwaysLoad: True`。
   - Ombre：几乎每轮都用（开场浮记忆、hold），7.4k 值得常驻。
   - basics：now / fetch / next_wake，0.8k，高频。
-  - **game 不常驻**（机主拍板）：只对 cass 有用、平时用不上；游戏泵靠 §6 铸回用法。
+  - **game 进常驻名单但平时 toggle off**（10-29 改拍，§10）：`alwaysLoad: true` 让它免 ToolSearch，
+    开 session 后立刻 toggle off（0 token），game_start 置旗、下个轮边界 toggle on，game_end 同样 toggle off。
+    §6 不记游戏工具。
 - 总闸：`CHAT_TOOL_DEFER=1`（.env，默认先关），关 = 一切照旧全量，回退一行。
 - `-p` 老路（wake.py / cohabit）不动：`TOOL_SEARCH_CONTEXTS` 口径照旧。
 
@@ -281,6 +283,9 @@ AskUserQuestion 进去就在醒来轮放行了。
   - **开 session 时不在 mcp_servers 里的**（新装的插件、新配的 Ombre）：toggle 没对象，仍走「配置变了」标记 →
     下一个轮间隙巩固 + 重铸。动手条件：没有在飞的轮、PLAN_interject 的 `pending` 为空；**泵开着时推迟到 game_end**。
   - 所以 §3.1 挂载时把「装了但关着」的插件也挂上、随即 toggle off，开关才永远有对象。代价：关着的 server 子进程活着。
+- **game 的开关**（10-29 拍板，§10）：同一个「轮间隙 toggle」口子。开 session 后 toggle off；game_start 工具
+  返回时置 `handle.meta["game_toggle"]="on"`，下个轮边界（泵 tick 之间）toggle on；game_end 置 off 同理。
+  泵开着时轮边界就是 tick 间隙，不必等 game_end。toggle 失败（抛异常）→ 打日志、下一拍再试，不堵泵。
 
 ### 5.3 为什么不用 toggle
 
@@ -330,7 +335,8 @@ Opus 稳定撞安全误报（§1.3）。2.1.310 复核：game 吃 toggle 且 on 
   - Ombre 掉线时它的工具不在延迟名单里（`get_context_usage` 0 行），铸回的引用走上一条改写路，无害。
 - **兜底**：没铸上的他自己 ToolSearch 再取——菜单头那句 + CLI 的延迟名单都在，
   Opus 实测缺 schema 时会先取不硬猜。代价一跳。
-- 游戏中自然全是游戏工具（2.3k 全进预算），平时是最近聊天用过的那几样。
+- 游戏工具不进这本账（10-29 拍板走 toggle，§1.4 / §10）：一局里它常驻、重铸也不丢，不用铸回；记账时按 server 名跳过 game。
+  预算里剩的就是最近聊天用过的那几样。
 
 ## 7. 顺手修（注释 / 文档与代码对不上的）
 
@@ -411,7 +417,7 @@ SDK 升级会连带换掉它自带的 CLI（10-29 晚起 2.1.310，与 PATH 同�
    过滤的同一批**必须**带上缺席告知 + 门拒，否则中间 Ombre 掉线菜单在说谎（`pipeline.py:1067-1070`
    自己定的「绝不提不在场的能力」）。§5.2 中途探活可以放到第 8 步。
 7. **派活**（PLAN_delegate 第 1–4 步）：prs 的派活工具上了再补 §3.2 的派活菜单段；app 发一版（PR 页）。
-8. **延迟 + 常驻**（toolmount §2）+ **§5.2 中途探活 / 配置变了的重铸**：`CHAT_TOOL_DEFER` 默认关，
+8. **延迟 + 常驻**（toolmount §2）+ **§5.2 中途探活 / 配置变了的重铸 / game 开关**：`CHAT_TOOL_DEFER` 默认关，
    cass 先开跑几天看 ToolSearch 频率。预期：第 9 步接上之前，游戏里每次段内重铸（70 张）之后开头
    多一跳取用法，正常现象，别当 bug 修。
 9. **重铸留用法**（toolmount §6）。
@@ -430,9 +436,11 @@ SDK 升级会连带换掉它自带的 CLI（10-29 晚起 2.1.310，与 PATH 同�
 - §6 的 token 预算 8k、容差沿用闹钟的 120s，是否合适。
 - 缺席告知的文案表（每个 server 一句）由机主写还是先给草稿。
 - game 的 14 个工具是否要在泵开着时临时常驻——原答「不」的理由（进程内 server 不能 toggle）10-29 晚已不成立
-  （§5.3 翻案）。**重开这条，给机主拍**：game 设 `alwaysLoad: true` + 平时 toggle off（0 token）、
+  （§5.3 翻案）。**10-29 机主拍板：做**。game 设 `alwaysLoad: true` + 平时 toggle off（0 token）、
   game_start 时 toggle on（2.3k 常驻、不用取用法、重铸也不丢）、game_end 时 toggle off。好处是 §6 不用管游戏工具，
   游戏里每次段内重铸后不再多一跳；代价是 toggle 要在轮间隙做（game_start 在轮内调，置旗、下个轮边界 toggle）。
+  落在 §9 第 8 步（延迟 + §5.2）一起做：开 session 后的 toggle off 和插件开关走同一个「轮间隙 toggle」口子；
+  game_start 那轮本身还是全量用法在手（game_start 返回值 + 它自己取过的），下一轮起 game 常驻。
 
 ## 11. 与 PLAN_interject / PLAN_gamechat 的交界
 

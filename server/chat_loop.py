@@ -589,7 +589,7 @@ def build_options(char_id: str, catalog: Optional[list] = None,
             tools += sorted(pipeline.READONLY_BUILTINS)
             segs.append("你手边常驻一套只读的文件工具（Read/Grep/Glob），看得到 "
                         f"cassette 仓（{pipeline.CODE_ROOT}）的代码和资料，"
-                        f"还有{config.user_name()}的 dossier 仓（{pipeline.DOSSIER_ROOT}）"
+                        f"还有{config.user_name()}的 casebook 仓（{pipeline.DOSSIER_ROOT}，求职案例站）"
                         "——想核实什么随手翻，别背结论。凭据（.env）不在范围里；"
                         "state/ 里只看得到你自己的房间（state/characters/<你>/）和"
                         "求职 / 工作台的资料（state/jobhunt、workbench、webpages）。")

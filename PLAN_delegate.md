@@ -248,8 +248,9 @@ TA 点名「让 fable 做」就用 fable。
 ## 8.1 还开着的
 
 - 问答来回上限 3 次、等回答 3 天，这两个数先拍着，跑起来看。
-- **`DOSSIER_ROOT=~/dossier` 不存在**（§1.4）：改指 `~/casebook`，还是把「可以读 dossier 仓」从 §4.1 / 菜单 / cass 的只读段里一起删？
-  不只是本稿的事——cass 本人的只读闸（PLAN_toolmount §3.2「翻代码和资料」块）说的也是这条空路径。
+- ~~**`DOSSIER_ROOT=~/dossier` 不存在**（§1.4）：改指 `~/casebook`，还是把「可以读 dossier 仓」从 §4.1 / 菜单 / cass 的只读段里一起删？~~
+  **10-29 机主拍板：改指 `~/casebook`**，已改码（`pipeline.py` 的 `DOSSIER_ROOT` + `READ_ROOTS` 人话标签 + `chat_loop.py` 只读段文案，
+  变量名不动——仓就是 dossier 框架，错的只是路径），**后端重启后生效**。§4.1 系统提示里「dossier 仓」的说法照旧，派活 session 看的也是这条根。
 - 醒因 `delegate` 跟随机自醒的关系：本稿不重抽 auto 时刻（它不是机主的新交互）。
 
 ## 9. 与其他计划的交界

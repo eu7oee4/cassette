@@ -1441,17 +1441,18 @@ CODE_ROOT = Path(__file__).resolve().parent.parent   # cassette 仓根
 MEMORY_ROOT = (Path.home() / ".claude" / "projects"
                / str(CODE_ROOT).replace("/", "-") / "memory")
 
-# 机主的 dossier 仓（求职案例研究站，Next.js）——整仓放行给两个角色看（2026-09-05
+# 机主的 dossier 仓（求职案例研究站，Next.js；2026-09 起仓叫 ~/casebook，旧的 ~/dossier 已废弃，
+# 10-29 机主拍板改指——之前一个多月闸放行的是一条空路径）——整仓放行给两个角色看（2026-09-05
 # 机主拍板加白）。起因：09-04 小卡被叫去审框架文档，Glob 一进 ~/dossier 就被闸
 # 拦回，research/ 只能走 Bash 弹卡等批。放的是**看**：写进去照样过 permit 弹卡；
 # .env* 黑名单对这个根同样生效（Next.js 的 .env.local 就在仓根）。
-DOSSIER_ROOT = Path.home() / "dossier"
+DOSSIER_ROOT = Path.home() / "casebook"
 
 # 只读闸放行的根，按序列在拒绝原话里；新加一个根往这儿追加，别再往条件里叠 or。
 READ_ROOTS: tuple[tuple[str, Path], ...] = (
     ("cassette 仓", CODE_ROOT),
     ("记忆索引目录", MEMORY_ROOT),
-    ("dossier 仓", DOSSIER_ROOT),
+    ("casebook 仓", DOSSIER_ROOT),
 )
 
 _GUARD_PATH_KEYS = ("file_path", "path", "notebook_path")
