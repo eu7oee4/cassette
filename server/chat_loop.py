@@ -119,6 +119,7 @@ class PumpNote:
     （发送前比对要逐字对上，注入包装不进账）。"""
     text: str
     ledger_text: str = ""
+    ts: int = 0            # /code/send 收到的时刻（≈手机发送时刻），入账用（按 ts 排序比对）
 
 # SDK 聊天路的熄火开关（连败 3 次自动回 -p，见 app._engine_chunks）。放这儿不放
 # app.py：wake_sdk 分路也要认它——聊天路都熄了火，醒来还往 session 里塞就是往
@@ -147,6 +148,44 @@ def norm_history(messages: list[dict]) -> list[dict]:
         if t.strip() and m.get("role") in ("user", "assistant"):
             out.append({"role": m["role"], "text": t, "ts": m.get("ts")})
     return out
+
+
+def ts_sorted(entries: list[dict], key: str = "ts") -> list[dict]:
+    """比对前按 ts 稳定排序（PLAN_gamechat §2.2 第 3 条 ①，10-29 第 3 步）。
+    app 的历史是按时间戳插位的（ChatStore.insertIntoCurrent），账是按轮尾追加的：
+    泵开着时 TA 的消息排队期间投递出去的点评，app 里在 TA 那条**后面**（ts 大），
+    账里在它前面——下一条必判脏。两边都按 ts 排，同 ts 保持原序（同一秒内两边的
+    原序一致：问话先于回话）。没 ts 的条目沿用前一条的。只排比对用的副本，账本身不动。"""
+    out: list[tuple[int, dict]] = []
+    last = 0
+    for e in entries:
+        t = e.get(key)
+        last = last if t is None else int(t)
+        out.append((last, e))
+    out.sort(key=lambda p: p[0])
+    return [e for _, e in out]
+
+
+def _reply_bubbles(trace: dict, reply: str, user_ts) -> list[tuple[str, int]]:
+    """一轮回复在 app 里落成几个气泡、各存什么字、各打什么时刻——账按这个记
+    （PLAN_interject P1「账按气泡记」，10-29 第 3 步）。口径抄 ContentView 的流式收尾：
+    发生过 text_break（工具切段）→ 每段气泡存的是**流出去的文字**（MarkerStreamFilter
+    之后、未 trim；trim 后为空的气泡被删），done 的权威 reply 不覆盖任何一段；
+    没切过段 → 单气泡存权威 reply。气泡 ts = 该段第一个字到达时刻，但不早于 TA 这条
+    的 ts（手机和 Mac 的钟有偏差时，按 ts 排序才不会把回话排到问话前面），段与段单调不减。"""
+    out: list[tuple[str, int]] = []
+    segs = trace.get("segments") or []
+    if trace.get("saw_break"):
+        out = [(s["text"], int(s.get("ts") or 0)) for s in segs
+               if (s.get("text") or "").strip()]
+    elif (reply or "").strip():
+        out = [(reply, int((segs[0].get("ts") if segs else 0) or 0))]
+    fixed: list[tuple[str, int]] = []
+    last = int(user_ts or 0)
+    for text, ts in out:
+        last = max(ts or int(time.time()), last)
+        fixed.append((text, last))
+    return fixed
 
 
 def divergence(ledger: list[dict], history: list[dict],
@@ -1621,7 +1660,7 @@ async def run(handle: session_mgr.LoopHandle, *,
                 pass
 
     async def _pump_round(prompt: str, kind: str,
-                          ledger_user: str = "") -> None:
+                          ledger_user: str = "", ledger_ts: int = 0) -> None:
         """泵的一个轮：tick（kind=wake，注入「·」不入账）或 TA 经终端口的插话
         （kind=chat，ledger_user=app 历史里存的原文先入账）。session 死了先从
         镜像重起（引擎打嗝 → 下一轮接着读）；连挂三轮=引擎有病，放下游戏。"""
@@ -1646,8 +1685,10 @@ async def run(handle: session_mgr.LoopHandle, *,
         if ledger_user.strip():
             # TA 的话在 app 历史里已经有了（app 发送时本地追加）——账跟上，
             # 发送前比对才对得上；注入包装（时间头/附件注记）不进账。
+            # ts 用 /code/send 收到的时刻（≈手机发送时刻），不是轮开始的时刻：
+            # 排队期间投递出去的点评 ts 在它后面，比对时按 ts 排才和 app 一致。
             ledger.append({"r": "user", "h": _h(ledger_user),
-                           "ts": int(time.time())})
+                           "ts": int(ledger_ts or time.time())})
             _persist_ledger(handle.char_id, sid, ledger)
         pre = _turn_prefix(handle)      # 重开后的引子 / 节奏补注（§4），不进账
         if pre:
@@ -1756,7 +1797,8 @@ async def run(handle: session_mgr.LoopHandle, *,
                     handle.touch()
                     if handle.meta.get("game_pump"):
                         await _pump_round(turn.text, "chat",
-                                          ledger_user=turn.ledger_text)
+                                          ledger_user=turn.ledger_text,
+                                          ledger_ts=turn.ts)
                     else:
                         # 收摊竞态：注入排进来时泵已停。回复无处投（deliver 闭包
                         # 随泵走了），有声弃+Bark 比静默丢强。
@@ -1817,7 +1859,8 @@ async def run(handle: session_mgr.LoopHandle, *,
                                 if client else [])
                     core = (turn.history[:len(turn.history) - len(absorbed)]
                             if absorbed else turn.history)
-                    verdict = (divergence(ledger, core,
+                    led_s, core_s = ts_sorted(ledger), ts_sorted(core)
+                    verdict = (divergence(led_s, core_s,
                                           stale_depth=_stale_depth(handle))
                                if client else "dirty")
                     if verdict != "dirty" and absorbed:
@@ -1832,7 +1875,7 @@ async def run(handle: session_mgr.LoopHandle, *,
                         # **静默重铸**（重启后第一条消息全走这条），外面看不见。
                         why = ("session 没开（进程刚起 / 上一轮把 client 关了）"
                                if not client
-                               else dirty_reason(ledger, turn.history))
+                               else dirty_reason(led_s, ts_sorted(turn.history)))
                         print(f"[chat_loop] 重铸（char={handle.char_id}）：{why}",
                               file=sys.stderr)
                         await _open_session(turn.history, turn.catalog)
@@ -1874,6 +1917,7 @@ async def run(handle: session_mgr.LoopHandle, *,
 
                 flags: dict = {}
                 captured: dict = {}
+                trace: dict = {}      # app 侧气泡的样子（sse.translate_events 写）
 
                 def _fin(reply: str, stored: list) -> dict:
                     payload = turn.finalize(reply, stored)
@@ -1884,7 +1928,7 @@ async def run(handle: session_mgr.LoopHandle, *,
                     return payload
 
                 async for chunk in sse.translate_events(
-                        _turn_events(client, handle, flags), _fin):
+                        _turn_events(client, handle, flags), _fin, trace=trace):
                     turn.out.put_nowait(chunk)
 
                 if turn.kind == "wake":
@@ -1904,10 +1948,13 @@ async def run(handle: session_mgr.LoopHandle, *,
                         # 了，账补上一笔，下一次比对就不会再把它当成"窗口比账长"。
                         ledger.append({"r": "user", "h": _h(m["text"]),
                                        "ts": m.get("ts")})
+                    u_ts = turn.new_msg.get("ts")
                     ledger.append({"r": "user", "h": _h(turn.new_msg["text"]),
-                                   "ts": turn.new_msg.get("ts")})
-                    ledger.append({"r": "assistant", "h": _h(captured["reply"]),
-                                   "ts": int(time.time())})
+                                   "ts": u_ts})
+                    # 按气泡记（P1）：工具切段的回复在 app 里是好几个气泡，账一条
+                    # 拼接回复的话下一条必判脏。
+                    for text, ts in _reply_bubbles(trace, captured["reply"], u_ts):
+                        ledger.append({"r": "assistant", "h": _h(text), "ts": ts})
                     _persist_ledger(handle.char_id, sid, ledger)
                     ok = True
                 if (ok and not handle.meta.get("game_pump")
@@ -2067,7 +2114,8 @@ def inject_pump_user(char_id: str, text: str, ledger_text: str = "") -> None:
     handle = session_mgr.get(char_id, SCENE)
     if handle is None or not handle.meta.get("game_pump"):
         raise RuntimeError("游戏不在手边（泵没开）——这条走聊天正路就行")
-    handle.put_threadsafe(PumpNote(text=text, ledger_text=ledger_text))
+    handle.put_threadsafe(PumpNote(text=text, ledger_text=ledger_text,
+                                   ts=int(time.time())))
 
 
 def _ensure_loop(char_id: str) -> session_mgr.LoopHandle:

@@ -54,7 +54,10 @@
    轮尾追加），下一条必判脏。**今天 PumpNote 路就有**，改走 chat 路一样有，形状混在 PLAN_interject §3 那批
    「第 0 条对不上」里。修法二选一：① 账里用户条的 ts 用 app 给的 ts，比对前两边都按 ts 稳定排序
    （`divergence` 比的是序列，排序要同口径）；② 泵收到 chat Turn 时把 outbox 里**未拉走**的点评 ts 抬到
-   max(ts, 用户 ts + 1)。本稿默认 ①，和 P1 同批做。→ **前置：PLAN_interject P1 核对时把这类分开数。**
+   max(ts, 用户 ts + 1)。本稿默认 ①，和 P1 同批做。→ ~~前置：PLAN_interject P1 核对时把这类分开数。~~ **10-29 第 3 步已按 ① 落码**：
+   `chat_loop.ts_sorted` 比对前两边稳定排序（同 ts 保持原序、没 ts 沿用前一条，只排副本账不动）；PumpNote 带 `ts`
+   （/code/send 收到的时刻）入账；chat 路回复气泡的 ts 不早于 TA 那条。残余：点评投递与 TA 消息落在**同一秒**时两边
+   原序仍可能相反（账 [tick, U]、app [U, tick]），会多铸一次，灰度时看频率再定要不要上 ②。
 
 ## 3. 改动
 

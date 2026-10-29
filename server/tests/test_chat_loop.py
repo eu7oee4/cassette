@@ -99,6 +99,34 @@ class DivergenceTest(unittest.TestCase):
         # 账空 / 窗空
         self.assertEqual(chat_loop.absorbable_tail([], [_m("user", "[图片]")]), [])
 
+    def test_ts_sorted_fixes_tick_user_interleave(self):
+        """PLAN_gamechat §2.2 第 3 条：TA 的消息排队期间投递的点评，app 里在 TA 那条后面，
+        账里在前面——按 ts 排完两边一致。同 ts 保持原序；没 ts 沿用前一条。"""
+        led = [{"r": "user", "h": chat_loop._h("a"), "ts": 1000},
+               {"r": "assistant", "h": chat_loop._h("tick"), "ts": 1005},
+               {"r": "user", "h": chat_loop._h("c"), "ts": 1002},
+               {"r": "assistant", "h": chat_loop._h("d"), "ts": 1010}]
+        hist = [_m("user", "a", 1000), _m("user", "c", 1002),
+                _m("assistant", "tick", 1005), _m("assistant", "d", 1010)]
+        self.assertEqual(chat_loop.divergence(led, hist), "dirty")          # 原序：脏
+        self.assertIsNone(chat_loop.divergence(chat_loop.ts_sorted(led),
+                                               chat_loop.ts_sorted(hist)))   # 排完：净
+        same = [_m("user", "x", 5), _m("assistant", "y", 5), {"role": "user", "text": "z", "ts": None}]
+        self.assertEqual([m["text"] for m in chat_loop.ts_sorted(same)], ["x", "y", "z"])
+
+    def test_reply_bubbles_mirror_app(self):
+        """账按气泡记（interject P1）：切过段 → 每段存流出去的字、空段没气泡、reply 不覆盖；
+        没切段 → 单气泡存 reply；ts 不早于 TA 那条、段间单调。"""
+        tr = {"saw_break": True,
+              "segments": [{"text": "先说一句。", "ts": 50}, {"text": "  \n", "ts": 60},
+                           {"text": "再说一句。", "ts": 55}]}
+        self.assertEqual(chat_loop._reply_bubbles(tr, "先说一句。\n\n再说一句。", 100),
+                         [("先说一句。", 100), ("再说一句。", 100)])
+        tr2 = {"saw_break": False, "segments": [{"text": "临时", "ts": 300}]}
+        self.assertEqual(chat_loop._reply_bubbles(tr2, "权威", 100), [("权威", 300)])
+        self.assertEqual(chat_loop._reply_bubbles(tr2, "  ", 100), [])
+        self.assertEqual(chat_loop._reply_bubbles({"saw_break": True, "segments": []}, "x", 1), [])
+
     def test_dirty_reason_names_the_cause(self):
         """重铸是最重的动作（换 client、缓存作废、注入全蒸发），日志不能只说
         「判脏」不说宾语（2026-09-02 查了半小时才定位到是一张图）。"""
@@ -469,6 +497,27 @@ class ChatLoopReforgeTest(ChatLoopTest):
                          *_text_events("嗯。"), _result("嗯。"))
         text2 = self.clients[0].queries[1][0]["message"]["content"][0]["text"]
         self.assertNotIn(chat_loop.OPENING_NUDGE, text2)
+
+    async def test_multi_segment_reply_ledgers_per_bubble(self):
+        """interject P1：先说一句、去用工具、再说一句 → app 两个气泡；账两条 assistant，
+        下一条消息带着两个气泡来不判脏（不重铸）。最后一段账记的是流出去的字，不是 reply。"""
+        hist = [_m("user", "早"), _m("assistant", "早，小狗")]
+        turn = self._turn(hist, "在吗")
+        chunks = await self._play(turn, *_text_events("先说一句。"),
+                                  *_text_events("再说一句。"),
+                                  _result("再说一句。（权威版本）"))
+        self.assertIn(b'"type": "text_break"', b"".join(chunks))
+        led = self.handle.meta["ledger"]
+        self.assertEqual([(e["r"], e["h"]) for e in led[-3:]],
+                         [("user", chat_loop._h("在吗")),
+                          ("assistant", chat_loop._h("先说一句。")),
+                          ("assistant", chat_loop._h("再说一句。"))])
+        self.assertTrue(led[-2]["ts"] >= 2000 and led[-1]["ts"] >= led[-2]["ts"])
+        hist2 = hist + [_m("user", "在吗", 2000), _m("assistant", "先说一句。", 2001),
+                        _m("assistant", "再说一句。", 2002)]
+        await self._play(self._turn(hist2, "陪我"), *_text_events("嗯。"), _result("嗯。"))
+        self.assertEqual(len(self.clients), 1)          # 没重铸
+        self.assertEqual(len(self.forged), 1)
 
     async def test_hard_threshold_consolidates_and_reforges(self):
         chat_loop.CHAT_HARD_TOKENS = 1             # 一轮就过硬阈
@@ -1104,6 +1153,21 @@ class GamePumpLoopTest(ChatLoopTest):
         self.assertFalse(any(e["h"] == chat_loop._h("〔现在是 11:34〕\n别用五角星")
                              for e in led))
         self.assertTrue(self.handle.meta.get("game_pump"))
+
+    async def test_pump_note_ledger_uses_receive_ts(self):
+        """gamechat §2.2 ①：PumpNote 入账的 ts 是 /code/send 收到的时刻，不是轮开始的时刻。"""
+        self.assertTrue(await self._wait(lambda: self._has_tick()))
+        c = self.clients[-1]
+        self.handle.queue.put_nowait(
+            chat_loop.PumpNote(text="〔现在是 11:34〕\n别用五角星", ledger_text="别用五角星",
+                               ts=1234))
+        c.feed(_result("x"))                      # 收掉在飞的 tick
+        self.assertTrue(await self._wait(
+            lambda: any(e["r"] == "user" and e["h"] == chat_loop._h("别用五角星")
+                        for e in self.handle.meta["ledger"])))
+        e = next(e for e in self.handle.meta["ledger"]
+                 if e["r"] == "user" and e["h"] == chat_loop._h("别用五角星"))
+        self.assertEqual(e["ts"], 1234)
 
     async def test_pump_note_after_close_is_dropped_loudly(self):
         import notify

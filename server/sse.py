@@ -183,14 +183,23 @@ def _memory_events(item: dict):
                "ok": item.get("ok", True), "error": item.get("error", "")})
 
 
-async def translate_events(events, finalize):
+async def translate_events(events, finalize, trace: dict | None = None):
     """纯翻译：事件流 → SSE 字节块。不碰子进程，便于单测。
     events：async 迭代器，逐个产出已解析的事件 dict（含 __idle_timeout__ 哨兵）。
-    finalize：拿全文 (reply, stored) 组出 done 载荷（dict）的回调。"""
+    finalize：拿全文 (reply, stored) 组出 done 载荷（dict）的回调。
+    trace：可选，调用方给个 dict，这里往里写 app 侧每个气泡的样子（PLAN_interject P1
+    「账按气泡记」）：`segments=[{text, ts}]`＝每段**实际发出去的文字**（滤过标记、未 trim，
+    就是 ContentView 的 streamedText）和该段第一个字发出的时刻（＝气泡的 timestamp）；
+    `saw_break`＝这轮发过 text_break（app 的 sawBreak：有它 done 的 reply 就不覆盖任何气泡）。"""
     mf = MarkerStreamFilter()
     collector = pipeline.StoredCollector()   # tool_use 只是意图；灰字等 tool_result 定案再发
     raw_segments: list[str] = []   # 工具调用切开的正文段（原始未滤标记；最后一段以 result 为准）
     cur_raw = ""
+    tr = trace if trace is not None else {}
+    tr["segments"] = []
+    tr["saw_break"] = False
+    cur_emit = ""                  # 当前气泡已发给 app 的字（app 存的就是它）
+    cur_ts: int | None = None      # 当前气泡第一个字发出的时刻
     sealed = ""     # 已定稿的正文段拼好的样子；每个 delta 只要接上 cur_raw 就是"到此为止说过的话"
     result_text = None
     is_error = False
@@ -209,6 +218,10 @@ async def translate_events(events, finalize):
                     if cur_raw.strip():
                         raw_segments.append(cur_raw)
                         sealed = "\n\n".join(s.strip() for s in raw_segments if s.strip()) + "\n\n"
+                        # 气泡定稿：app 存的是流出去的字，不是 raw；没发过字的段 app 没气泡
+                        tr["segments"].append({"text": cur_emit, "ts": cur_ts or int(time.time())})
+                        tr["saw_break"] = True
+                        cur_emit, cur_ts = "", None
                         yield sse({"type": "text_break"})
                     cur_raw = ""
                     mf = MarkerStreamFilter()
@@ -222,6 +235,9 @@ async def translate_events(events, finalize):
                     state_store.set_live_reply(sealed + cur_raw)
                     emit = mf.feed(txt)
                     if emit:
+                        if cur_ts is None:
+                            cur_ts = int(time.time())
+                        cur_emit += emit
                         yield sse({"type": "text", "content": emit})
         elif t == "assistant":
             # 工具调用先登记（去重、抓产物），**灰字这时候还不发**——这里只知道他想干什么，
@@ -247,6 +263,7 @@ async def translate_events(events, finalize):
             result_text = ev.get("result")
 
     # ---- 收尾 ----
+    tr["segments"].append({"text": cur_emit, "ts": cur_ts or int(time.time())})   # 最后一段
     # 还没等到返回的工具（流断在半路）：定案成失败，该说的还是要说。
     for item in collector.finish():
         for chunk in _memory_events(item):

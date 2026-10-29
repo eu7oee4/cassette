@@ -411,7 +411,7 @@ SDK 升级会连带换掉它自带的 CLI（10-29 晚起 2.1.310，与 PATH 同�
    两个入口都走它（第三个入口巩固轮按 §4「不消费任何旗」不调）；`_open_session` 泵开着时置 `rhythm_due`。
    `_discipline_block` / `_capture_capsules` / `_fold_trace_lines` 的 capsule 支连同 6 条测试一起删，新增 4 条。
    「上线后重铸一次」不用另做：重启即换 session，新 session 的系统提示就是瘦过的。
-3. **账按气泡记**（interject P1）：单独上线也能减少现在的重铸；gamechat 和本稿 §6 的锚点都等它。
+3. ~~**账按气泡记**~~ **已落码（10-29 晚，未重启；interject §4.3 / gamechat §2.2 ① 有施工记录）**：单独上线也能减少现在的重铸；gamechat 和本稿 §6 的锚点都等它。
    P1 第一步核对时把「tick 点评与用户消息 ts 交错」那类（PLAN_gamechat §2.2 第 3 条）从「多段回复」
    里分出来，两类一起修。
 4. **泵开着时的重开统一收口**（toolmount §4.1 五样）：图回填 + 节奏补注 + shots 归零 + 感知白描前置，
