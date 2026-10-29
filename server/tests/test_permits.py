@@ -274,49 +274,6 @@ class PermitCallbackTest(PermitBase):
         self.assertEqual(permits.pending(), [])
 
 
-class CapsuleTest(unittest.TestCase):
-    """§4：capsule 的家＝行为账（code 无场之后事件账没有段地址，按角色一本的
-    行为账接住「◆ 结论 ← 出处」；PLAN_native §4 记了一笔）。"""
-
-    def setUp(self):
-        import activity_log
-        self.al = activity_log
-        self.tmp = Path(tempfile.mkdtemp(prefix="capsule_test_"))
-        self._al_orig = (activity_log.PATH, activity_log.ACT_DIR,
-                         activity_log.SEG_DIR, activity_log.SHOT_DIR,
-                         activity_log.OPEN_PATH)
-        activity_log.PATH = self.tmp / "activity_log.jsonl"
-        activity_log.ACT_DIR = self.tmp / "activity"
-        activity_log.SEG_DIR = activity_log.ACT_DIR / "segments"
-        activity_log.SHOT_DIR = activity_log.ACT_DIR / "shots"
-        activity_log.OPEN_PATH = activity_log.ACT_DIR / "open_segments.json"
-
-    def tearDown(self):
-        (self.al.PATH, self.al.ACT_DIR, self.al.SEG_DIR, self.al.SHOT_DIR,
-         self.al.OPEN_PATH) = self._al_orig
-        shutil.rmtree(self.tmp, ignore_errors=True)
-
-    def test_capsule_lands_in_acts(self):
-        import chat_loop
-        chat_loop._capture_capsules(
-            "cass", "干完了。\n◆ 工具不过桥 ← forge.py:241\n"
-                    "◆ 判脏=发送前比对 ← chat_loop.py:122\n完事。")
-        acts = self.al.recent_acts("cass")
-        self.assertEqual([a["tool"] for a in acts], ["capsule", "capsule"])
-        self.assertEqual(acts[0]["text"], "工具不过桥 ← forge.py:241")
-        self.assertEqual(acts[0]["scene"], "chat")
-
-    def test_wake_turn_tagged(self):
-        import chat_loop
-        chat_loop._capture_capsules("cass", "◆ 结论 ← x.py:1", turn="wake")
-        self.assertEqual(self.al.recent_acts("cass")[0]["scene"], "wake")
-
-    def test_no_marker_no_row(self):
-        import chat_loop
-        chat_loop._capture_capsules("cass", "就聊聊天，没干活。")
-        self.assertEqual(self.al.recent_acts("cass"), [])
-
-
 class SaidFeedTest(unittest.TestCase):
     """chat_loop._said_feed（§4.2）：按块顺序记「最近说的那段」，要弹卡的写类认领走。"""
 

@@ -403,9 +403,14 @@ SDK 升级会连带换掉它自带的 CLI（10-29 晚起 2.1.310，与 PATH 同�
      §1.3 的 Q5（toggle 回来 Opus 再调）再跑两次、game toggle on/off 之后真调一次工具——都过就翻 §5.3。
    - interject P0（a–e；e 用 Opus 重跑）。
    - delegate §6 的三腿。
-2. **系统提示瘦身第一刀**（toolmount §3.3 第一刀 + §4）：删节奏 / discipline / capsule，节奏改进
+2. ~~**系统提示瘦身第一刀**~~ **已落码（10-29 晚，未重启）**：删节奏 / discipline / capsule，节奏改进
    game_start 返回值 + `rhythm_due`（含 §4 的三入口 helper 和 `needs_opening` 收编）。不依赖延迟。
    上线后每个角色下一条消息重铸一次。
+   施工记录：`GAME_RHYTHM_SYSTEM` → `GAME_RHYTHM_NOTE` + `game_rhythm_note()`，app 的 `_game_story_start_unified`
+   返回 hint 带全文；`_turn_prefix(handle)` 统一消费 `needs_opening` / `pump["rhythm_due"]`，Turn 路和 `_pump_round`
+   两个入口都走它（第三个入口巩固轮按 §4「不消费任何旗」不调）；`_open_session` 泵开着时置 `rhythm_due`。
+   `_discipline_block` / `_capture_capsules` / `_fold_trace_lines` 的 capsule 支连同 6 条测试一起删，新增 4 条。
+   「上线后重铸一次」不用另做：重启即换 session，新 session 的系统提示就是瘦过的。
 3. **账按气泡记**（interject P1）：单独上线也能减少现在的重铸；gamechat 和本稿 §6 的锚点都等它。
    P1 第一步核对时把「tick 点评与用户消息 ts 交错」那类（PLAN_gamechat §2.2 第 3 条）从「多段回复」
    里分出来，两类一起修。

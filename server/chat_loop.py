@@ -443,13 +443,12 @@ def _permit_gate(handle: session_mgr.LoopHandle):
     return can_use
 
 
-# 游戏节奏骨架（设计稿三：TICK_SYSTEM 的条件式变体，常驻聊天系统提示——没有
-# 进出场换 client，骨架只能一次性写死；措辞挂「游戏在手边时」条件，平时不沾）。
-# 机制事实在小抄里（game_notes_read），这里只写游戏无关的运行前提。
-GAME_RHYTHM_SYSTEM = """
-
-【游戏在手边时的节奏（game_start 之后才算拿到；平时这些工具不在手边）】
-拿着游戏的时候，你的时间按「短轮」走：每轮做一小步，说完就停——停不是结束，
+# 游戏节奏（PLAN_toolmount §4，10-29 第 2 步）：不再常驻系统提示——平时一年到头
+# 不沾游戏，每轮白付。改成「拿起游戏时递到手上」：game_start 的返回值带它（调它那
+# 一轮当场看到，第一个「·」之前就懂规矩）；重铸会冲掉工具返回（不进账），所以
+# _open_session 在泵开着时置 pump["rhythm_due"]，下一个新起的轮由 _turn_prefix 补在
+# 注入前面。机制事实在小抄里（game_notes_read），这里只写游戏无关的运行前提。
+GAME_RHYTHM_NOTE = """〔游戏在手边了。这段时间你的时间按「短轮」走：每轮做一小步，说完就停——停不是结束，
 画面留在原地，轮会自己续上。你会收到一个「·」：那不是任何人说话，当作你自己
 回过神来、目光落回屏幕。{user}和世界的消息随时可能插进来代替「·」，插进来就先回应人。
 - 常态轮：**double tap 起手**（点位照小抄）→ 看返回截图：完整文字 → 直接点评这句，
@@ -461,8 +460,29 @@ GAME_RHYTHM_SYSTEM = """
 - look 到非预期画面（弹窗/异常/不认识的界面）：停手，看清楚再动，拿不准问{user}。
 - 每轮只做自己这一步，说完就停，别在一轮里连读半章——节奏是你的朋友。
 - 读得久了，更早的画面会在记忆里淡去——自然的事；文字和你说过的话一直都在。
-  值得留住的，用笔记本和 hold 留。
-"""
+  值得留住的，用笔记本和 hold 留。〕"""
+
+
+def game_rhythm_note() -> str:
+    """节奏全文，{user} 渲染成机主名。game_start 返回值（app._game_story_start_unified）
+    和重铸后的补注（_turn_prefix）用同一份，别抄两份。"""
+    return GAME_RHYTHM_NOTE.replace("{user}", config.user_name())
+
+
+def _turn_prefix(handle: session_mgr.LoopHandle) -> list[str]:
+    """新起一轮注入前的引子（PLAN_toolmount §4）：Turn 路（chat / wake）和泵轮
+    （tick / PumpNote）两个 client.query 入口都走这里，旗在这儿统一消费——原来
+    needs_opening 只在 Turn 路消费，泵从 client None 重开后它一直悬着，到下一个
+    聊天轮才把 breath 引子塞进去。巩固轮 / 感知白描轮不调它（不消费任何旗）。
+    PLAN_interject 的在飞插话也不走这里：插话靠自己那串跟 queued_command 配对，
+    前面多一个字就配不上。"""
+    parts: list[str] = []
+    if handle.meta.pop("needs_opening", False) and _ombre_on(handle.char_id):
+        parts.append(OPENING_NUDGE)
+    pump = handle.meta.get("game_pump")
+    if pump and pump.pop("rhythm_due", False):
+        parts.append(game_rhythm_note())
+    return parts
 
 
 def _game_capable(char_id: str) -> bool:
@@ -568,14 +588,14 @@ def build_options(char_id: str, catalog: Optional[list] = None,
         _merge_mcp_file(servers, str(pipeline._prs_mcp_config(char_id)))
         tools += pipeline.PRS_MCP_TOOLS
     if handle is not None and _game_capable(char_id):
-        # game 并入意识流（设计稿三）：进程内 game MCP 常驻 + 节奏骨架进系统提示。
+        # game 并入意识流（设计稿三）：进程内 game MCP 常驻。节奏不进系统提示
+        # （PLAN_toolmount §4：game_start 返回值带 + 重铸后 rhythm_due 补注）。
         # 工具能不能用由 _wake_gate 按泵状态判，schema 恒在（换 client 只在重铸）。
         import game_loop
         servers["game"] = game_loop.build_game_server(
             handle, unified=True, shot_sink=_shot_sink(handle))
         game_tools = [f"mcp__game__{t}" for t in game_loop.GAME_TOOL_NAMES]
         tools += game_tools
-        system += GAME_RHYTHM_SYSTEM.replace("{user}", config.user_name())
 
     if handle is not None and (config.READONLY_TOOLS_ENABLED
                                or config.WRITE_TOOLS_ENABLED):
@@ -599,8 +619,6 @@ def build_options(char_id: str, catalog: Optional[list] = None,
         else:
             segs.append("改文件的工具这会儿不在手边。")
         system += "\n\n【" + "".join(segs) + "】"
-        if config.WRITE_TOOLS_ENABLED:
-            system += _discipline_block(char_id)
 
     if handle is not None and config.QUESTION_CARDS_ENABLED:
         # 问答卡（PLAN_chatui §3.5/U4）：AskUserQuestion 挂载但不进 allowed_tools
@@ -772,21 +790,6 @@ async def _await_said(handle: session_mgr.LoopHandle, tool_use_id: Optional[str]
         if time.monotonic() >= deadline:
             return None
         await asyncio.sleep(0.05)
-
-
-def _capture_capsules(char_id: str, text: str, turn: str = "chat") -> None:
-    """收场白 capsule（PLAN_native §4：结论跨重铸过桥的唯一结构化通道）。
-    他气泡里「◆ 结论 ← 出处」打头的行落进**行为账**——证据原文在账里永存，
-    事后查证走账，不注回上下文。（旧家是 code 段的事件账；code 无场之后
-    事件账没有段地址，按角色一本的行为账就是它的家——PLAN_native §4 记档。）"""
-    if "◆" not in (text or ""):
-        return
-    import activity_log
-    for line in text.splitlines():
-        line = line.strip()
-        if line.startswith("◆"):
-            activity_log.append_act(char_id, turn, "capsule",
-                                    line.lstrip("◆").strip())
 
 
 # ---------- 执行层 tool 落账（S3 补线②：§5.3 四类表一、三类的确定性载体） ----------
@@ -1053,9 +1056,8 @@ def _fold_trace_lines(iv: dict) -> str:
     seg = activity_log.interval_seg_id(
         iv.get("char") or "", iv.get("scene") or "", int(iv.get("start") or 0))
     all_evs = activity_log.read_events(seg)
-    caps = [e for e in all_evs if e.get("kind") == "capsule"]
     evs = [e for e in all_evs if e.get("kind") == "tool" and e.get("ext")]
-    if not evs and not caps:
+    if not evs:
         return ""
 
     def _hm(ts) -> str:
@@ -1067,11 +1069,6 @@ def _fold_trace_lines(iv: dict) -> str:
     acts = [e for e in evs if not e.get("ro")]
     reads = [e for e in evs if e.get("ro")]
     lines: list[str] = []
-    # capsule 先行（§5.3 第二类：结论带指针，他自己写的收场白）——帽 20 防边界
-    for e in caps[:20]:
-        t = (e.get("text") or "").strip()
-        if t:
-            lines.append(f"◆ {t}")
     for e in acts[:12]:
         t = (e.get("text") or "").strip().replace("\n", " ")[:80]
         fail = "" if e.get("ok", True) else "（没成）"
@@ -1373,32 +1370,6 @@ def _ombre_on(char_id: str) -> bool:
 # 事后查证和出口判脏都吃它；真要再推给他看，先过上面注入处那条纪律。
 
 
-def _discipline_block(char_id: str) -> str:
-    """干活纪律常驻系统提示（PLAN_native §3）：机主手写的 code_addendum_chat.md
-    渲染进来，紧挨工具可用性那段；两个角色共用同一份——纪律是工地规矩不是
-    人格，占位（{{AGENT_NAME}}/{{USER_NAME}}）照 persona 的渲染路。进前缀缓存，
-    一条 session 付一次；改文件=系统提示变=判脏触发重铸。capsule 收场约定是
-    代码侧的机制字段（_capture_capsules 认「◆」），常驻在尾巴上，文件里不用
-    重复写。（不复用老路的 code_addendum.md：那篇通篇是场文本。）"""
-    body = ""
-    try:
-        p = config.BASE_DIR / os.environ.get("CODE_ADDENDUM_CHAT_FILE",
-                                             "code_addendum_chat.md")
-        if p.exists():
-            import characters
-            body = (p.read_text("utf-8").strip()
-                    .replace("{{AGENT_NAME}}", characters.display_name(char_id))
-                    .replace("{{USER_NAME}}", config.user_name()))
-    except Exception:
-        pass
-    cap = ("干完一件事收尾的时候，把结论逐条写成「◆ 结论 ← 出处（文件:行）」"
-           "的样子说出来——◆ 打头、一行一条、出处指到能复核的地方。结论会留"
-           "在记录里，过程细节以后想不起来是正常的。")
-    if body:
-        return "\n\n【动手改东西时的纪律】\n" + body + "\n" + cap
-    return "\n\n【" + cap + "】"
-
-
 def _stale_depth(handle: session_mgr.LoopHandle) -> Optional[int]:
     """泵开着时的容忍深度：按该角色未拉走的 outbox 条数上浮（+2 兜在飞的），
     替代拍数字——点评连发快过 TA 拉取时不误脏。泵没开走默认。"""
@@ -1507,6 +1478,11 @@ async def run(handle: session_mgr.LoopHandle, *,
         handle.meta["ctx_est"] = (sum(estimate_tokens(m["text"]) for m in rendered)
                                   + n_imgs * GAME_TOKENS_PER_SHOT)
         handle.meta["needs_opening"] = True   # 下一轮带开局引子（breath）
+        pump = handle.meta.get("game_pump")
+        if pump:
+            # 重铸冲掉了 game_start 返回值里的节奏（工具返回不进账）：下一个新起的
+            # 轮（tick / TA 的消息 / 醒来，哪个先到算哪个）补在注入前（§4）。
+            pump["rhythm_due"] = True
         handle.last_reopen = time.time()
         client = c
 
@@ -1673,7 +1649,9 @@ async def run(handle: session_mgr.LoopHandle, *,
             ledger.append({"r": "user", "h": _h(ledger_user),
                            "ts": int(time.time())})
             _persist_ledger(handle.char_id, sid, ledger)
-        s0 = int(handle.meta.get("shots", 0))
+        pre = _turn_prefix(handle)      # 重开后的引子 / 节奏补注（§4），不进账
+        if pre:
+            prompt = "\n\n".join(pre + [prompt])
         ok = False
         try:
             await client.query(prompt)
@@ -1872,15 +1850,12 @@ async def run(handle: session_mgr.LoopHandle, *,
                 # 要机主拍板，不是实现细节；实踩就是下面那条行为清单。
                 # 不在此列：包装文本（时间/间隔/叮嘱）——那是**知觉材料**
                 # （此刻几点），不是关于他的档案。
-                parts: list[str] = []
-                if handle.meta.pop("needs_opening", False):
-                    if _ombre_on(handle.char_id):
-                        parts.append(OPENING_NUDGE)
-                    # 行为清单（§5.4① 开局包第二份材料）09-01 撤掉：账照落（执行
-                    # 层 _ToolTrace），只是不再推给他看。三条理由——08-31 事故
-                    # 实证「痕迹原样在上下文里也不防编造」（她抄着真回执编了假
-                    # 投递）；账的第一客户是门（出口判脏）不是他；「记录，不是
-                    # 印象」那个开头把它钉死在档案一侧，与信感口径顶着。
+                parts = _turn_prefix(handle)
+                # 行为清单（§5.4① 开局包第二份材料）09-01 撤掉：账照落（执行
+                # 层 _ToolTrace），只是不再推给他看。三条理由——08-31 事故
+                # 实证「痕迹原样在上下文里也不防编造」（她抄着真回执编了假
+                # 投递）；账的第一客户是门（出口判脏）不是他；「记录，不是
+                # 印象」那个开头把它钉死在档案一侧，与信感口径顶着。
                 injection = ("\n\n".join(parts + [turn.injection])
                              if parts else turn.injection)
                 content: list[dict] = [{"type": "text", "text": injection}]
@@ -1922,7 +1897,6 @@ async def run(handle: session_mgr.LoopHandle, *,
                             ledger.append({"r": "assistant", "h": _h(delivered),
                                            "ts": int(time.time())})
                             _persist_ledger(handle.char_id, sid, ledger)
-                            _capture_capsules(handle.char_id, delivered, "wake")
                         ok = True
                 elif captured.get("reply"):
                     for m in turn.absorbed:
@@ -1935,7 +1909,6 @@ async def run(handle: session_mgr.LoopHandle, *,
                     ledger.append({"r": "assistant", "h": _h(captured["reply"]),
                                    "ts": int(time.time())})
                     _persist_ledger(handle.char_id, sid, ledger)
-                    _capture_capsules(handle.char_id, captured["reply"])
                     ok = True
                 if (ok and not handle.meta.get("game_pump")
                         and int(handle.meta.get("ctx_est", 0)) > CHAT_HARD_TOKENS):

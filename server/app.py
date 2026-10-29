@@ -2638,7 +2638,8 @@ def _game_loop_closed(handle) -> None:
 def _game_story_start_unified(cid: str):
     """PR13 泵路径：game_start=拿锁+开段账+置泵——没有新会话、没有重铸、没有
     开场注入（他正在对话里，「游戏到手边」就是工具能用了这件事本身）。
-    翻笔记本的提示走工具返回值（in-band，自然的形状）。"""
+    节奏全文和翻笔记本的提示都走工具返回值（in-band，自然的形状；节奏 10-29 起
+    不再常驻系统提示，PLAN_toolmount §4——重铸冲掉后由 rhythm_due 补）。"""
     if code_bridge.session_alive():
         return {"ok": False, "error": "已经有一个会话开着（code 或游戏），先收摊再拿"}
     holder = game_bridge.acquire_lock("story")
@@ -2652,7 +2653,8 @@ def _game_story_start_unified(cid: str):
     game_loop.ensure_default_tips()   # 小抄空白才播种（出厂机制事实，机主可改）
     logerr(f"拿到游戏(unified)：char={cid} seg={r.get('seg_id')}")
     return {"ok": True, "session": "unified",
-            "hint": "游戏在手边了。先 game_notes_read 翻翻剧情本看看上次到哪了。"}
+            "hint": chat_loop.game_rhythm_note()
+                    + "\n〔先 game_notes_read 翻翻剧情本看看上次到哪了。〕"}
 
 
 def _game_story_start_sdk(inp: GameStoryStartIn):
