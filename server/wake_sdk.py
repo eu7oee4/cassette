@@ -296,6 +296,10 @@ def enqueue_wake(cid: str, trigger: str, note: str = "", force: bool = False) ->
 
     def _injection() -> str:
         started["ts"] = int(time.time())
+        # 同一个值也给执行层（toolmount §6）：这轮接触的工具留底时带 turn_ts，重铸时
+        # 按它精确挂回投递进历史的那条（投递 ts = started_ts，finish_wake_turn）。
+        # handle 在下面 _ensure_loop 时绑定，loop 跑到这轮才调这个工厂。
+        handle.meta["turn_ts"] = started["ts"]
         return wake_injection(cid, trigger, note)
 
     def _finalize(reply: str, stored: list) -> dict:

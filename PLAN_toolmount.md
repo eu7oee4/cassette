@@ -260,7 +260,8 @@ AskUserQuestion 进去就在醒来轮放行了。
 ⑤ 抽成 `_pump_note_round()`（client 活着且泵开着才跑 `REOPEN_NOTE_PROMPT`，否则直接 True），三处调用：
 `_game_reforge`（没收尾按死，同旧）、chat 路判脏重铸（换 client 前调，没收尾照样换——铸的是权威窗口）、
 `_consolidate_and_reforge`（泵开着时白描轮**顶替** Ombre 巩固轮，两轮目的相同不连跑）。引擎打嗝 / 醒来 client None
-两条 client 已死，白描自然跳过，图和节奏照带。③ 用法铸回等第 9 步；§5.2 配置变了的重铸（第 8 步）落码时直接调
+两条 client 已死，白描自然跳过，图和节奏照带。③ 用法铸回第 9 步已接上（`_merge_tool_loads`，不分泵开不开，哪条路
+重开都带）；§5.2 配置变了的重铸（第 8 步）落码时直接调
 `_open_session` 就全带上，不用另写。测试：GamePumpLoopTest 新增判脏路 / 打嗝路两条，基类 `test_edit_triggers_reforge`
 在泵子类里覆盖成多喂一发白描的版本；678 绿（jobhunt 一条旧账）。
 
@@ -365,6 +366,30 @@ Opus 稳定撞安全误报（§1.3）。2.1.310 复核：game 吃 toggle 且 on 
 - 游戏工具不进这本账（10-29 拍板走 toggle，§1.4 / §10）：一局里它常驻、重铸也不丢，不用铸回；记账时按 server 名跳过 game。
   预算里剩的就是最近聊天用过的那几样。
 
+**10-30 第 9 步施工记录（已落码，未重启）**：
+- 记账：`_ToolTrace.use` 记用到、`.result` 在 name=ToolSearch 且 content 是列表时记取到（tool_reference 的 tool_name），
+  都走 `_touch` → `state_store.touch_tools`（只记 `mcp__` 全名、server≠game；轮来源读 `meta.turn_kind` / `meta.turn_ts`）。
+  账 `tool_touch.json` 整文件原子写，只留最近 64 条（更老的本来也在窗口外）。两处读流（`_turn_events` / `_pump_drain`）
+  天然都覆盖。闹钟留底同批补 `turn_kind` / `turn_ts`。
+- 醒来轮的 `turn_ts`：`wake_sdk.enqueue_wake` 的 `_injection` 把 `started_ts` 同时写进 `handle.meta["turn_ts"]`
+  （投递进历史的 ts 就是它），loop 每轮 finally 随 `turn_kind` 一起摘掉；聊天轮为 0。
+- 锚点 `_anchor_index`（闹钟和用法共用）：wake = ts 等于 turn_ts 精确匹配；chat = ts 不早于接触的第一段 assistant；
+  没有 turn_kind 的老闹钟记录照旧最近一条容差 120s。**一处偏离原稿**：chat 规则早侧的容差不能用闹钟那 120s——
+  「不早于接触 − 120s 的第一段」会挑到**上一轮**的回复（他 T 回完、TA T+30 发话、T+40 调工具），所以早侧只容 5s
+  钟差（app 气泡 ts 是手机的钟）、晚侧封顶 600s（一个长轮的时长，超过 = 回复不在窗口里 → 不铸）。
+- 铸回 `_merge_tool_loads(history, cid, allowed, tokens)`：`_open_session` 里紧跟 `_merge_alarm_calls`（同一条上
+  ToolSearch 排在闹钟前：先取到再用）。`allowed = _loadable_tools(options, handle)` = options.tools 里的 mcp__ 全名去掉
+  `ALWAYS_LOAD_SERVERS` / game / `mcp_plug_off`；**options 里没挂 ToolSearch（闸关）= 空集 = 不铸**（session 里没有
+  ToolSearch，铸它的调用是编）。按最后接触倒序、预算 `TOOL_LOAD_BUDGET_TOKENS`（默认 8000）到顶就停；窗口外的不占预算。
+- 逐工具 tokens 表：`_cache_tool_tokens` 在聊天/醒来轮收尾后拍一次 `get_context_usage().mcpTools`（name 是全名，第 1 步
+  探针实证），缓存 `meta["tool_tokens"]` 跨重开留着（schema 大小不随 session 变）；没拍到按 `TOOL_TOKENS_FALLBACK=500`
+  估（原稿「schema 字节 / 4」在 chat_loop 这层拿不到 schema，改成常量）。
+- forge：tools 槽 `result` 允许块列表（逐块校验是 dict 且有 type），照原样进 tool_result content、参与 digest；这条 user
+  事件只有一个 ToolSearch 时补 `toolUseResult{matches, query, total_deferred_tools: 0}`（几个工具合一条时字段没有唯一
+  归属，不补）。"Tool loaded." 那块不铸（§1.6）。
+- 测试基类 `_AlTmpBase`（test_chat_loop）补了 `CHAR_STATE_ROOT` 指临时地——它之前只挪了 activity_log，`_ToolTrace` 的留底
+  一直写进真 state（10-30 实锤 `state/characters/cass/tool_touch.json` 被单测写出来，已删）。
+
 ## 7. 顺手修（注释 / 文档与代码对不上的）
 
 - `pipeline.tool_search_on` docstring：「只挂 ToolSearch 不给环境变量 = 延迟静默不生效」
@@ -442,7 +467,7 @@ SDK 升级会连带换掉它自带的 CLI（10-29 晚起 2.1.310，与 PATH 同�
    P1 第一步核对时把「tick 点评与用户消息 ts 交错」那类（PLAN_gamechat §2.2 第 3 条）从「多段回复」
    里分出来，两类一起修。
 4. ~~**泵开着时的重开统一收口**~~ **已落码（10-29 深夜，未重启；施工记录在 §4.1 末）**：图回填 + 节奏补注 +
-   shots 归零 + 感知白描前置全收进 `_open_session` / `_pump_note_round`，用法铸回等第 9 步接上。
+   shots 归零 + 感知白描前置全收进 `_open_session` / `_pump_note_round`，用法铸回第 9 步已接上。
 5. ~~**游戏改走 /chat/stream**~~ **已落码（10-29 深夜，未重启、app 未装真机；施工记录在 PLAN_gamechat §5 末）**：
    后端 `/code/status` 加 `engine` + 终端口泵分支加退役判据日志 → app `terminalRoute` 只在 `send()` 改道（含
    game_started 到手时先拉一次 status）。剩：观察旧包日志 → 两周后退役终端口泵分支（§3.3）。
@@ -495,7 +520,11 @@ SDK 升级会连带换掉它自带的 CLI（10-29 晚起 2.1.310，与 PATH 同�
    - 测试 `tests/test_toolmount_step8.py`（17 条）；`test_chat_loop` 基类桩掉 `_mount_signature`（不读生产开关表）。
      `.env.example` 补 `CHAT_TOOL_DEFER` / `DELEGATE_CHARS`。**上电顺序**：先 `CHAT_TOOL_DEFER=cass`，看日志里
      `toggle game → off` 和 ToolSearch 频率，再决定全开。
-9. **重铸留用法**（toolmount §6）。
+9. ~~**重铸留用法**（toolmount §6）~~ **已落码（10-30，未重启；施工记录在 §6 末）**：记账挂 `_ToolTrace`（用到 + 取到，
+   game 不记）→ `state/characters/<id>/tool_touch.json`；`_merge_tool_loads` 在 `_open_session` 里排在闹钟之后铸回
+   `ToolSearch → tool_reference`；锚点两条规则（`_anchor_index`，闹钟记录也补了 `turn_kind`/`turn_ts`）；forge 的
+   tools 槽 result 允许块列表 + ToolSearch 补 `toolUseResult`；token 表首轮之后拍一次缓存。§4.1 ③ 同批接上。
+   测试 `tests/test_toolmount_step9.py`（24 条），全套 756 绿（jobhunt 旧账）。
 10. **插话**（interject P2–P4，含泵开着时的 chat 轮）。
 11. **阈值复核**：基线降 ~28k 后 `CHAT_SOFT/HARD/PANIC_TOKENS` 是否下调（量的是含 schema 的
     真实上下文），看一周 usage 再定。

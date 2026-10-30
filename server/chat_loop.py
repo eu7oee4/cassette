@@ -939,11 +939,29 @@ class _ToolTrace:
         # 原始 input 也留着：闹钟留底要铸回**他真调过的那次调用**，
         # 拿 summary 那句人话反推等于重写历史（§14.4「照实铸」）。
         self.pend[block_id] = (name, _tool_summary(name, inp or {}), inp or {})
+        self._touch([name])                      # 用到 = 接触（toolmount §6）
+
+    def _touch(self, names) -> None:
+        """延迟工具的「最后接触」账（toolmount §6）：只记 mcp__ 全名，game 不记
+        （一局里它常驻、重铸也不丢，10-29 拍板走 toggle）；轮来源随手记，锚点靠它。"""
+        names = [n for n in names
+                 if isinstance(n, str) and n.startswith("mcp__")
+                 and n.split("__", 2)[1] != "game"]
+        if not names:
+            return
+        state_store.touch_tools(
+            names, self.handle.char_id,
+            turn_kind=self.handle.meta.get("turn_kind") or "chat",
+            turn_ts=int(self.handle.meta.get("turn_ts") or 0))
 
     def result(self, block_id: str, is_error, content=None) -> None:
         name, summary, inp = self.pend.pop(block_id, (None, "", {}))
         if not name:
             return
+        if name == "ToolSearch" and isinstance(content, list):
+            # 取到 = 接触：ToolSearch 的回执是 tool_reference 列表（§1.5 形状）
+            self._touch([b.get("tool_name") for b in content
+                         if isinstance(b, dict) and b.get("type") == "tool_reference"])
         import activity_log
         import pipeline
         # 成败两道口径，别混（§7.2 / §7.2.1 复盘，眠眠 09-01 12:16 拍板）：
@@ -976,9 +994,13 @@ class _ToolTrace:
         # 铸回去只是噪音。失败的也留：他试过这件事是真的，回执会说没成。
         if (name.endswith("__next_wake")
                 and str(inp.get("action") or "read").strip().lower() != "read"):
+            # turn_kind / turn_ts（toolmount §6）：有这两个字段的记录走按轮来源分的
+            # 锚规则；老记录没有，照旧挂最近一条。
             state_store.append_alarm_call(
                 {"ts": int(time.time()), "id": block_id, "name": name,
-                 "input": inp, "ret": text[:RET_CAP], "ok": ok},
+                 "input": inp, "ret": text[:RET_CAP], "ok": ok,
+                 "turn_kind": turn,
+                 "turn_ts": int(self.handle.meta.get("turn_ts") or 0)},
                 self.handle.char_id)
 
 
@@ -1333,25 +1355,157 @@ def _merge_alarm_calls(history: list[dict], char_id: str) -> list[dict]:
     calls = state_store.read_alarm_calls(char_id)
     if not calls or not history:
         return history
-    spots = [(i, int(m.get("ts") or 0)) for i, m in enumerate(history)
-             if m.get("role") == "assistant" and m.get("ts")]
+    spots = _assistant_spots(history)
     if not spots:
         return history
     attach: dict[int, list[dict]] = {}
     for c in calls:
-        ts = int(c.get("ts") or 0)
-        if not ts:
-            continue
-        i, gap = min(((i, abs(t - ts)) for i, t in spots), key=lambda x: x[1])
-        if gap > ALARM_ATTACH_SLACK_SEC:
+        i = _anchor_index(spots, c)
+        if i is None:
             continue                  # 那一轮不在窗口里了 → 不铸
         attach.setdefault(i, []).append(
             {"name": c.get("name") or "mcp__basics__next_wake",
              "input": c.get("input") or {}, "result": c.get("ret") or ""})
     if not attach:
         return history
-    return [({**m, "tools": attach[i]} if i in attach else m)
+    return [({**m, "tools": list(m.get("tools") or []) + attach[i]} if i in attach else m)
             for i, m in enumerate(history)]
+
+
+def _assistant_spots(history: list[dict]) -> list[tuple[int, int]]:
+    return [(i, int(m.get("ts") or 0)) for i, m in enumerate(history)
+            if m.get("role") == "assistant" and m.get("ts")]
+
+
+# 聊天轮「接触之后的第一段」锚（toolmount §6）：早侧只容钟差（app 的气泡 ts 是手机的
+# 钟、接触 ts 是这台机的钟），不能用闹钟那 120s——「不早于接触 - 120s 的第一段」会挑到
+# **上一轮**的回复（他 T 回完、TA T+30 发话、T+40 调工具）；晚侧封顶一个长轮的时长，
+# 超过＝那轮的回复不在窗口里（或根本没回）→ 不铸。
+TOOL_ATTACH_DRIFT_SEC = 5
+TOOL_ATTACH_MAX_SEC = 600
+
+
+def _anchor_index(spots: list[tuple[int, int]], rec: dict) -> Optional[int]:
+    """留底记录挂回哪条 assistant（下标），None = 不铸。按轮来源分两条规则（toolmount §6
+    复审）：
+    - `turn_kind=wake`：ts **等于** turn_ts 的那条（醒来投递进历史的 ts 就是 started_ts，
+      一轮一条，精确匹配不要容差）。
+    - `turn_kind=chat`：ts 不早于接触的**第一段** assistant。不用「最近的一条」：P1 之后一轮
+      拆成多段、中间可能夹着插话，挑最近的会挂到插话之后那段上，铸出来变成「先听到插话、
+      才取的用法」；forge 把工具铸在那条正文前面，所以正确的锚是接触之后的第一段。
+    - 没有 turn_kind（老的闹钟记录）：最近的一条、容差 120s（两种 ts 方向都兜）。"""
+    ts = int(rec.get("ts") or 0)
+    if not ts or not spots:
+        return None
+    kind = rec.get("turn_kind")
+    if kind == "wake":
+        tt = int(rec.get("turn_ts") or 0)
+        if not tt:
+            return None
+        for i, t in spots:
+            if t == tt:
+                return i
+        return None
+    if kind == "chat":
+        for i, t in spots:
+            if t >= ts - TOOL_ATTACH_DRIFT_SEC:
+                return i if t - ts <= TOOL_ATTACH_MAX_SEC else None
+        return None
+    i, gap = min(((i, abs(t - ts)) for i, t in spots), key=lambda x: x[1])
+    return None if gap > ALARM_ATTACH_SLACK_SEC else i
+
+
+# 重铸留用法（toolmount §6）：铸回的 ToolSearch→tool_reference 总预算（token）；逐工具
+# tokens 没缓存到（活 session 首轮之后才拍）时按这个估。按最后接触排序，预算到顶就停。
+TOOL_LOAD_BUDGET_TOKENS = int(os.environ.get("TOOL_LOAD_BUDGET_TOKENS", "8000") or "8000")
+TOOL_TOKENS_FALLBACK = 500
+
+
+def _merge_tool_loads(history: list[dict], char_id: str, *, allowed,
+                      tokens: Optional[dict] = None) -> list[dict]:
+    """把最近接触过的延迟工具的用法铸回它最后接触的那一轮（toolmount §6）：同一条上的合成
+    一次 `ToolSearch select:a,b,c` → tool_result 里 N 个 tool_reference（§1.5 实证 CLI resume
+    时从 transcript 恢复已加载集，铸的也认；多引用一条 §1.6 实证）。渲染规则，和
+    _merge_alarm_calls 同层：只改铸造输入，不动账；排在闹钟之后，同一条上 ToolSearch 在前
+    （先取到、再用）。
+
+    allowed：这条 session 能铸的工具全集（挂了的、延迟的、server 没 toggle off 的）——空集就
+    什么都不铸（闸关时 session 里没有 ToolSearch，铸它的调用是编）。当前配置里没有的不铸：
+    CLI 发请求时会把它改写成「[Tool references removed]」，他看见会顺嘴指出来（§1.6）。
+    那轮已滚出窗口 → 不铸（照实铸、不编时序），兜底是他自己再取一次。"""
+    if not allowed or not history:
+        return history
+    touch = state_store.read_tool_touch(char_id)
+    recs = [(n, r) for n, r in touch.items()
+            if n in allowed and isinstance(r, dict) and int(r.get("ts") or 0)]
+    if not recs:
+        return history
+    spots = _assistant_spots(history)
+    if not spots:
+        return history
+    recs.sort(key=lambda nr: -int(nr[1]["ts"]))
+    spent = 0
+    attach: dict[int, list[tuple[int, str]]] = {}
+    for n, r in recs:
+        i = _anchor_index(spots, r)
+        if i is None:
+            continue                   # 窗口外 → 不铸，也不占预算
+        cost = int((tokens or {}).get(n) or TOOL_TOKENS_FALLBACK)
+        if spent + cost > TOOL_LOAD_BUDGET_TOKENS:
+            break
+        spent += cost
+        attach.setdefault(i, []).append((int(r["ts"]), n))
+    if not attach:
+        return history
+    out: list[dict] = []
+    for i, m in enumerate(history):
+        if i not in attach:
+            out.append(m)
+            continue
+        names = [n for _, n in sorted(attach[i])]
+        tc = {"name": "ToolSearch",
+              "input": {"query": "select:" + ",".join(names), "max_results": len(names)},
+              "result": [{"type": "tool_reference", "tool_name": n} for n in names]}
+        out.append({**m, "tools": [tc] + list(m.get("tools") or [])})
+    return out
+
+
+def _loadable_tools(options, handle: session_mgr.LoopHandle) -> set[str]:
+    """这条 session 能铸回用法的工具：options 里挂的 mcp__ 全名，去掉常驻 server
+    （ALWAYS_LOAD_SERVERS，schema 本来就在）、game（走 toggle，§6 末）、关着的插件
+    （toggle off，当前没挂）。session 里没有 ToolSearch（闸关）= 空集。"""
+    tools = set(getattr(options, "tools", None) or [])
+    if "ToolSearch" not in tools:
+        return set()
+    import pipeline
+    off = set(handle.meta.get("mcp_plug_off") or []) | {"game"}
+    out: set[str] = set()
+    for srv, names in _expected_mcp(options).items():
+        if srv in pipeline.ALWAYS_LOAD_SERVERS or srv in off:
+            continue
+        out.update(names)
+    return out
+
+
+async def _cache_tool_tokens(client, handle: session_mgr.LoopHandle) -> None:
+    """逐工具 tokens 表（铸回的预算用它）：活 session 首轮之后拍一次 get_context_usage，
+    缓存进 meta["tool_tokens"]，跨重开留着——schema 大小不随 session 变。只在有可铸工具
+    时拍；拍不到就一直用 TOOL_TOKENS_FALLBACK 估。"""
+    if (client is None or handle.meta.get("tool_tokens") is not None
+            or not handle.meta.get("tool_loadable")):
+        return
+    fn = getattr(client, "get_context_usage", None)
+    if fn is None:
+        return
+    try:
+        u = await asyncio.wait_for(fn(), timeout=MCP_PROBE_TIMEOUT_SEC)
+        rows = {r.get("name"): int(r.get("tokens") or 0)
+                for r in ((u or {}).get("mcpTools") or []) if r.get("name")}
+    except Exception as e:
+        print(f"[chat_loop] 拍工具 token 表失败（下一轮再拍）: {e}", file=sys.stderr)
+        return
+    if rows:
+        handle.meta["tool_tokens"] = rows
 
 
 def _frame_activities(history: list[dict], char_id: str) -> list[dict]:
@@ -1760,23 +1914,30 @@ async def run(handle: session_mgr.LoopHandle, *,
     async def _open_session(history: list[dict], catalog):
         """开/重开 session 的唯一入口。泵开着时（§4.1，10-29 第 4 步）不管哪条路
         触发的重开，一律自己带上：① 近 K 张图回填（只进铸造输入、不进账的渲染
-        尾巴）② rhythm_due 置位 ④ shots 归零。⑤ 重开**之前**的白描轮归调用方
-        （_pump_note_round，client 还活着才有得调）；③ 用法铸回等 §6 接上。
-        账永远对权威原文；ctx_est 这里只落一个占位，真值走 usage（见下）。"""
+        尾巴）② rhythm_due 置位 ③ 取过的用法铸回（§6，_merge_tool_loads）④ shots
+        归零。⑤ 重开**之前**的白描轮归调用方（_pump_note_round，client 还活着才有
+        得调）。账永远对权威原文；ctx_est 这里只落一个占位，真值走 usage（见下）。"""
         nonlocal client, sid, ledger
         pump = handle.meta.get("game_pump")
         await _safe_disconnect(client)
         client = None
         options = opts_factory(handle.char_id, catalog)
+        # §6 ③：这条 session 能铸回用法的工具全集（闸关 = 空集 = 不铸）；token 表是上一条
+        # 活 session 首轮之后拍的缓存，跨重开留着。
+        handle.meta["tool_loadable"] = _loadable_tools(options, handle)
         # 三层渲染，顺序有讲究：
         # 1) 并图——要在打戳之前，戳才落在合成后那一条上（先打戳会给占位符也打一个，
         #    然后那条被并掉，戳跟着没了）；
         # 2) 打戳；3) 套活动框——框行自带 HH:MM，别再叠一层（顺序反了就是双戳）。
-        # 闹钟补铸排在最前：它只往 assistant 条上挂 `tools` 键，不动 role/text/ts，
-        # 下游三道（并图/打戳/活动框）看不见它、也不会被它影响。
+        # 闹钟补铸 + 用法铸回排在最前：它们只往 assistant 条上挂 `tools` 键，不动
+        # role/text/ts，下游三道（并图/打戳/活动框）看不见它、也不会被它影响。
         rendered = (_frame_activities(
             _stamp_times(_merge_images(
-                _merge_alarm_calls(history, handle.char_id), handle.char_id),
+                _merge_tool_loads(
+                    _merge_alarm_calls(history, handle.char_id), handle.char_id,
+                    allowed=handle.meta["tool_loadable"],
+                    tokens=handle.meta.get("tool_tokens")),
+                handle.char_id),
                 handle.char_id),
             handle.char_id)
             if history else [])
@@ -2321,6 +2482,8 @@ async def run(handle: session_mgr.LoopHandle, *,
                         ledger.append({"r": "assistant", "h": _h(text), "ts": ts})
                     _persist_ledger(handle.char_id, sid, ledger)
                     ok = True
+                if ok:
+                    await _cache_tool_tokens(client, handle)   # §6：首轮之后拍一次，之后不拍
                 if (ok and not handle.meta.get("game_pump")
                         and int(handle.meta.get("ctx_est", 0)) > CHAT_HARD_TOKENS):
                     # （泵开着时不走 chat 硬阈——段内重铸只认 N 张，设计稿三）
@@ -2366,6 +2529,7 @@ async def run(handle: session_mgr.LoopHandle, *,
                 turn.out.put_nowait(None)
                 _release_wake_slot(handle, turn)
                 handle.meta.pop("turn_kind", None)   # 门的默认态=放行（巩固轮也走默认）
+                handle.meta.pop("turn_ts", None)     # 醒来轮的 started_ts（§6 锚点），随轮走
                 if not ok:
                     if turn.on_dead is not None:
                         try:

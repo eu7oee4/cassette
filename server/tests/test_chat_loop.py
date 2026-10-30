@@ -1527,8 +1527,15 @@ class _AlTmpBase(unittest.TestCase):
         activity_log.SEG_DIR = activity_log.ACT_DIR / "segments"
         activity_log.SHOT_DIR = activity_log.ACT_DIR / "shots"
         activity_log.OPEN_PATH = activity_log.ACT_DIR / "open_segments.json"
+        # _ToolTrace 还往 state/characters/<id>/ 写留底（闹钟 alarm_calls、工具接触
+        # tool_touch，toolmount §6）：根也指临时地，别写进真 state（10-30 实锤写进过）。
+        import state_store
+        self._root_orig = state_store.CHAR_STATE_ROOT
+        state_store.CHAR_STATE_ROOT = root / "chars"
 
     def tearDown(self):
+        import state_store
+        state_store.CHAR_STATE_ROOT = self._root_orig
         (self.al.PATH, self.al.ACT_DIR, self.al.SEG_DIR, self.al.SHOT_DIR,
          self.al.OPEN_PATH) = self._orig
         self.tmp.cleanup()

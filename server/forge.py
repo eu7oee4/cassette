@@ -117,8 +117,9 @@ def render(messages: list[dict], *, cwd, session_id: Optional[str] = None,
 
     messages：[{"role": "user"|"assistant", "text": str, "ts": 秒级时间戳,
     "images": [{"media_type": str, "data": b64 str}, ...]（可选，只许 user 槽），
-    "tools": [{"name": str, "input": dict, "result": str}, ...]（可选，只许
-    assistant 槽）}]，
+    "tools": [{"name": str, "input": dict, "result": str | [块…]}, ...]（可选，
+    只许 assistant 槽；result 是列表时逐块照铸——ToolSearch 的 tool_reference 回执
+    就长这样，PLAN_toolmount §6）}]，
     顺序即历史。ts 允许缺省（沿用上一条的），但第一条必须有——时间是权威源里的
     事实，不在这里发明。images（PR13 图块腿 2026-08-30 真机验通：CLI/agent-sdk
     两条路 resume 都真到模型眼前）：字节参与 session digest（确定性），数据由
@@ -160,9 +161,17 @@ def render(messages: list[dict], *, cwd, session_id: Optional[str] = None,
             nm = (tc.get("name") or "").strip()
             if not nm:
                 raise ValueError(f"第 {i} 条第 {j} 个 tool 缺 name")
+            ret = tc.get("result")
+            if isinstance(ret, list):
+                # content 列表（PLAN_toolmount §6：ToolSearch 的 tool_reference 回执）——
+                # 逐块校验是 dict，照原样铸；别的回执仍是短字符串。
+                if not all(isinstance(b, dict) and b.get("type") for b in ret):
+                    raise ValueError(f"第 {i} 条第 {j} 个 tool 的 result 列表里有不是块的东西")
+                ret = [dict(b) for b in ret]
+            else:
+                ret = str(ret or "")
             tools.append((nm, json.dumps(tc.get("input") or {}, ensure_ascii=False,
-                                         sort_keys=True),
-                          str(tc.get("result") or "")))
+                                         sort_keys=True), ret))
         norm.append((role, text, float(ts), tuple(images), tuple(tools)))
 
     # 连续同角色合并成一轮（08-30 game 实锤的污染根修）：铸出来的历史必须长得像
@@ -253,7 +262,7 @@ def render(messages: list[dict], *, cwd, session_id: Optional[str] = None,
                 sum(estimate_tokens(inp) for _, inp, _ in tls))
             events.append(ev)
             parent = tu_uid
-            events.append({
+            tr_ev = {
                 "parentUuid": parent, "isSidechain": False,
                 "type": "user",
                 "message": {"role": "user", "content": [
@@ -264,7 +273,19 @@ def render(messages: list[dict], *, cwd, session_id: Optional[str] = None,
                 "userType": "external", "entrypoint": "sdk-cli",
                 "cwd": str(cwd), "sessionId": session_id,
                 "version": TRANSCRIPT_VERSION, "gitBranch": git_branch,
-            })
+            }
+            # ToolSearch 的真记录带 toolUseResult{matches, query, total_deferred_tools}
+            # （10-29 第 1 步探针 t2_ghost L28）；照真补——只在这条 user 事件就一个
+            # ToolSearch 时补（真 transcript 一个 tool_result 一条事件，这个字段
+            # 是事件级的，几个工具合一条时没有唯一归属）。total 写 0 不影响
+            # （探针第 10 条）；CLI 恢复已加载集认的是 content 里的 tool_reference。
+            if len(tls) == 1 and tls[0][0] == "ToolSearch" and isinstance(tls[0][2], list):
+                tr_ev["toolUseResult"] = {
+                    "matches": [b.get("tool_name") for b in tls[0][2]
+                                if b.get("type") == "tool_reference"],
+                    "query": str(json.loads(tls[0][1]).get("query") or ""),
+                    "total_deferred_tools": 0}
+            events.append(tr_ev)
             parent = tr_uid
         if role == "user":
             content = [{"type": "text", "text": text}]

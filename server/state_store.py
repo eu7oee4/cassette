@@ -451,6 +451,52 @@ def read_alarm_calls(char_id: Optional[str] = None) -> list[dict]:
     return rows
 
 
+# PLAN_toolmount §6：延迟工具的「最后接触」账。{全名: {"ts", "turn_kind", "turn_ts"}}——
+# 取到（ToolSearch 的 tool_reference）和用到（tool_use）都算接触，只记最后一次：
+# 游戏工具取在 game_start 后、之后一直在用，按「哪天取的」挂，一局玩久了那轮滚出窗口，
+# 之后每次重铸都得重取。重铸时 _merge_tool_loads 按它把用法（ToolSearch→tool_reference）
+# 铸回最后接触的那一轮。账只保留最近 TOOL_TOUCH_CAP 条，再老的本来也铸不回去（窗口外）。
+_TOUCH_LOCK = threading.Lock()
+TOOL_TOUCH_CAP = 64
+
+
+def _tool_touch_path(char_id: Optional[str] = None) -> Path:
+    return _char_path("tool_touch.json", char_id)
+
+
+def read_tool_touch(char_id: Optional[str] = None) -> dict:
+    try:
+        data = json.loads(_tool_touch_path(char_id).read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def touch_tools(names, char_id: Optional[str] = None, *, ts: Optional[int] = None,
+                turn_kind: str = "chat", turn_ts: int = 0) -> None:
+    """记一次接触（一批名字共用一个 ts / 轮来源）。失败静默：留底是给重铸锦上添花的。"""
+    names = [n for n in (names or []) if n]
+    if not names:
+        return
+    try:
+        with _TOUCH_LOCK:
+            data = read_tool_touch(char_id)
+            now = int(ts or time.time())
+            for n in names:
+                data[n] = {"ts": now, "turn_kind": turn_kind or "chat",
+                           "turn_ts": int(turn_ts or 0)}
+            if len(data) > TOOL_TOUCH_CAP:
+                keep = sorted(data.items(), key=lambda kv: int(kv[1].get("ts") or 0))
+                data = dict(keep[-TOOL_TOUCH_CAP:])
+            p = _tool_touch_path(char_id)
+            p.parent.mkdir(parents=True, exist_ok=True)
+            tmp = p.with_suffix(".json.tmp")
+            tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+            os.replace(tmp, p)
+    except Exception:
+        pass
+
+
 def read_chat_image(sha: str, char_id: Optional[str] = None) -> Optional[bytes]:
     """按 sha 取字节。sha 只能是 40 位 hex——它进过路径，不校验就是目录穿越。"""
     if not re.fullmatch(r"[0-9a-f]{40}", sha or ""):
