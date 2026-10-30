@@ -7,6 +7,7 @@ struct ChatView: View {
     /// 见那边的注释）——身份跟着数据一起传下来，不去问一个可变的全局。
     let charID: String
     var isWaiting: Bool = false   // 等待对方回复中：底部显示三个点的输入气泡
+    var interjectWaiting: Set<UUID> = []   // 插话已送进在飞的那轮、等他看到的用户气泡（小字「已送达，等他看到」）
 
     var onEdit: (ChatMessage) -> Void = { _ in }   // 时间戳旁小按钮：进编辑弹窗
     var onDelete: (ChatMessage) -> Void = { _ in } // 长按气泡：弹删除确认
@@ -83,6 +84,7 @@ struct ChatView: View {
                                                charID: charID,
                                                showAvatar: entry.meta.showAvatar,
                                                contentWidth: geo.size.width - 24,
+                                               waitingNote: interjectWaiting.contains(message.id),
                                                menuTarget: activeMenu?.ref,
                                                onMenu: { activeMenu = $0 },
                                                onSelectText: { selectText = SelectTextItem(text: $0) },
@@ -776,6 +778,7 @@ private struct MessageRow: View {
     let charID: String                  // 头像认这个，不认「当前是谁」
     var showAvatar: Bool = true         // 同一人连发的后几条不挂头像（留等宽空位对齐）
     var contentWidth: CGFloat = 320
+    var waitingNote: Bool = false       // 插话已送进在飞的那轮、等他看到（PLAN_interject §4.5）
     var menuTarget: BubbleRef? = nil    // 长按菜单当前挂在哪个气泡上（全列表唯一）
     var onMenu: (ActiveBubbleMenu) -> Void = { _ in }
     var onSelectText: (String) -> Void = { _ in }
@@ -809,8 +812,16 @@ private struct MessageRow: View {
                     Color.clear.frame(width: 34, height: 1)
                 }
             }
-            content
-                .frame(maxWidth: .infinity, alignment: isMe ? .trailing : .leading)
+            VStack(alignment: isMe ? .trailing : .leading, spacing: 2) {
+                content
+                if waitingNote {
+                    Text("已送达，等他看到")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 4)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: isMe ? .trailing : .leading)
         }
     }
 

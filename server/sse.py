@@ -252,6 +252,24 @@ async def translate_events(events, finalize, trace: dict | None = None):
             for item in collector.on_user(ev):
                 for chunk in _memory_events(item):
                     yield chunk
+        elif t == "interject_point":
+            # 插话被当前轮吸收（PLAN_interject §4.3 / §4.5）：当前气泡定稿（同 text_break），
+            # 账在这儿落一条 TA 的 user（trace 里以 interject 条目占位），app 把那条用户气泡
+            # 挪到这儿、之后的文字另起气泡。
+            if cur_raw.strip():
+                raw_segments.append(cur_raw)
+                sealed = "\n\n".join(s.strip() for s in raw_segments if s.strip()) + "\n\n"
+                tr["segments"].append({"text": cur_emit, "ts": cur_ts or int(time.time())})
+                cur_emit, cur_ts = "", None
+                yield sse({"type": "text_break"})
+            cur_raw = ""
+            mf = MarkerStreamFilter()
+            tr["saw_break"] = True
+            tr["segments"].append({"interject": True, "rid": ev.get("rid"),
+                                   "text": ev.get("text") or "",
+                                   "ts": int(ev.get("ts") or time.time())})
+            yield sse({"type": "interject_point", "rid": ev.get("rid"),
+                       "ts": int(ev.get("ts") or time.time())})
         elif t == "result":
             if ev.get("is_error"):
                 is_error = True

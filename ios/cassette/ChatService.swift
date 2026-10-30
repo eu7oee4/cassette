@@ -193,6 +193,11 @@ enum StreamEvent {
     case permit(PermitCard)                  // 权限卡：TA 想动手，等批（U4/native §6）
     case error(String)                       // 出错提示
     case done(ChatResponse?)                 // 结束：附完整 ChatResponse（错误/空回复时为 nil）
+    // 轮内插话（PLAN_interject §4.5）
+    case capability(interject: Bool)         // 响应头到了：后端这个角色收不收插话（X-Interject）
+    case interject(into: String)             // 插话自己的流：已写进在飞的那一轮（rid），等他看到
+    case interjectPoint(rid: String)         // 主流：插话 rid 在这儿被看到——当前气泡定稿、插话气泡挪到这儿
+    case merged(String)                      // 插话自己的流收尾：并进了 rid 那轮，回复走原来那条流
 }
 
 /// 负责和后端通信。用 async/await。
@@ -228,6 +233,8 @@ struct ChatService {
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue(BackendConfig.authKey, forHTTPHeaderField: "X-Auth")
+        // 新包声明支持插话（PLAN_interject §4.5）：后端在响应头用同名字段答「这个角色收插话」。
+        request.setValue("1", forHTTPHeaderField: "X-Interject")
         request.timeoutInterval = 120   // 空闲计时（收到数据就重置）：后端每 25s 一个心跳
                                         // （STREAM_PING_SEC），120s 没动静就是半开连接
                                         // （Mac 睡了/Tailscale 掉了但没 RST）——以前 600s，
@@ -317,6 +324,9 @@ struct ChatService {
                         let detail = (try? JSONDecoder().decode([String: String].self, from: body))?["detail"]
                         throw ChatServiceError.server(detail ?? "HTTP \(http.statusCode)")
                     }
+                    // 响应头先到：这个角色收不收插话（旧后端没这个头 → false → 照旧排队）
+                    continuation.yield(.capability(
+                        interject: http.value(forHTTPHeaderField: "X-Interject") == "1"))
                     for try await line in bytes.lines {
                         guard line.hasPrefix("data: ") else { continue }
                         if let ev = Self.parseStreamEvent(String(line.dropFirst(6))) {
@@ -363,7 +373,11 @@ struct ChatService {
             else { return nil }
             return .permit(card)
         case "error":      return .error(obj["content"] as? String ?? "出错了")
-        case "done":       return .done(try? JSONDecoder().decode(ChatResponse.self, from: data))
+        case "interject":  return .interject(into: obj["into"] as? String ?? "")
+        case "interject_point": return .interjectPoint(rid: obj["rid"] as? String ?? "")
+        case "done":
+            if let into = obj["merged"] as? String { return .merged(into) }
+            return .done(try? JSONDecoder().decode(ChatResponse.self, from: data))
         default:           return nil
         }
     }

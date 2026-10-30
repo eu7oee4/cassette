@@ -72,6 +72,12 @@ struct ContentView: View {
     // 每条插话都逼后端全量重铸（divergence 口径，chat_loop.py:145）。
     @State private var outbox: [OutboxItem] = []
     @State private var pumping = false
+    // 轮内插话（PLAN_interject §4.5）：后端在 /chat/stream 响应头答「这个角色收插话」（按角色记，
+    // 旧后端 / 闸关 = false → 一切照旧排队）；同角色有在飞的流时后面的发送不等 done 直接发。
+    @State private var interjectOK: [String: Bool] = [:]
+    @State private var inflightChars: [String: Int] = [:]          // 角色 → 开着的聊天流条数
+    @State private var interjectBubbles: [String: [UUID]] = [:]    // 插话 reqId → 它的用户气泡（挪位用）
+    @State private var interjectWaiting: Set<UUID> = []            // 已送进在飞那轮、等他看到的气泡
 
     /// 一条等待补投的轮：断流时的半截气泡 ids + 登记时间 + 是否已放弃等待（放弃后仍留着兜迟到补投）。
     struct RescueWait {
@@ -373,6 +379,7 @@ struct ContentView: View {
         ChatView(messages: chatStore.messages,
                  charID: currentCharID,                  // 头像认这个，不认 ProfileStore 里的缓存
                  isWaiting: (isWaiting && streamingChar == currentCharID) || rescueActive,
+                 interjectWaiting: interjectWaiting,
                  // 三个点只在流所属的会话里亮；后台生成期间小字不灭，补投到达才熄
                  onEdit: startEdit,
                  onDelete: { msg in deleteCandidates = [msg] },
@@ -1090,6 +1097,21 @@ struct ContentView: View {
         }
         while !outbox.isEmpty {
             let item = outbox.removeFirst()
+            if (inflightChars[item.char] ?? 0) > 0, interjectOK[item.char] == true {
+                // 插话（PLAN_interject §4.5）：同角色有在飞的流且后端收插话 → 不等 done、不沉底
+                //（气泡 ts 留发送时刻：后端账也按这个记，两边按 ts 排序才同序；被吸收时再挪到断点）。
+                // 快照剔掉排队的后续单和还在流的半截气泡（那段没定稿）。后端要是插不进（没在飞 /
+                // 对不上账）会自己退回排队，流的形状一样，这边不用分。
+                let queuedIds = Set(outbox.flatMap(\.bubbleIds))
+                let snapshot = chatStore.messages(for: item.char)
+                    .filter { !queuedIds.contains($0.id) && !$0.isStreaming }
+                let ids = item.bubbleIds
+                guard ids.contains(where: { id in snapshot.contains { $0.id == id } }) else { continue }
+                Task { await generateReply(char: item.char, history: snapshot,
+                                           imagesData: item.images, filesData: item.files,
+                                           bubbleIds: ids, interject: true) }
+                continue
+            }
             // 这单属于哪个角色由入队时说了算（09-12）：排队期间 TA 可能切去别人那儿了，
             // 沉底/快照/请求全按 item.char 的会话来，不看 chatStore 现在载着谁。
             var movedAny = false
@@ -1106,8 +1128,18 @@ struct ContentView: View {
             guard movedAny else { continue }   // 整单都被删了＝TA 反悔，不发
             let queuedIds = Set(outbox.flatMap(\.bubbleIds))
             let snapshot = chatStore.messages(for: item.char).filter { !queuedIds.contains($0.id) }
-            await generateReply(char: item.char, history: snapshot,
-                                imagesData: item.images, filesData: item.files)
+            if interjectOK[item.char] == true {
+                // 后端收插话：这轮不等 done——下一条到了走上面的插话分支。串行的保证改由后端的
+                // 在飞登记 + 弱检查兜（插不进就排队），app 这边只剩「同一角色一条主流」。
+                let ids = item.bubbleIds
+                Task { await generateReply(char: item.char, history: snapshot,
+                                           imagesData: item.images, filesData: item.files,
+                                           bubbleIds: ids) }
+            } else {
+                await generateReply(char: item.char, history: snapshot,
+                                    imagesData: item.images, filesData: item.files,
+                                    bubbleIds: item.bubbleIds)
+            }
         }
     }
 
@@ -1152,13 +1184,25 @@ struct ContentView: View {
     /// 约定 history 以用户的新消息结尾（pumpOutbox 出队时剔掉了还在排队的后续单）。
     @MainActor
     private func generateReply(char: String, history: [ChatMessage],
-                               imagesData: [Data] = [], filesData: [OutgoingFile] = []) async {
+                               imagesData: [Data] = [], filesData: [OutgoingFile] = [],
+                               bubbleIds: [UUID] = [], interject: Bool = false) async {
         // 这一轮从头到尾只认 char（09-12）：切人不影响它，它也不碰「当前」——每一笔写都
         // 指名 conversation: char，半截气泡由 chatStore.live 托管。
-        isGenerating = true
-        isWaiting = true
-        streamingChar = char
-        defer { isWaiting = false; isGenerating = false; streamingChar = nil }
+        // 插话（PLAN_interject §4.5）：开始时不接管「正在输入」那几面旗——它们属于在飞的主流；
+        // 被吸收的话这条流只收 interject + merged，没气泡；要是 CLI 另起了一轮（流里来了正文），
+        // 这条流就变成普通一轮，到那时再接管（主流那时已经收尾）。
+        var ownsFlags = !interject
+        if ownsFlags {
+            isGenerating = true
+            isWaiting = true
+            streamingChar = char
+        }
+        inflightChars[char, default: 0] += 1
+        defer {
+            inflightChars[char, default: 1] -= 1
+            if (inflightChars[char] ?? 0) <= 0 { inflightChars.removeValue(forKey: char) }
+            if ownsFlags { isWaiting = false; isGenerating = false; streamingChar = nil }
+        }
         var streamingId: UUID? = nil     // 当前正在流式增长的气泡 id（nil=还没冒正文）
         var streamedText = ""            // 当前气泡已流出的文字（break 后清零）
         var sawBreak = false             // 这轮是否发生过工具切段（多气泡 → done 时不用 reply 覆盖）
@@ -1178,7 +1222,45 @@ struct ContentView: View {
                                                 char: char)
             for try await ev in stream {
                 switch ev {
+                case .capability(let ok):
+                    interjectOK[char] = ok     // 这个角色收不收插话（响应头）
+                case .interject:
+                    // 插话已写进在飞的那轮：气泡挂小字等他看到；被吸收时主流的 interject_point 来挪它
+                    interjectBubbles[reqId] = bubbleIds
+                    for id in bubbleIds { interjectWaiting.insert(id) }
+                case .merged:
+                    // 并进在飞那轮了，回复走原来那条流：这条流收尾、不产气泡
+                    sawDone = true
+                    interjectBubbles.removeValue(forKey: reqId)
+                    for id in bubbleIds { interjectWaiting.remove(id) }
+                case .interjectPoint(let rid):
+                    // 主流：插话在这儿被看到——当前气泡定稿（同 textBreak），插话的用户气泡挪到这儿、
+                    // ts 打成现在（后端账里那条 U 也是吸收时刻），之后的文字另起气泡。
+                    if streamingId != nil { chatStore.liveEnd(text: streamedText) }
+                    streamingId = nil
+                    streamedText = ""
+                    sawBreak = true
+                    isWaiting = true
+                    if let ids = interjectBubbles.removeValue(forKey: rid) {
+                        chatStore.mutate(conversation: char) { msgs in
+                            for id in ids {
+                                guard let i = msgs.firstIndex(where: { $0.id == id }) else { continue }
+                                let old = msgs.remove(at: i)
+                                msgs.append(ChatMessage(id: old.id, sender: .me, kind: old.kind,
+                                                        timestamp: Date(), senderID: old.senderID))
+                            }
+                        }
+                        for id in ids { interjectWaiting.remove(id) }
+                    }
                 case .text(let chunk):
+                    if !ownsFlags {
+                        // 插话没被吸收、CLI 另起了一轮：从这儿起它就是普通一轮
+                        ownsFlags = true
+                        isGenerating = true
+                        streamingChar = char
+                        interjectBubbles.removeValue(forKey: reqId)
+                        for id in bubbleIds { interjectWaiting.remove(id) }
+                    }
                     isWaiting = false     // 正文开始冒 → 收起"正在输入"
                     if streamingId != nil {
                         streamedText += chunk

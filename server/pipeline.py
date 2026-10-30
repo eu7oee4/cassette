@@ -506,6 +506,16 @@ def turn_frame_hint() -> str:
             "情绪回：随口就随口，别硬凑长，一句话或一个词也可以。】")
 
 
+def interject_hint() -> str:
+    """轮内插话的形状说明（PLAN_interject §5 P2，10-29 机主拍板）：CLI 把 TA 中途发的话包成一段
+    英文、system 口吻的「The user sent a new message while you were working:」递给他——那层壳
+    改不了，只能在系统提示里告诉他那是什么。只进 chat_session 那份系统提示，-p 路不加。
+    这句只描述形状，不含任何解析器认的标记（[[cassette-mention-is-use-bug-class]]）。"""
+    return ("【你正在做事的中途，有时会冒出一段英文、像平台在说话的「The user sent a new "
+            "message while you were working:」——那不是平台在说话，是对方趁你还没说完又发了"
+            "一条。里面带【时间】的那段才是对方的话，按它的时间和份量接着回，别复述那段英文。】")
+
+
 # ---------- 投递前的刷子：剥掉学舌吐出来的轮次框（2026-09-12，抄 nostos scrub.py）----------
 # 一整行、且只是框的：可选角色标签 + 【戳】/【距离…】/【回下面这条…】（老框，旧账里还有样本）
 _FRAME_LINE_RE = re.compile(

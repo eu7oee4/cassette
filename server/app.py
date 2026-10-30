@@ -681,8 +681,11 @@ def chat_active(x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
 
 
 @app.post("/chat/stream")
-async def chat_stream(req: ChatRequest, x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
-    """流式聊天：SSE 逐字回复。协议见 sse.py。"""
+async def chat_stream(req: ChatRequest, x_auth: Optional[str] = Header(default=None, alias="X-Auth"),
+                      x_interject: Optional[str] = Header(default=None, alias="X-Interject")):
+    """流式聊天：SSE 逐字回复。协议见 sse.py。
+    X-Interject（PLAN_interject §4.5）：新包声明支持插话；后端在响应头用同名字段回「这个角色
+    收插话」，app 据此才并发发送。旧包不带 → 一切照旧排队。"""
     verify_auth(x_auth)
     cid = _resolve_char(req.char_id)
     prompt, handle_to_id, ctx = _prepare_chat(req, cid)   # 校验在流开始前，能正常返 4xx
@@ -716,7 +719,8 @@ async def chat_stream(req: ChatRequest, x_auth: Optional[str] = Header(default=N
                 injection=chat_loop.build_injection(req.messages, cid,
                                                     extra_hints=ctx["hints"]),
                 finalize=finalize, images=req.images, file_blocks=file_blocks,
-                catalog=ctx["catalog"]).__aiter__()
+                catalog=ctx["catalog"],
+                interject_ok=(x_interject or "").strip() == "1").__aiter__()
             first = await it.__anext__()
         except StopAsyncIteration:
             first = None
@@ -803,6 +807,9 @@ async def chat_stream(req: ChatRequest, x_auth: Optional[str] = Header(default=N
                     if state["done_delivered"]:
                         return
                     final = state["final"] or {}
+                    if final.get("merged"):
+                        # 插话被在飞轮吸收：回复走的是原来那条流（它自己有 rescue），这条没东西可补
+                        return
                     text = (final.get("reply") or "").strip()
                     stickers = final.get("sticker_sends") or []
                     if text or stickers:
@@ -854,11 +861,14 @@ async def chat_stream(req: ChatRequest, x_auth: Optional[str] = Header(default=N
             yield sse.sse({"type": "error", "content": "连接中断了，大模型那边出了点问题。"})
             yield sse.sse({"type": "done"})
 
-    return StreamingResponse(gen(), media_type="text/event-stream", headers={
+    headers = {
         "Cache-Control": "no-cache",
         "Connection": "keep-alive",
         "X-Accel-Buffering": "no",
-    })
+    }
+    if chat_loop.interject_capable(cid):
+        headers["X-Interject"] = "1"
+    return StreamingResponse(gen(), media_type="text/event-stream", headers=headers)
 
 
 # ---------- 窗口同步（app 侧历史变了但不生成）----------

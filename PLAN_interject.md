@@ -231,6 +231,40 @@ transcript 里「附件形状」的插话在重铸后变成普通 user 轮——
 
 **P4 灰度**：先只给一个角色开，看一周重铸次数和 rescue 次数有没有涨。
 
+**10-30 P2 + P3 施工记录（合排第 10 步；已落码未重启，app 未装真机）**：
+- 闸：`config.INTERJECT`（"0" 关 / "1" 全角色 / "cass" 按角色）→ `config.interject_on(cid)`；另一半是 app 新包的请求头
+  `X-Interject: 1`（`stream_turn(interject_ok=…)`），旧包不带一行不变。后端在 `/chat/stream` **响应头**用同名字段答
+  「这个角色收插话」（`chat_loop.interject_capable`：闸开 ∧ 没被自检关掉 ∧ sdk 引擎 ∧ 没熄火），app 按角色记下，
+  之后同角色有在飞的流才并发发送——第一轮永远串行，不用另开端点。
+- 引擎（§4.2）：`Interject` 数据类（text=`【stamp_str(now)】\n原文`、ledger_text=原文、各自的 out）；在飞登记
+  `handle.meta["inflight"] = {rid, pid, text_h, pending, absorbed_q}` 在 chat 轮 `client.query` **之前**挂上（hook#1
+  才落得到它）；`client` 是 `run()` 的局部变量，所以 `_send_interject` 闭包挂在 `meta["interject_send"]`。路由
+  `_try_interject`：闸开 ∧ 没文件块 ∧ 在飞且 hook#1 已到（之前来的 CLI 会拼进首条）∧ 没在重铸 ∧ 挂着的 < 4 ∧ 弱检查
+  `_interject_fit`（快照去掉在飞那条 user 及其后，剩下是账的尾巴、stale 也算、`[图片]` 占位照 absorbable_tail 摘）
+  → 写进 session，流先发 `interject{into}`；任何一条不满足退回 `handle.queue`。
+- 吸收判定：`UserPromptSubmit` hook（`_prompt_hook`，闸开才挂）——在飞轮的 pid 记在 `inflight.pid`，之后每次按入队顺序
+  配 pending 里第一条 `prompt_id is None` 的：pid 相等 → absorbed、进 `absorbed_q`；`_turn_events` 每收到下一条流消息前先
+  清这个队：往原流产 `interject_point{rid, text, ts}`、插话流 `done{merged: rid}` 收尾。`sse.translate_events` 收到
+  `interject_point`：当前气泡定稿（同 text_break）、trace.segments 里塞一条 `{interject, text, ts}`、下发 `interject_point`。
+  账：`_turn_entries(trace, reply, u_ts)` 取代 `_reply_bubbles`（后者只剩 assistant 那半）→ `U2, A·段1, U3, A·段2`。
+- 轮尾 `_run_pending`：主轮 done 发出后**先放 None 收主流**（不然 /chat/stream 要挂到插话轮读完），再按入队顺序
+  把没被吸收的各读一轮（CLI 自己另起的那一轮，不加任何前缀）、各自产出到各自的流、各自入账（U 的 ts = 发送时刻）。
+  主轮没收尾 / 读流异常 → 剩下的每条 error+done（`_fail_interject`），session 照旧关掉惰性重铸；loop 退出
+  `_finish_orphans` 也先收 pending。硬阈强铸排在 `_run_pending` 之后，天然「pending 非空时不铸」。
+- §6 风险对策做成**运行时自检**（不是启动探针）：`_interject_selfcheck`——收了尾的 chat 轮 hook#1 都没来记一次，连两轮
+  → `INTERJECT_OFF.add(cid)` 退回排队 + Bark；hook 来了清零。
+- 系统提示：`pipeline.interject_hint()` 只在闸开时进 `build_options`（chat_session 那份），说清那段英文 system 口吻是什么。
+- app（§4.5）：`StreamEvent` 加 `capability / interject / interjectPoint / merged`；`pumpOutbox` 在「后端收插话」时主轮不等
+  done（Task 起流），下一单若同角色有在飞的流 → 插话单：不沉底、不改 ts（后端账也按发送时刻记，两边按 ts 排序才同序）、
+  快照剔掉排队的后续单和 `isStreaming` 的半截气泡；`generateReply(bubbleIds:interject:)` 插话流不接管「正在输入」旗，
+  `interject` 事件给气泡挂小字「已送达，等他看到」（ChatView `interjectWaiting`），`merged` 收尾不产气泡；主流收到
+  `interject_point` → 当前气泡定稿 + 那条用户气泡挪到末尾、ts 打成现在（同 id）；流里来了正文 = CLI 另起了一轮，从那刻起当普通轮。
+  模拟器 BUILD SUCCEEDED，没连真后端跑。
+- 没做 / 待看：带文件块的插话照旧排队（没验）；主轮 finalize 写的 recent_window 不含被吸收的 U3（下一次请求的快照会盖掉，
+  只影响这一小段里的轮间隙重铸镜像）；§4.5「游戏中 outbox 插位」叠加的样子还没在模拟器看。
+  测试 `tests/test_interject.py`（13 条：纯函数 / translate / 弱检查 / hook / 整条链吸收·另起一轮·排队回退·快照对不上·
+  主轮死·hook 不来自动关闸）。**上电**：`.env` 写 `INTERJECT=cass`，装新包；看日志 `插话 … 被当前轮吸收 / CLI 另起一轮`。
+
 ---
 
 ## 6. 风险

@@ -153,6 +153,22 @@ def chat_tool_defer(char_id) -> bool:
     return bool(char_id) and char_id in {s.strip() for s in v.split(",") if s.strip()}
 
 
+# 轮内插话（PLAN_interject §4 / P2–P4）：TA 在他一轮没说完时发的话，直接写进在飞的聊天
+# session（CLI 在下一个工具边界吸收；没有边界就自己另起一轮）。"0" / 空 = 关：一切照旧排队；
+# "1" = 全角色；"cass" = 只这些角色（灰度先开一个，看一周重铸 / rescue 次数）。
+# 同时要 app 新包在请求头声明支持（X-Interject），两边都要有，旧包一行不变。
+INTERJECT = os.environ.get("INTERJECT", "0").strip()
+
+
+def interject_on(char_id) -> bool:
+    v = INTERJECT
+    if v in ("", "0", "false", "off"):
+        return False
+    if v in ("1", "true", "on", "all"):
+        return True
+    return bool(char_id) and char_id in {s.strip() for s in v.split(",") if s.strip()}
+
+
 # 问答卡（PLAN_chatui §3.5/U4）：AskUserQuestion 挂进 sdk 聊天 session（不进
 # allowed_tools → 每问一卡，can_use_tool 挂起等机主作答，updated_input 回填）。
 # 默认关，上电硬前置：iOS 问答卡先做出来——卡没人答只会白等一阵超时拒。

@@ -173,18 +173,30 @@ def _reply_bubbles(trace: dict, reply: str, user_ts) -> list[tuple[str, int]]:
     之后、未 trim；trim 后为空的气泡被删），done 的权威 reply 不覆盖任何一段；
     没切过段 → 单气泡存权威 reply。气泡 ts = 该段第一个字到达时刻，但不早于 TA 这条
     的 ts（手机和 Mac 的钟有偏差时，按 ts 排序才不会把回话排到问话前面），段与段单调不减。"""
-    out: list[tuple[str, int]] = []
+    return [(text, ts) for role, text, ts in _turn_entries(trace, reply, user_ts)
+            if role == "assistant"]
+
+
+def _turn_entries(trace: dict, reply: str, user_ts) -> list[tuple[str, str, int]]:
+    """一轮在账里落成的条目 [(role, text, ts)]（不含 TA 开头那条）：他的气泡按 _reply_bubbles
+    的口径；被吸收的插话（PLAN_interject §4.3）在 interject_point 处落一条 user——账的顺序
+    `U2, A·段1, U3(插话), A·段2` 和 app 屏幕一致；插话前一个字都没说（只调了工具）→ `U2, U3, A…`。
+    ts 单调不减，不早于 TA 开头那条。"""
+    out: list[tuple[str, str, int]] = []
     segs = trace.get("segments") or []
     if trace.get("saw_break"):
-        out = [(s["text"], int(s.get("ts") or 0)) for s in segs
-               if (s.get("text") or "").strip()]
+        for s in segs:
+            if s.get("interject"):
+                out.append(("user", s.get("text") or "", int(s.get("ts") or 0)))
+            elif (s.get("text") or "").strip():
+                out.append(("assistant", s["text"], int(s.get("ts") or 0)))
     elif (reply or "").strip():
-        out = [(reply, int((segs[0].get("ts") if segs else 0) or 0))]
-    fixed: list[tuple[str, int]] = []
+        out = [("assistant", reply, int((segs[0].get("ts") if segs else 0) or 0))]
+    fixed: list[tuple[str, str, int]] = []
     last = int(user_ts or 0)
-    for text, ts in out:
+    for role, text, ts in out:
         last = max(ts or int(time.time()), last)
-        fixed.append((text, last))
+        fixed.append((role, text, last))
     return fixed
 
 
@@ -299,6 +311,131 @@ class Turn:
     # 轮内填，轮尾和 new_msg 一起进账。
     absorbed: list = field(default_factory=list)
     out: asyncio.Queue = field(default_factory=asyncio.Queue)
+
+
+@dataclass
+class Interject:
+    """轮内插话（PLAN_interject §4.2，第 10 步）：TA 在他一轮没说完时发的话，不进 handle.queue，
+    直接 client.query() 写进在飞的 session。CLI 在下一个工具边界吸收（同一轮接着回，
+    这条流只收 interject + done{merged}）；没有边界就自己另起一轮（这条流收那一轮的回复）。
+    text＝发给 CLI 的串（`【时间】\\n原文`，配对串）；ledger_text＝入账原文（不带头）。
+    也是「一个请求恰好一个结局」：out 收 SSE，None 收尾。"""
+    rid: str
+    text: str
+    ledger_text: str
+    ts: int
+    finalize: Callable[[str, list], dict]
+    images: Optional[list] = None
+    prompt_id: Optional[str] = None      # UserPromptSubmit hook 给的；None=hook 还没来
+    absorbed: Optional[bool] = None      # True=被在飞轮吸收 / False=CLI 另起了一轮 / None=未定
+    closed: bool = False                 # 流收过尾（None 已放）
+    out: asyncio.Queue = field(default_factory=asyncio.Queue)
+
+
+# 插话的闸外闸：hook 两轮没来（CLI 内部行为变了，§6 风险）→ 这个角色本进程不再插话、退回排队 + Bark。
+INTERJECT_OFF: set[str] = set()
+INTERJECT_MAX_PENDING = 4      # 一轮里最多挂几条没结局的插话（再多退回排队）
+
+
+def _prompt_hook(handle: session_mgr.LoopHandle):
+    """UserPromptSubmit hook（PLAN_interject §4.2 吸收判定的主信号，P0-c 实证）：每次 query() 触发
+    一次，带 prompt_id。在飞轮自己的那次（hook#1）记下 pid；之后每次是一条插话的：pid 等于
+    在飞轮的 → 被吸收（排进 absorbed_q，_turn_events 在下一段文字前发 interject_point）；
+    新 pid → CLI 另起了一轮，归插话自己的流。同一串文字两条插话 hook 分不出哪条——按入队
+    顺序配（CLI FIFO 吸收，P0 tool2 实证）。不是在飞轮（醒来 / 泵 tick / 巩固）→ 什么都不记。"""
+    async def hook(hook_input, tool_use_id, context):
+        infl = handle.meta.get("inflight")
+        if not infl:
+            return {}
+        pid = str(hook_input.get("prompt_id") or "")
+        if infl.get("pid") is None:
+            infl["pid"] = pid
+            handle.meta["hook_miss"] = 0
+            return {}
+        for ij in infl["pending"]:
+            if ij.prompt_id is None:
+                ij.prompt_id = pid
+                ij.absorbed = (pid == infl["pid"])
+                if ij.absorbed:
+                    infl["absorbed_q"].append(ij)
+                print(f"[chat_loop] 插话 {ij.rid}：{'被当前轮吸收' if ij.absorbed else 'CLI 另起一轮'}"
+                      f"（char={handle.char_id}）", file=sys.stderr)
+                break
+        return {}
+    return hook
+
+
+def _close_interject(ij: Interject, *chunks: bytes) -> None:
+    """插话流收尾（幂等）：给的块逐个发，然后 None。"""
+    if ij.closed:
+        return
+    ij.closed = True
+    for c in chunks:
+        ij.out.put_nowait(c)
+    ij.out.put_nowait(None)
+
+
+def _fail_interject(ij: Interject) -> None:
+    """死了也要有结局（[[cassette-wake-gate-bug-class]] 第四例）：error+done，app 走 rescue。"""
+    _close_interject(ij, sse.sse({"type": "error", "content": "连接中断了，大模型那边出了点问题。"}),
+                     sse.sse({"type": "done"}))
+
+
+def _interject_fit(ledger: list[dict], history: list[dict], text_h: str) -> bool:
+    """插话到达时不判脏（session 在飞，快照必然缺在飞那段）；只做弱检查：快照去掉在飞轮
+    的那条 user 及其后面的东西，剩下的必须是账的尾巴（stale 也算）。对不上＝期间编辑 / 删过
+    → 退回排队，让下一个正常轮去判脏重铸。"""
+    idx = None
+    for i in range(len(history) - 1, -1, -1):
+        m = history[i]
+        if m.get("role") == "user" and _h(m.get("text") or "") == text_h:
+            idx = i
+            break
+    if idx is None:
+        return False
+    core = history[:idx]
+    tail = absorbable_tail(ledger, core)
+    if tail:
+        core = core[:len(core) - len(tail)]
+    return divergence(ts_sorted(ledger), ts_sorted(core)) != "dirty"
+
+
+async def _try_interject(handle: session_mgr.LoopHandle, hist_all: list[dict], rid: str,
+                         finalize: Callable, images: Optional[list],
+                         file_blocks: Optional[list]) -> Optional[Interject]:
+    """路由（§4.2）：同角色当前在飞的是 chat 轮（泵开着时由 TA 消息引起的也算）且 hook#1 已到
+    （之前来的会被 CLI 拼进首条，§1.1）、没在重铸、挂着的插话不超限、快照对得上账 → 写进
+    session。带文件块的没验过，照旧排队。任何一条不满足返回 None，调用方走 handle.queue。"""
+    cid = handle.char_id
+    if not config.interject_on(cid) or cid in INTERJECT_OFF or file_blocks:
+        return None
+    infl = handle.meta.get("inflight")
+    send = handle.meta.get("interject_send")
+    if (not infl or infl.get("pid") is None or send is None or handle.reopening
+            or len(infl["pending"]) >= INTERJECT_MAX_PENDING):
+        return None
+    if not _interject_fit(handle.meta.get("ledger") or [], hist_all[:-1], infl["text_h"]):
+        print(f"[chat_loop] 插话快照和账对不上，退回排队（char={cid}，rid={rid}）", file=sys.stderr)
+        return None
+    import pipeline
+    new = hist_all[-1]
+    now = int(time.time())
+    # 时间头进原文（10-29 机主拍板）：只这两行，不带「距离上一条」/ pending / PR 行——那些是
+    # 新起一轮的注入才有的。形状和 build_injection 的时间头 / _stamp_times 的锚行同形。
+    ij = Interject(rid=rid, text=f"【{pipeline.stamp_str(now)}】\n{new['text']}",
+                   ledger_text=new["text"], ts=int(new.get("ts") or now),
+                   finalize=finalize, images=images)
+    infl["pending"].append(ij)
+    try:
+        await send(ij)
+    except Exception as e:
+        print(f"[chat_loop] 插话写不进 session，退回排队（char={cid}）: {e}", file=sys.stderr)
+        if ij in infl["pending"]:
+            infl["pending"].remove(ij)
+        return None
+    ij.out.put_nowait(sse.sse({"type": "interject", "into": infl["rid"]}))
+    print(f"[chat_loop] 插话 {rid} 已写进在飞轮 {infl['rid']}（char={cid}）", file=sys.stderr)
+    return ij
 
 
 # ---------- options ----------
@@ -610,6 +747,8 @@ def build_options(char_id: str, catalog: Optional[list] = None,
         parts.append(mb)
     parts += [pipeline.pronoun_hint(), pipeline._chat_next_hint(), _wake_contract(),
               pipeline.turn_frame_hint()]
+    if config.interject_on(char_id):
+        parts.append(pipeline.interject_hint())     # 插话的英文壳是什么（PLAN_interject P2）
     sb = pipeline.sticker_block(catalog)
     if sb:
         parts.append(sb)
@@ -726,9 +865,17 @@ def build_options(char_id: str, catalog: Optional[list] = None,
         env=env,
         include_partial_messages=True,   # 逐字增量：text 事件靠它
         # max_turns 不设：-p 路从来没限过，聊天轮的工具链长度由模型自己收
-        hooks=({"PreToolUse": [HookMatcher(hooks=[_wake_gate(handle)])]}
-               if handle is not None else None),
+        hooks=_hooks_for(handle, char_id),
     )
+
+
+def _hooks_for(handle: Optional[session_mgr.LoopHandle], char_id: str) -> Optional[dict]:
+    if handle is None:
+        return None
+    hooks: dict = {"PreToolUse": [HookMatcher(hooks=[_wake_gate(handle)])]}
+    if config.interject_on(char_id):
+        hooks["UserPromptSubmit"] = [HookMatcher(hooks=[_prompt_hook(handle)])]
+    return hooks
 
 
 # ---------- 注入正文（易变段；稳定段在系统提示里） ----------
@@ -1032,6 +1179,14 @@ async def _turn_events(client, handle: session_mgr.LoopHandle,
             print("[chat_loop] 引擎消息流断了（session 按死处理）", file=sys.stderr)
             yield {"type": "__idle_timeout__"}
             return
+        # 插话被吸收（hook 在工具边界触发、先于下一条消息）：在它之后的第一段文字前往原流发
+        # interject_point（账在这儿插 U3，app 把气泡挪到这儿），插话自己的流 done{merged} 收尾。
+        infl = handle.meta.get("inflight")
+        while infl and infl.get("absorbed_q"):
+            ij = infl["absorbed_q"].pop(0)
+            now = int(time.time())
+            yield {"type": "interject_point", "rid": ij.rid, "text": ij.ledger_text, "ts": now}
+            _close_interject(ij, sse.sse({"type": "done", "merged": infl["rid"]}))
         if isinstance(msg, StreamEvent):
             yield {"type": "stream_event", "event": msg.event}
         elif isinstance(msg, AssistantMessage):
@@ -1911,6 +2066,77 @@ async def run(handle: session_mgr.LoopHandle, *,
     ledger: list[dict] = []
     handle.meta["ledger"] = ledger    # 测试/观测窗口
 
+    async def _send_interject(ij: Interject) -> None:
+        """插话写进在飞的 session（PLAN_interject §4.2）：client 是 run() 的局部变量，stream_turn
+        只拿得到 handle，所以挂一个闭包在 meta 上；_open_session 换 client 这闭包自然跟着读新的。
+        原文一个字都不加（吸收判定按原文配 queued_command）。"""
+        if client is None:
+            raise RuntimeError("session 没开")
+        content: list[dict] = [{"type": "text", "text": ij.text}]
+        for img in (ij.images or []):
+            content.append({"type": "image",
+                            "source": {"type": "base64", "media_type": img.media_type,
+                                       "data": img.data}})
+
+        async def _payload():
+            yield {"type": "user", "message": {"role": "user", "content": content},
+                   "parent_tool_use_id": None}
+        await client.query(_payload())
+
+    handle.meta["interject_send"] = _send_interject
+
+    async def _run_pending(ok: bool) -> bool:
+        """主轮收尾后（§4.2 轮尾）：pending 里被吸收的已在读流时收了尾；其余每条对应 CLI 接下来
+        自己起的一轮——按入队顺序各读一轮、各自产出到各自的流、各自入账。主轮没收尾（ok False）
+        → 每条 error+done（rescue 兜）。读完才回主循环。返回更新后的 ok。"""
+        infl = handle.meta.get("inflight")
+        if not infl:
+            return ok
+        while infl["pending"]:
+            ij: Interject = infl["pending"].pop(0)
+            if ij.absorbed:
+                # 吸收了但还没来得及在流里发 interject_point（hook 落在最后一条消息之后）：
+                # 他看见了，这条流按并入收尾；账里没它，下次发送比对会把它当编辑过 → 重铸自愈。
+                _close_interject(ij, sse.sse({"type": "done", "merged": infl["rid"]}))
+                continue
+            if not ok or client is None:
+                _fail_interject(ij)
+                continue
+            infl["rid"], infl["pid"], infl["text_h"] = ij.rid, ij.prompt_id, _h(ij.ledger_text)
+            handle.meta["turn_kind"] = "chat"
+            flags: dict = {}
+            captured: dict = {}
+            trace: dict = {}
+
+            def _fin(reply: str, stored: list, _ij=ij, _cap=captured) -> dict:
+                payload = _ij.finalize(reply, stored)
+                _cap["reply"] = payload.get("reply") or reply
+                return payload
+
+            try:
+                async for chunk in sse.translate_events(
+                        _turn_events(client, handle, flags), _fin, trace=trace):
+                    ij.out.put_nowait(chunk)
+            except asyncio.CancelledError:
+                _fail_interject(ij)
+                raise
+            except Exception as e:
+                print(f"[chat_loop] 插话轮异常（rid={ij.rid}）: {e}", file=sys.stderr)
+                _fail_interject(ij)
+                ok = False
+                continue
+            _close_interject(ij)
+            if captured.get("reply"):
+                ledger.append({"r": "user", "h": _h(ij.ledger_text), "ts": ij.ts})
+                for role, text, ts in _turn_entries(trace, captured["reply"], ij.ts):
+                    ledger.append({"r": role, "h": _h(text), "ts": ts})
+                _persist_ledger(handle.char_id, sid, ledger)
+            else:
+                print(f"[chat_loop] 插话轮没收到回复（rid={ij.rid}，flags={flags}）",
+                      file=sys.stderr)
+                ok = False
+        return ok
+
     async def _open_session(history: list[dict], catalog):
         """开/重开 session 的唯一入口。泵开着时（§4.1，10-29 第 4 步）不管哪条路
         触发的重开，一律自己带上：① 近 K 张图回填（只进铸造输入、不进账的渲染
@@ -2438,6 +2664,11 @@ async def run(handle: session_mgr.LoopHandle, *,
                     yield {"type": "user",
                            "message": {"role": "user", "content": content},
                            "parent_tool_use_id": None}
+                if turn.kind != "wake" and config.interject_on(handle.char_id):
+                    # 在飞登记（PLAN_interject §4.2）：query 之前挂上，hook#1 才落得到它。
+                    handle.meta["inflight"] = {"rid": turn.rid, "pid": None,
+                                               "text_h": _h(turn.new_msg["text"]),
+                                               "pending": [], "absorbed_q": []}
                 await client.query(_payload())
 
                 flags: dict = {}
@@ -2478,10 +2709,18 @@ async def run(handle: session_mgr.LoopHandle, *,
                                    "ts": u_ts})
                     # 按气泡记（P1）：工具切段的回复在 app 里是好几个气泡，账一条
                     # 拼接回复的话下一条必判脏。
-                    for text, ts in _reply_bubbles(trace, captured["reply"], u_ts):
-                        ledger.append({"r": "assistant", "h": _h(text), "ts": ts})
+                    # 被吸收的插话在 interject_point 处落一条 user（PLAN_interject §4.3）。
+                    for role, text, ts in _turn_entries(trace, captured["reply"], u_ts):
+                        ledger.append({"r": role, "h": _h(text), "ts": ts})
                     _persist_ledger(handle.char_id, sid, ledger)
                     ok = True
+                if turn.kind != "wake" and handle.meta.get("inflight"):
+                    _interject_selfcheck(handle, ok)
+                    # 主轮的流先收尾（done 已发；None 让 /chat/stream 立刻结束），再读没被吸收的
+                    # 插话各自的那一轮——不然主流要挂到插话轮读完。finally 里再放一个 None 无害。
+                    turn.out.put_nowait(None)
+                    ok = await _run_pending(ok)       # §4.2 轮尾
+                    handle.meta.pop("inflight", None)
                 if ok:
                     await _cache_tool_tokens(client, handle)   # §6：首轮之后拍一次，之后不拍
                 if (ok and not handle.meta.get("game_pump")
@@ -2530,6 +2769,10 @@ async def run(handle: session_mgr.LoopHandle, *,
                 _release_wake_slot(handle, turn)
                 handle.meta.pop("turn_kind", None)   # 门的默认态=放行（巩固轮也走默认）
                 handle.meta.pop("turn_ts", None)     # 醒来轮的 started_ts（§6 锚点），随轮走
+                # 轮异常 / 取消没走到 _run_pending：挂着的插话也要有结局
+                infl = handle.meta.pop("inflight", None)
+                for ij in (infl or {}).get("pending") or []:
+                    _fail_interject(ij)
                 if not ok:
                     if turn.on_dead is not None:
                         try:
@@ -2555,6 +2798,7 @@ async def run(handle: session_mgr.LoopHandle, *,
         why = handle.stop_reason or "unknown-exit"
         print(f"[chat_loop] loop 退出：char={handle.char_id} reason={why}",
               file=sys.stderr)
+        handle.meta.pop("interject_send", None)
         _finish_orphans(handle, why)
         try:
             await _pump_close(f"loop-exit: {why}")   # 拿着游戏时 loop 死了：锁/账别悬着
@@ -2582,6 +2826,10 @@ def _finish_orphans(handle: session_mgr.LoopHandle, why: str) -> None:
     口径同轮内异常：error+done+None，醒来轮走 on_dead（记 error 心流+冷却）。
     不往新 loop 转投：chat 轮的窗口已过时、醒来轮重跑会双投，app 侧 rescue 会提示重发。"""
     n = 0
+    infl = handle.meta.pop("inflight", None)
+    for ij in (infl or {}).get("pending") or []:
+        n += 1
+        _fail_interject(ij)
     while True:
         try:
             turn = handle.queue.get_nowait()
@@ -2686,21 +2934,59 @@ async def stream_turn(*, char_id: str, rid: str, messages: list[dict],
                       injection: str, finalize: Callable,
                       images: Optional[list] = None,
                       file_blocks: Optional[list] = None,
-                      catalog: Optional[list] = None) -> AsyncIterator[bytes]:
+                      catalog: Optional[list] = None,
+                      interject_ok: bool = False) -> AsyncIterator[bytes]:
     """sse.stream_claude 的常驻版替身：塞一轮进该角色的聊天 session，产出 SSE 字节。
     messages=请求带来的完整权威窗口（**含**最后那条新消息，口径同 /chat）。
-    必须在事件循环上调（/chat/stream 的 gen 就在循环上）。"""
+    interject_ok=app 声明支持插话（X-Interject 请求头）：同角色有在飞的 chat 轮时直接写进
+    session（PLAN_interject §4.2），否则照旧排队。必须在事件循环上调（/chat/stream 的 gen 就在循环上）。"""
     hist_all = norm_history(messages)
     if not hist_all:
         raise ValueError("空消息列表")
+    handle = _ensure_loop(char_id)
+    _yield_wake_cards(char_id)      # 醒来轮挂着的卡让路（10-29）
+    ij = (await _try_interject(handle, hist_all, rid, finalize, images, file_blocks)
+          if interject_ok else None)
+    if ij is not None:
+        while True:
+            chunk = await ij.out.get()
+            if chunk is None:
+                return
+            yield chunk
+        return
     turn = Turn(rid=rid, history=hist_all[:-1], new_msg=hist_all[-1],
                 injection=injection, finalize=finalize, images=images,
                 file_blocks=file_blocks, catalog=catalog)
-    handle = _ensure_loop(char_id)
-    _yield_wake_cards(char_id)      # 醒来轮挂着的卡让路（10-29）
     handle.queue.put_nowait(turn)   # 同一事件循环上，不需要过桥
     while True:
         chunk = await turn.out.get()
         if chunk is None:
             return
         yield chunk
+
+
+def interject_capable(char_id: str) -> bool:
+    """这个角色这会儿收不收插话（/chat/stream 响应头 X-Interject 告诉 app；app 据此才并发发送）。"""
+    return (config.interject_on(char_id) and char_id not in INTERJECT_OFF
+            and config.chat_engine(char_id) == "sdk" and char_id not in SDK_CHAT_OFF)
+
+
+def _interject_selfcheck(handle: session_mgr.LoopHandle, ok: bool) -> None:
+    """§6 风险对策（运行时版）：hook 是 CLI 内部行为。一个收了尾的 chat 轮 hook#1 都没来 → 记一次；
+    连着两轮没来 → 这个角色本进程关掉插话退回排队 + Bark，别静默。来了就清零（hook 里清）。"""
+    infl = handle.meta.get("inflight") or {}
+    if not ok or infl.get("pid") is not None:
+        return
+    n = int(handle.meta.get("hook_miss", 0)) + 1
+    handle.meta["hook_miss"] = n
+    print(f"[chat_loop] 插话 hook 没触发（char={handle.char_id}，第 {n} 次）", file=sys.stderr)
+    if n >= 2 and handle.char_id not in INTERJECT_OFF:
+        INTERJECT_OFF.add(handle.char_id)
+        print(f"[chat_loop] 插话 hook 连两轮没来，{handle.char_id} 退回排队（重启前不再插话）",
+              file=sys.stderr)
+        try:
+            from notify import bark_push_bg
+            bark_push_bg(f"插话的 hook 没触发，{handle.char_id} 已退回排队（CLI 行为变了？）",
+                         title="cassette 后端")
+        except Exception:
+            pass

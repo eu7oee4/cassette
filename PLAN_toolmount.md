@@ -525,7 +525,9 @@ SDK 升级会连带换掉它自带的 CLI（10-29 晚起 2.1.310，与 PATH 同�
    `ToolSearch → tool_reference`；锚点两条规则（`_anchor_index`，闹钟记录也补了 `turn_kind`/`turn_ts`）；forge 的
    tools 槽 result 允许块列表 + ToolSearch 补 `toolUseResult`；token 表首轮之后拍一次缓存。§4.1 ③ 同批接上。
    测试 `tests/test_toolmount_step9.py`（24 条），全套 756 绿（jobhunt 旧账）。
-10. **插话**（interject P2–P4，含泵开着时的 chat 轮）。
+10. ~~**插话**（interject P2–P4，含泵开着时的 chat 轮）~~ **P2 引擎 + P3 SSE/app 已落码（10-30，未重启、app 未装真机；
+    施工记录在 PLAN_interject §5 末）**：闸 `INTERJECT`（默认 0，上电先写 cass）+ app 请求头 `X-Interject`，
+    两边都要有。P4 灰度＝上电后看一周重铸 / rescue 次数。
 11. **阈值复核**：基线降 ~28k 后 `CHAT_SOFT/HARD/PANIC_TOKENS` 是否下调（量的是含 schema 的
     真实上下文），看一周 usage 再定。
 12. 顺手修（§7）。
