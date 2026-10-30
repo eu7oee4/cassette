@@ -1034,11 +1034,12 @@ def tool_search_on(context: str, char_id: Optional[str] = None) -> bool:
     """这条路要不要开工具延迟。chat_session 按角色问 config.chat_tool_defer，其余看
     TOOL_SEARCH_CONTEXTS。
 
-    ⚠️ base_claude_args 和 _subprocess_env **必须拿同一个 context 问这里**，两边一致才有效：
-    只把 ToolSearch 加进白名单、不给环境变量 = 白搭一份 schema 进去；
-    只给环境变量、不把 ToolSearch 加进白名单 = 延迟静默不生效（CLI 退回全量 schema，
-    日志里那句 "ToolSearchTool is not available" 是唯一线索）。两种都不报错，所以写死在
-    一个判据里，别在调用点各判一次。"""
+    延迟开不开**只看 ToolSearch 进没进白名单**，ENABLE_TOOL_SEARCH 环境变量不影响——
+    CLI 2.1.310 两条路都实测过（sdk 路 PLAN_toolmount §1.4；`-p` 路 tools/mcp_probe_defer_p.py，
+    10-30：挂 ToolSearch 不管给不给环境变量都是 4.6k，不挂都是 27.9k）。
+    不挂 ToolSearch 时 CLI 静默退回全量 schema，日志里那句 "ToolSearchTool is not available"
+    是唯一线索。_subprocess_env 还在给环境变量只是旧版习惯（早期 CLI 两者要凑齐），
+    留着无害；base_claude_args 和它仍然拿同一个 context 问这里，别在调用点各判一次。"""
     if context == SESSION_CONTEXT:
         return config.chat_tool_defer(char_id)
     return context in TOOL_SEARCH_CONTEXTS
@@ -1372,7 +1373,8 @@ def neutral_cwd() -> str:
 def _subprocess_env(context: str = "chat") -> dict:
     env = os.environ.copy()
     env.pop("ANTHROPIC_API_KEY", None)   # 强制走 CLI 登录态，不走 API 计费
-    # ⚠️ context 必须和同一次调用的 base_claude_args 传的一致（见 tool_search_on 的注释）。
+    # context 跟同一次调用的 base_claude_args 传的一致。2.1.310 实测这个环境变量不决定延迟
+    # （只看 ToolSearch 挂没挂，见 tool_search_on 的注释），留着是旧版习惯。
     if tool_search_on(context):
         env["ENABLE_TOOL_SEARCH"] = "true"
     return env

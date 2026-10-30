@@ -392,13 +392,19 @@ Opus 稳定撞安全误报（§1.3）。2.1.310 复核：game 吃 toggle 且 on 
 
 ## 7. 顺手修（注释 / 文档与代码对不上的）
 
-- `pipeline.tool_search_on` docstring：「只挂 ToolSearch 不给环境变量 = 延迟静默不生效」
-  ——SDK 路（自带 2.1.251）下相反（§1.4）。`-p` 路（2.1.310）没测，改注释前先用探针补一腿。
-- `chat_loop.py:1380`：「改文件=系统提示变=判脏触发重铸」——判脏只比对话历史，不比系统
-  提示。§5.2 的「配置变了」标记落地后改写成真话。
-- `chat_loop.py:536`：「排在最尾是有意的」——§3.3 做完自然成立，核一眼。
-- README：插件「开关即时生效」在 sdk 路不成立（§5.2 落地后才成立）；架构 / Code 模式 /
-  醒来四段协议几节整体过时，另起一批改。
+- ~~`pipeline.tool_search_on` docstring：「只挂 ToolSearch 不给环境变量 = 延迟静默不生效」
+  ——SDK 路（自带 2.1.251）下相反（§1.4）。`-p` 路（2.1.310）没测，改注释前先用探针补一腿。~~
+  **10-30 补了 `tools/mcp_probe_defer_p.py`（四格，不调模型）**：`-p` 路拿 wake 的真实参数，
+  挂 ToolSearch 不管给不给 `ENABLE_TOOL_SEARCH` 都是 4,652 tok（74 个工具全延迟），不挂都是
+  27,882——跟 sdk 路同一结论，环境变量不决定延迟。docstring 和 `_subprocess_env` 的注释改成真话，
+  环境变量留着不删（无害，旧版习惯）。
+- ~~`chat_loop.py:1380`：「改文件=系统提示变=判脏触发重铸」~~ 第 8 步做「配置变了」时那段注释
+  已经没了，10-30 核过 chat_loop 里再无此说法。
+- ~~`chat_loop.py:536`：「排在最尾是有意的」~~ 第 6 步已改写（现在 755 行附近，注明 §3.3 第二刀后
+  后面不再追加），10-30 核过属实。
+- README：插件「开关即时生效」（README.zh-CN.md）第 8 步落地后在 sdk 路也成立了（拨开关 →
+  下个轮边界 toggle / 60s 看守重铸），那句不用动；架构 / Code 模式 / 醒来四段协议几节整体过时，
+  **仍另起一批改，不在合排里**。
 
 ## 8. 探针工具（留作维护工具，`server/tools/`）
 
@@ -407,6 +413,7 @@ Opus 稳定撞安全误报（§1.3）。2.1.310 复核：game 吃 toggle 且 on 
 | `mcp_probe.py` | 开场 pending 时间线、挂载对账、各部分 token、toggle 名单变化 | `--ask` 时 |
 | `mcp_probe_stdio.py` | 上面几个用的 stdio 探针 server（probe_ping / probe_pinned / probe_echo） | — |
 | `mcp_probe_defer.py` | alwaysLoad 按 server / 按工具、ToolSearch 是延迟开关 | `--ask` 时 |
+| `mcp_probe_defer_p.py` | 同一问题在 `-p` 路（wake.py 那种子进程）：ToolSearch × ENABLE_TOOL_SEARCH 四格 | 否 |
 | `forge_toolref_probe.py` | 铸进 tool_reference 后 resume 能否一次传对参数；`--mode single\|multi\|ghost` | `--ask` 时 |
 | `mcp_probe_reconnect.py` | `reconnect_mcp_server` 之后 Opus 调用撞不撞误报、已加载集清不清 | 是 |
 | `mcp_probe_ombre_dead.py` | Ombre 指到死端口时开场 status / reconnect 异常 / 其余 server 对账 | `--ask` 时 |
@@ -530,7 +537,8 @@ SDK 升级会连带换掉它自带的 CLI（10-29 晚起 2.1.310，与 PATH 同�
     两边都要有。P4 灰度＝上电后看一周重铸 / rescue 次数。
 11. **阈值复核**：基线降 ~28k 后 `CHAT_SOFT/HARD/PANIC_TOKENS` 是否下调（量的是含 schema 的
     真实上下文），看一周 usage 再定。
-12. 顺手修（§7）。
+12. ~~顺手修（§7）~~ **已做（10-30，未重启）**：`-p` 路延迟探针补齐并改注释，另两条注释核过已在
+    第 6 / 8 步顺带修掉，README 那句现已成立；README 整体过时的几节仍另起一批。
 
 > 派活提 PR（PLAN_delegate，10-29 立稿）独立于上面各步，可插在任意位置；建议排在第 6 步（固定菜单）之后，
 > 菜单块一次写好。
@@ -542,7 +550,8 @@ SDK 升级会连带换掉它自带的 CLI（10-29 晚起 2.1.310，与 PATH 同�
 
 - 「配置全集」里插件开关算配置（菜单跟着变、触发重铸）还是算运行时（菜单不变、只告知）？
   本稿按「算配置」写。
-- §6 的 token 预算 8k、容差沿用闹钟的 120s，是否合适。
+- §6 的 token 预算 8k（`TOOL_LOAD_BUDGET_TOKENS`）、锚点容差（第 9 步实做：chat 轮早侧 5s 钟差 /
+  晚侧 600s，wake 轮精确，旧闹钟记录 120s）是否合适——上电跑一周再看。
 - ~~缺席告知的文案表（每个 server 一句）由机主写还是先给草稿。~~ **10-29 我给草稿、机主定稿**，在 `pipeline.ABSENT_NOTES`。
 - ~~醒来弹卡挂着时整条 session 被占：TA 的消息到了让路（已做）；他自己的下一次醒来（闹钟 / 来信）排在队里等卡——
   要不要也让路？~~ **10-30 机主拍板：也让路，并进第 7 步**：醒来轮的卡两种让路——TA 发了新消息 / 他自己的下一次醒来到了，
