@@ -2,7 +2,7 @@ import SwiftUI
 
 /// 底部输入栏：➕(附件) + 笑脸(表情包)按钮 + 文字输入框 + 发送按钮。
 /// 生成中不禁用（09-05）：想说就说，消息进 app 侧 outbox 排队串行发——
-/// 「正在生成」的反馈归 ThinkingNoteRow 三个点小字，不归这排按钮。
+/// 「正在生成」的反馈归 TypingBubbleRow 三个点气泡，不归这排按钮。
 struct InputBar: View {
     @Binding var text: String
     var stickersActive: Bool = false  // 表情面板是否已展开，用来高亮笑脸按钮
@@ -21,7 +21,7 @@ struct InputBar: View {
             Button(action: onAttach) {
                 Image(systemName: "plus.circle")
                     .font(.system(size: 22, weight: .regular))
-                    .foregroundStyle(Color.userAccent)
+                    .foregroundStyle(Color.secondary)   // 别写 .secondary：Button 里它会跟全局 tint 变棕
                     .frame(width: 32, height: 32)
             }
 
@@ -29,7 +29,7 @@ struct InputBar: View {
             Button(action: onStickers) {
                 Image(systemName: stickersActive ? "face.smiling.inverse" : "face.smiling")
                     .font(.system(size: 22, weight: .regular))
-                    .foregroundStyle(Color.userAccent)
+                    .foregroundStyle(stickersActive ? Color.chatInk : Color.secondary)
                     .frame(width: 32, height: 32)
             }
 
@@ -57,13 +57,16 @@ struct InputBar: View {
                         .fill(Color(.systemGray6))
                 )
 
-            // 发送按钮：只看有没有内容，不看生成状态
+            // 发送按钮：只看有没有内容，不看生成状态。黑底白箭头（10-08：功能色统一黑白）
             Button(action: onSend) {
-                Image(systemName: "chevron.up.circle.fill")
-                    .font(.system(size: 30))
-                    .foregroundStyle(canSend ? Color.userAccent : Color(.systemGray3))
+                Image(systemName: "arrow.up")
+                    .font(.system(size: 15, weight: .bold))
+                    .foregroundStyle(Color.onChatInk)
+                    .frame(width: 32, height: 32)
+                    .background(Circle().fill(canSend ? Color.chatInk : Color(.systemGray4)))
             }
             .disabled(!canSend)
+            .animation(.easeOut(duration: 0.15), value: canSend)
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
@@ -83,7 +86,7 @@ struct PendingFilesBar: View {
                     HStack(spacing: 6) {
                         Image(systemName: "doc.fill")
                             .font(.system(size: 14))
-                            .foregroundStyle(Color.userAccent)
+                            .foregroundStyle(Color.secondary)
                         Text(f.name).font(.footnote).lineLimit(1)
                         Button { onRemove(idx) } label: {
                             Image(systemName: "xmark.circle.fill")

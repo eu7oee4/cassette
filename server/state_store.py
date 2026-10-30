@@ -286,18 +286,52 @@ def outbox_append_once(item: dict, dedupe_key: str, origin: str, look_back: int 
         return True
 
 
-def outbox_pending() -> list[dict]:
-    return [x for x in read_outbox() if not x.get("delivered")]
+# 按设备记 ack（10-13）：以前一个全局 delivered，谁先 ack 谁拿走——Mac 上开着的模拟器
+# 连吞了五天 Cassius 的醒来消息，手机只收到 Bark。现在每台设备（app 带 X-Device 头；
+# 旧包不带 = "legacy" 算一台）各领各的：acked_by 记谁领过，delivered 保留成「至少一台
+# 领过」（_stale_depth 和 7 天清理照旧用它）。
+# 设备首次露面登记 first_seen：别人已领走的旧条目只发给 first_seen 之后才产生的——否则
+# 新装的模拟器 / 升级后第一次带头的手机会把 7 天内的历史整批再拉一遍（PR 系统行不去重）。
+# 没人领过的条目照旧谁来都给。
+OUTBOX_DEVICES_PATH = STATE_DIR / "outbox_devices.json"
+LEGACY_DEVICE = "legacy"
 
 
-def outbox_ack(ids: list[str]) -> None:
+def _norm_device(device: Optional[str]) -> str:
+    d = (device or "").strip()[:64]
+    return d if d and all(c.isalnum() or c in "-_." for c in d) else LEGACY_DEVICE
+
+
+def _device_first_seen(device: str, now: int) -> int:
+    """调用方持 _OUTBOX_LOCK。没登记过的设备当场登记成 now。"""
+    devs = _read_json(OUTBOX_DEVICES_PATH, {})
+    if device not in devs:
+        devs[device] = now
+        _write_json(OUTBOX_DEVICES_PATH, devs)
+    return int(devs[device])
+
+
+def outbox_pending(device: Optional[str] = None) -> list[dict]:
+    dev = _norm_device(device)
+    with _OUTBOX_LOCK:
+        first_seen = _device_first_seen(dev, int(time.time()))
+        items = read_outbox()
+    return [x for x in items
+            if dev not in (x.get("acked_by") or [])
+            and (not x.get("delivered") or int(x.get("ts", 0)) >= first_seen)]
+
+
+def outbox_ack(ids: list[str], device: Optional[str] = None) -> None:
     idset = set(ids)
+    dev = _norm_device(device)
     now = int(time.time())
     with _OUTBOX_LOCK:
         items = read_outbox()
         for x in items:
             if x.get("id") in idset:
                 x["delivered"] = True
+                if dev not in (by := x.setdefault("acked_by", [])):
+                    by.append(dev)
         # 顺手清理：已送达且超过 7 天的条目删掉，别让 outbox.json 永远变大。
         items = [x for x in items
                  if not x.get("delivered") or now - int(x.get("ts", 0)) < 7 * 86400]
@@ -415,6 +449,52 @@ def read_alarm_calls(char_id: Optional[str] = None) -> list[dict]:
         return []
     rows.sort(key=lambda r: int(r.get("ts", 0)))
     return rows
+
+
+# PLAN_toolmount §6：延迟工具的「最后接触」账。{全名: {"ts", "turn_kind", "turn_ts"}}——
+# 取到（ToolSearch 的 tool_reference）和用到（tool_use）都算接触，只记最后一次：
+# 游戏工具取在 game_start 后、之后一直在用，按「哪天取的」挂，一局玩久了那轮滚出窗口，
+# 之后每次重铸都得重取。重铸时 _merge_tool_loads 按它把用法（ToolSearch→tool_reference）
+# 铸回最后接触的那一轮。账只保留最近 TOOL_TOUCH_CAP 条，再老的本来也铸不回去（窗口外）。
+_TOUCH_LOCK = threading.Lock()
+TOOL_TOUCH_CAP = 64
+
+
+def _tool_touch_path(char_id: Optional[str] = None) -> Path:
+    return _char_path("tool_touch.json", char_id)
+
+
+def read_tool_touch(char_id: Optional[str] = None) -> dict:
+    try:
+        data = json.loads(_tool_touch_path(char_id).read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def touch_tools(names, char_id: Optional[str] = None, *, ts: Optional[int] = None,
+                turn_kind: str = "chat", turn_ts: int = 0) -> None:
+    """记一次接触（一批名字共用一个 ts / 轮来源）。失败静默：留底是给重铸锦上添花的。"""
+    names = [n for n in (names or []) if n]
+    if not names:
+        return
+    try:
+        with _TOUCH_LOCK:
+            data = read_tool_touch(char_id)
+            now = int(ts or time.time())
+            for n in names:
+                data[n] = {"ts": now, "turn_kind": turn_kind or "chat",
+                           "turn_ts": int(turn_ts or 0)}
+            if len(data) > TOOL_TOUCH_CAP:
+                keep = sorted(data.items(), key=lambda kv: int(kv[1].get("ts") or 0))
+                data = dict(keep[-TOOL_TOUCH_CAP:])
+            p = _tool_touch_path(char_id)
+            p.parent.mkdir(parents=True, exist_ok=True)
+            tmp = p.with_suffix(".json.tmp")
+            tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+            os.replace(tmp, p)
+    except Exception:
+        pass
 
 
 def read_chat_image(sha: str, char_id: Optional[str] = None) -> Optional[bytes]:

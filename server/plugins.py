@@ -391,6 +391,12 @@ REGISTRY: dict[str, dict] = {
     # （server/plugins/galatea/，手放的目录商店里照样列出、开关和挂载都正常，只是
     # 装不了也更新不了）。跑稳了再开仓、进 registry 钉 commit 发版。
     # 宿主侧该配的都配好了：WAKE_TOGGLEABLE / WAKE_TOOL_EXCLUDE / PLUGIN_ENV / 能力菜单。
+    #
+    # ⚠️ notion（Notion 读写）**故意还不在这儿**：2026-09-14 先以本地开发副本跑
+    # （server/plugins/notion/）。跑稳了再开仓、进 registry 钉 commit 发版。
+    # 宿主侧接线：characters.notion_conf（**只认 char.json 的 notion.token，没有 env
+    # 兜底**）+ PLUGIN_ENV / PLUGIN_GATE（没 token 的角色整个不挂）+ 两份能力菜单。
+    # 醒来那条路照挂、且能写（机主拍板）：不进 NO_WAKE_PLUGINS / WAKE_TOGGLEABLE。
 }
 
 _NAME_RE = re.compile(r"^[a-z0-9_-]{1,40}$")
@@ -650,6 +656,11 @@ def _browser_env(cid: str) -> dict:
     return {"CASSETTE_BROWSER_MCP_URL": characters.browser_conf(cid)["MCP_URL"]}
 
 
+def _notion_env(cid: str) -> dict:
+    import characters
+    return {"CASSETTE_NOTION_TOKEN": characters.notion_conf(cid)["TOKEN"]}
+
+
 # 插件专属接线：按角色下发给它的 stdio 子进程（插件名 → 一个 cid ↦ env 的函数）。
 #
 # 什么该进这儿：**账号/身份类的接线**——同一个插件替不同角色干活时，用的是不同的号。
@@ -659,14 +670,18 @@ def _browser_env(cid: str) -> dict:
 # ⚠️ **值为空也要照发**：config 里的 env 是**合并且盖得过**继承值（2026-08-15 实测两轮），
 # 而 .env 会被 dotenv 灌进后端进程环境、一路继承给每个插件子进程。不发空串的话，
 # 一个没配花园的角色会**静默继承 .env 里别人的 token** —— 那正是这个钩子要防的事。
-PLUGIN_ENV: dict = {"galatea": _galatea_env, "browser": _browser_env}
+PLUGIN_ENV: dict = {"galatea": _galatea_env, "browser": _browser_env,
+                    "notion": _notion_env}
 
 # 插件的按角色**挂载前提**（比归属更细的一道门）：钩子返回 False 就整个不挂。
 # browser：接线是空串的角色（char.json 没写 browser.mcp_url 的非默认角色）不挂——
 # 壳拿到空 env 会退到它自己的默认 3002，那等于**静默用别人的浏览器身份**上网，
 # 正是一人一个要拆掉的事故面。宁可工具不出现（商店开关开着也不挂，同独占插件
 # 不归属时的行为），也别让它带着别人的登录态出门。
-PLUGIN_GATE: dict = {"browser": lambda cid: bool(_browser_env(cid)["CASSETTE_BROWSER_MCP_URL"])}
+# notion：同理——集成 token 决定「看得见哪些页面、Notion 的编辑记录里是谁」，
+# 没配 token 的角色不挂（characters.notion_conf 也不给 env 兜底，两道一起）。
+PLUGIN_GATE: dict = {"browser": lambda cid: bool(_browser_env(cid)["CASSETTE_BROWSER_MCP_URL"]),
+                     "notion": lambda cid: bool(_notion_env(cid)["CASSETTE_NOTION_TOKEN"])}
 
 
 def mounted(context: str = "chat", char_id=None) -> tuple[Optional[str], list[str]]:
@@ -677,7 +692,23 @@ def mounted(context: str = "chat", char_id=None) -> tuple[Optional[str], list[st
     认不出的 context 一律按 chat 处理——多挂比少挂容易被发现，静默少挂会让人以为工具坏了。
     独占插件只挂给归属角色：别的角色开关开着也跳过——那份资源不是它的。判据是
     plugin_owned_by（它吃的**每一样**资源都得归你），不是单看插件名。"""
-    cfg_path = _mcp_config_path(context, char_id)
+    cfg, tools, _ = _mount(context, char_id, include_disabled=False)
+    return cfg, tools
+
+
+def mounted_all(char_id=None) -> tuple[Optional[str], list[str], list[str]]:
+    """常驻 session 路的「配置全集」挂法（PLAN_toolmount §5.2，第 8 步）：**装了但关着**的插件
+    也挂上，开 session 后随即 toggle off——app 里的开关从此永远有 toggle 对象（不换 client、
+    不重铸）。归属 / 前提（PLUGIN_GATE）/ 清单合法照旧判，那些不是「开关」是「有没有」。
+    → (mcp-config 路径, 全部工具白名单, 关着的插件名)。配置文件另起一份（plugins.session.
+    mcp.json），别和 -p 老路的 plugins.mcp.json 互相覆盖。"""
+    return _mount("chat", char_id, include_disabled=True)
+
+
+def _mount(context: str, char_id, *, include_disabled: bool
+           ) -> tuple[Optional[str], list[str], list[str]]:
+    cfg_path = (state_store.char_state_dir(char_id) / "plugins.session.mcp.json"
+                if include_disabled else _mcp_config_path(context, char_id))
     me = char_id or state_store.DEFAULT_CHAR_ID
     wake_on: dict = {}
     if context == "wake":
@@ -689,10 +720,15 @@ def mounted(context: str = "chat", char_id=None) -> tuple[Optional[str], list[st
     else:
         blocked = set()
     enabled = _read_enabled(char_id)
+    if include_disabled and PLUGINS_DIR.is_dir():
+        for d in PLUGINS_DIR.iterdir():
+            if d.is_dir() and not d.name.startswith(".") and _NAME_RE.match(d.name):
+                enabled.setdefault(d.name, False)
     servers: dict = {}
     tools: list[str] = []
+    off: list[str] = []
     for name, on in sorted(enabled.items()):
-        if not on or name in blocked:
+        if name in blocked or (not on and not include_disabled):
             continue
         if not plugin_owned_by(name, me):
             continue
@@ -725,11 +761,13 @@ def mounted(context: str = "chat", char_id=None) -> tuple[Optional[str], list[st
         tools += [f"mcp__{name}__{t}" for t in m["tools"]
                   if context != "wake" or wake_on.get(name)
                   or t not in WAKE_TOOL_EXCLUDE.get(name, ())]
+        if not on:
+            off.append(name)
     if not servers:
-        return None, []
+        return None, [], []
     payload = json.dumps({"mcpServers": servers}, ensure_ascii=False)
     if not cfg_path.exists() or cfg_path.read_text("utf-8") != payload:
         tmp = cfg_path.with_name(f".{cfg_path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
         tmp.write_text(payload, "utf-8")
         tmp.replace(cfg_path)
-    return str(cfg_path), tools
+    return str(cfg_path), tools, off

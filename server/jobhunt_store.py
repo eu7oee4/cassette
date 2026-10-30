@@ -169,8 +169,9 @@ def resume_list() -> list[dict]:
 # 「Present」是英文版简历要的：只认「至今」时，英文条目的日期不被抓出来 → 右侧时间轴整条塌掉，
 # 日期原样留在标题行里（2026-08-13 做英文简历时踩到）。
 # 抓出来单独包 span → 模板里 flex 甩到右边，简历右侧就有一条对齐的时间轴。
+# 单个月份（「2026.09」这种一个月内做完的作品）也认，不然这一行的日期留在标题里、时间轴断一格。
 _DATE_TAIL = re.compile(
-    r"(?:\s*[·,，]\s*)?(\d{4}\.\d{1,2}\s*[-–—]\s*(?:\d{4}\.\d{1,2}|至今|Present))\s*$")
+    r"(?:\s*[·,，]\s*)?(\d{4}\.\d{1,2}(?:\s*[-–—]\s*(?:\d{4}\.\d{1,2}|至今|Present))?)\s*$")
 
 
 def _inline(s: str) -> str:
@@ -198,7 +199,7 @@ def md_to_html(md: str) -> str:
     md = re.sub(r"<!--.*?-->", "", md, flags=re.S)
     lines = md.splitlines()
     out, in_list, para = [], False, []
-    # h1（姓名）+ 紧跟的第一段（联系方式）包进 <header>，模板才排得出抬头区
+    # h1（姓名）+ 联系方式 + 第一个 h2 之前的其余段落（求职意向）包进 <header>，模板才排得出抬头区
     seen_h1, header_open, contact_done = False, False, False
     # 「标题行 + 它下面那串 bullet」包进 <section class="item">，模板才能整块避开分页
     # （否则标题落在页底、内容甩到下一页）
@@ -213,7 +214,10 @@ def md_to_html(md: str) -> str:
         if header_open and not contact_done:
             contact_done = True
             out.append('<p class="contact">' + _inline(text) + "</p>")
-            close_header()
+            return
+        # 联系方式之后、第一个 h2 之前的段落（求职意向这类）也留在抬头区里，排在横线上方
+        if header_open:
+            out.append('<p class="intent">' + _inline(text) + "</p>")
             return
         m = _DATE_TAIL.search(text)
         if m:
@@ -272,6 +276,15 @@ def md_to_html(md: str) -> str:
         if re.match(r"\s*---+\s*$", s):
             flush_para(); close_list(); close_item(); close_header()
             out.append("<hr>"); continue
+        # 证件照：`![照片](photo.jpg)` 单独一行，路径相对简历库目录（照片放 state/，不进 git）。
+        # 只认抬头区里的——模板把 img.photo 绝对定位到抬头右上角
+        m = re.match(r"\s*!\[[^\]]*\]\(([^)]+)\)\s*$", s)
+        if m and header_open:
+            flush_para()
+            p = (RESUME_DIR / m.group(1).strip()).resolve()
+            if p.is_file() and p.is_relative_to(RESUME_DIR.resolve()):
+                out.append(f'<img class="photo" src="{p.as_uri()}">')
+            continue
         para.append(s.strip())
     flush_para(); close_list(); close_item(); close_header()
     return "\n".join(out)
@@ -301,16 +314,24 @@ _DEFAULT_TEMPLATE = """<!DOCTYPE html>
   h1 { font-size: 22pt; letter-spacing: 1px; margin: 0 0 2.5mm;
        color: #1f4e79; font-weight: 600; }
   p.contact { font-size: 9pt; color: #5a6570; margin: 0; }
+  p.intent { margin: 2.5mm 0 0; font-size: 10.5pt; }
+  /* 证件照（md 抬头区写 ![照片](photo.jpg)）：钉在抬头右上角，抬头相应让出宽度、撑够高度 */
+  header { position: relative; }
+  header:has(img.photo) { padding-right: 28mm; min-height: 32mm; }
+  img.photo { position: absolute; top: 0; right: 0; width: 22mm; height: 29.3mm;
+              object-fit: cover; border: .3mm solid #d6e0ea; }
 
-  h2 { font-size: 11pt; font-weight: 600; letter-spacing: 1.5px; color: #1f4e79;
-       border-left: 3px solid #1f4e79; border-bottom: 1px solid #d6e0ea;
-       padding: 0 0 1.4mm 2.5mm; margin: 6.5mm 0 3mm; }
+  h2 { font-size: 12.5pt; font-weight: 700; letter-spacing: 2px; color: #16324f;
+       background: #e8eff7; border-left: 4px solid #1f4e79;
+       padding: 1.2mm 0 1.2mm 3mm; margin: 6mm 0 3mm; }
   h3 { font-size: 10.5pt; margin: 3mm 0 1mm; }
   p { margin: 1.6mm 0 .8mm; }
 
   /* 标题行：正文靠左、行尾日期靠右（md_to_html 拆出 .t / .d） */
   p.row { display: flex; justify-content: space-between; align-items: baseline; gap: 6mm; }
-  p.row .t strong { color: #16324f; font-weight: 600; }
+  /* 条目小标题：比正文大一号。PingFang 最粗只到 Semibold；别用 -webkit-text-stroke 压粗——
+     Chrome 会把描边当第二遍文字写进 PDF，复制/HR 系统解析出来每个字都重复（09-19 踩到） */
+  p.row .t strong { color: #16324f; font-weight: 600; font-size: 11.5pt; }
   p.row .d { white-space: nowrap; font-variant-numeric: tabular-nums;
              font-size: 9pt; color: #7a8b9c; }
 
@@ -324,7 +345,8 @@ _DEFAULT_TEMPLATE = """<!DOCTYPE html>
   code { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: 9.2pt;
          color: #16324f; }
   a { color: #1f4e79; text-decoration: none; }
-  hr { border: none; border-top: 1px solid #dde4ea; margin: 4mm 0; }
+  /* md 里的 --- 只作源文件分段用，PDF 上不画线（太占地方，09-18 机主拍板） */
+  hr { display: none; }
 </style>
 </head>
 <body>

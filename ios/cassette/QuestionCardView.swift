@@ -9,6 +9,8 @@ struct QuestionCardView: View {
     @Environment(\.colorScheme) private var scheme
     let card: QuestionCard
     let charID: String
+    /// 后端给的收场态标签（同 PermitCardView，10-30）：nil = 还在等；有值就置灰标它。
+    var outcome: String? = nil
     /// 每答完一个问题喊一次（父层出「眠眠选择了「…」」小字 §5.2）。
     var onPick: (_ question: String, _ answer: String) -> Void = { _, _ in }
     /// 所有问题都答完：父层拿完整 answers 去 POST decide。
@@ -22,7 +24,9 @@ struct QuestionCardView: View {
     @State private var answers: [String: String] = [:]
     @State private var picked: Set<String> = []     // multiSelect 的勾选集
     @State private var custom = ""                  // 自定义答案输入
-    @State private var expired = false
+    @State private var timedOut = false
+    private var expired: Bool { timedOut || outcome != nil }
+    private var closedLabel: String { outcome ?? "已超时" }
     @FocusState private var customFocused: Bool
 
     private var pal: CharPalette { IdentityColor.palette(for: charID) }
@@ -50,7 +54,7 @@ struct QuestionCardView: View {
         .background(fill, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
         .overlay(alignment: .topLeading) {
             if expired {
-                Text("已超时")
+                Text(closedLabel)
                     .font(.caption2.bold())
                     .padding(.horizontal, 8).padding(.vertical, 3)
                     .background(Color(uiColor: .systemGray2), in: Capsule())
@@ -67,16 +71,16 @@ struct QuestionCardView: View {
                 do { try await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000)) }
                 catch { return }
             }
-            expired = true                          // 后端同刻已超时自拒，这儿只管置灰
+            timedOut = true                         // 后端同刻已超时自拒，这儿只管置灰
         }
     }
 
     private var headerRow: some View {
         HStack {
+            // 纯小字标签，不垫胶囊底（10-08 简洁化）
             Text(q?.header?.isEmpty == false ? q!.header! : "想问你")
-                .font(.caption2.bold())
-                .padding(.horizontal, 8).padding(.vertical, 3)
-                .background(ink.opacity(0.14), in: Capsule())
+                .font(.caption2.weight(.semibold))
+                .opacity(0.6)
             if card.questions.count > 1 {
                 Text("\(min(idx + 1, card.questions.count))/\(card.questions.count)")
                     .font(.caption2).opacity(0.7)
@@ -112,11 +116,13 @@ struct QuestionCardView: View {
             Button {
                 submit(picked.sorted().joined(separator: "、"))
             } label: {
+                // 确认＝主按钮：反色实心（同权限卡的「批准」）；没勾时退成淡底
                 Text("就这些")
                     .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(picked.isEmpty ? ink.opacity(0.5) : fill)
                     .frame(maxWidth: .infinity)
-                    .padding(.vertical, 8)
-                    .background(ink.opacity(picked.isEmpty ? 0.08 : 0.22),
+                    .padding(.vertical, 9)
+                    .background(picked.isEmpty ? ink.opacity(0.08) : ink,
                                 in: RoundedRectangle(cornerRadius: 12, style: .continuous))
             }
             .buttonStyle(.plain)
@@ -151,7 +157,7 @@ struct QuestionCardView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, 10).padding(.vertical, 8)
             // 按钮圆角比容器小一号（§6 待定项，先按 12 走，机主看效果再改）
-            .background(ink.opacity(picked.contains(opt.label) ? 0.26 : 0.14),
+            .background(ink.opacity(picked.contains(opt.label) ? 0.24 : 0.10),
                         in: RoundedRectangle(cornerRadius: 12, style: .continuous))
         }
         .buttonStyle(.plain)

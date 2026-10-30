@@ -23,19 +23,16 @@ import time
 import uuid
 from typing import Optional
 
-# 超时分轮来源（§1.3）：聊天轮机主大概率在场，给长些；wake 轮机主多半不在，
-# 快拒——模型这轮放下、以后想做再申请。具体分钟数机主还没拍（PLAN_native
-# §10 待拍①），这两个默认值是能用的起点，拍了板改 env 就行。
+# 两档超时（10-29 机主拍板：醒来轮也弹卡——醒来要防的只有安全面，卡有 Bark 推送、
+# app 回前台也拉得到）。醒来档长一些：TA 多半不在手机边上。卡挂着时整条 session 被那
+# 一轮占着，所以 TA 的消息一到醒来轮的卡自动让路（yield_wake，chat_loop 调）。
+# 09-23 到 10-29 之间醒来轮没有卡（PLAN_prs §4 旧口径），那条已改口。
 CHAT_TIMEOUT_SEC = int(os.environ.get("PERMIT_TIMEOUT_CHAT_SEC", "600"))
-WAKE_TIMEOUT_SEC = int(os.environ.get("PERMIT_TIMEOUT_WAKE_SEC", "120"))
+WAKE_TIMEOUT_SEC = int(os.environ.get("PERMIT_TIMEOUT_WAKE_SEC", "1800"))
 
 _pending: dict[str, dict] = {}   # 单号 → 卡（含 future/loop；REST 读时剥掉）
 
-_CARD_KEYS = ("id", "char", "tool", "title", "summary", "ts", "deadline")
-
-
-def timeout_for(turn_kind: str) -> int:
-    return WAKE_TIMEOUT_SEC if turn_kind == "wake" else CHAT_TIMEOUT_SEC
+_CARD_KEYS = ("id", "char", "tool", "title", "summary", "said", "note", "ts", "deadline")
 
 
 def _live(r: dict) -> bool:
@@ -51,6 +48,29 @@ def pending(char_id: Optional[str] = None) -> list[dict]:
     return sorted(({k: r[k] for k in _CARD_KEYS}
                    for r in list(_pending.values())
                    if _live(r) and (char_id is None or r["char"] == char_id)),
+                  key=lambda r: r["ts"])
+
+
+# 收场态账（10-30 机主拍板）：卡收场了 app 要知道是为什么——原来 app 只认 deadline 到点的「已超时」，
+# 让路 / 手拒的卡在 app 里原样挂到 deadline。这里记近一小时内收场的卡：单号 → 收场态
+# （allowed / denied / timeout / yielded_chat / yielded_wake / cancelled），/pending 一并下发。内存态，同卡本身。
+CLOSED_KEEP_SEC = 3600
+_closed: dict[str, dict] = {}
+
+
+def _mark_closed(rec: dict, state: str) -> None:
+    now = int(time.time())
+    for k, v in list(_closed.items()):
+        if now - v["ts"] > CLOSED_KEEP_SEC:
+            _closed.pop(k, None)
+    _closed[rec["id"]] = {"id": rec["id"], "char": rec["char"], "state": state, "ts": now}
+
+
+def closed(char_id: Optional[str] = None) -> list[dict]:
+    """近一小时收场了的卡（app 对齐用）。"""
+    now = int(time.time())
+    return sorted((dict(v) for v in _closed.values()
+                   if now - v["ts"] <= CLOSED_KEEP_SEC and (char_id is None or v["char"] == char_id)),
                   key=lambda r: r["ts"])
 
 
@@ -78,10 +98,33 @@ def decide(permit_id: str, allow: bool, reason: str = "") -> dict:
     return {"ok": True, "state": "allowed" if allow else "denied"}
 
 
+def yield_wake(char_id: str, reason: str, state: str = "yielded_chat") -> int:
+    """让路：这个角色醒来轮挂着的卡全部按「拒」收掉（理由原话给模型），回收掉几张。
+    两种触发（10-30 机主拍板）：TA 发了新消息（yielded_chat）/ 他自己的下一次醒来到了
+    （yielded_wake）。聊天轮的卡不动（TA 正看着）。任意线程可调（future 在它自己的 loop 上置值）。"""
+    n = 0
+    for r in list(_pending.values()):
+        if r["char"] != char_id or not r.get("wake") or r["future"].done():
+            continue
+        r["state"] = state
+        fut = r["future"]
+
+        def _set(f=fut):
+            if not f.done():
+                f.set_result((False, reason))
+
+        r["loop"].call_soon_threadsafe(_set)
+        n += 1
+    return n
+
+
 async def ask(char_id: str, *, tool: str, summary: str, title: str = "",
+              said: str = "", note: str = "",
               permit_id: Optional[str] = None,
-              timeout: Optional[float] = None) -> Optional[tuple[bool, str]]:
+              timeout: Optional[float] = None,
+              wake: bool = False) -> Optional[tuple[bool, str]]:
     """登记一张卡并原地等机主拍板。返回 (批没批, 理由)；None＝超时。
+    wake=醒来轮弹的（TA 来了会被 yield_wake 收掉）。
     卡的清理只有这一处（finally）：批完/拒完/超时/轮被掐，都不留悬单。"""
     pid = (permit_id or "").strip() or uuid.uuid4().hex[:12]
     loop = asyncio.get_running_loop()
@@ -91,15 +134,25 @@ async def ask(char_id: str, *, tool: str, summary: str, title: str = "",
     _pending[pid] = {"id": pid, "char": char_id, "tool": tool,
                      "title": (title or "").strip()[:300],
                      "summary": (summary or "").strip()[:500],
+                     # 他动手前说的人话（PLAN_prs §4.2，卡片最上面）；Bash 的 description
+                     "said": (said or "").strip()[:1000],
+                     "note": (note or "").strip()[:300],
                      "ts": now, "deadline": now + int(t),
+                     "wake": bool(wake),
                      "future": fut, "loop": loop}
-    _push_card(char_id, tool, summary)
+    _push_card(char_id, tool, said or summary)
+    rec = _pending[pid]
+    state = "cancelled"
     try:
-        return await asyncio.wait_for(fut, t)
+        res = await asyncio.wait_for(fut, t)
+        state = rec.get("state") or ("allowed" if res[0] else "denied")
+        return res
     except asyncio.TimeoutError:
+        state = "timeout"
         return None
     finally:
         _pending.pop(pid, None)
+        _mark_closed(rec, state)
 
 
 def _push_card(char_id: str, tool: str, summary: str) -> None:

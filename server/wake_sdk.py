@@ -114,6 +114,9 @@ def wake_headline(trigger: str) -> str:
     if trigger == "mail":
         # 硬触发不是"自己醒的"，别把外面推的一下说成自发（note 里写是什么事）。
         return f"{config.user_name()}没找你，是外面有动静把你叫起来了。"
+    if trigger == "delegate":
+        # 派出去的活停下来问（PLAN_delegate §3.3）：问题原文在 PR 事件行里（〔PR：…〕）。
+        return f"{config.user_name()}没找你，是你派出去的活有动静把你叫起来了。"
     return f"{config.user_name()}没找你，你自己醒过来了。"
 
 
@@ -136,6 +139,8 @@ def wake_injection(cid: str, trigger: str, note: str = "") -> str:
         todo = (state_store.read_schedule(cid).get("next_wake_todo") or "").strip()
         if todo:
             line += f"\n〔你自己留下的字条：{todo}〕"
+    for e in pipeline.prs_event_lines(cid):
+        line += f"\n〔PR：{e}〕"
     return line
 
 
@@ -291,6 +296,10 @@ def enqueue_wake(cid: str, trigger: str, note: str = "", force: bool = False) ->
 
     def _injection() -> str:
         started["ts"] = int(time.time())
+        # 同一个值也给执行层（toolmount §6）：这轮接触的工具留底时带 turn_ts，重铸时
+        # 按它精确挂回投递进历史的那条（投递 ts = started_ts，finish_wake_turn）。
+        # handle 在下面 _ensure_loop 时绑定，loop 跑到这轮才调这个工厂。
+        handle.meta["turn_ts"] = started["ts"]
         return wake_injection(cid, trigger, note)
 
     def _finalize(reply: str, stored: list) -> dict:
@@ -319,6 +328,8 @@ def enqueue_wake(cid: str, trigger: str, note: str = "", force: bool = False) ->
             injection="", finalize=_finalize, kind="wake", wake_trigger=trigger,
             injection_factory=_injection, on_dead=lambda: _wake_dead(cid, trigger))
         slots[trigger] = turn.rid
+        # 上一轮醒来弹的卡还挂着：让路（10-30 机主拍板第二种触发），不然这次醒来要等卡超时。
+        chat_loop._yield_wake_cards(cid, "wake")
         handle.queue.put_nowait(turn)
         logerr(f"sdk 醒来入队（{cid}，{trigger}{'，硬触发' if force else ''}）")
         return True

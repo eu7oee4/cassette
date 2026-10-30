@@ -31,6 +31,8 @@ server/pets/
 code_addendum.md
 code_addendum_chat.md
 playroom/
+# 角色的 PR 工作副本（PLAN_prs §2）：git worktree，一人一个 + 跑测试基线用的 _baseline
+.worktrees/
 
 # ===== 求职相关 =====
 resumes/

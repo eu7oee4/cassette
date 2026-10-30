@@ -3,7 +3,7 @@ import SwiftUI
 /// 抽屉能去的页面。层级：聊天 → 抽屉 → 页面 → 详情，返回逐层退（PLAN_cassette_v2 §0）。
 /// 占位页随 PR2-5/PR8 逐个换成真页面。
 enum DrawerPage: String, Hashable, CaseIterable {
-    case conversations, house, memory, mind, history, drafts, jobhunt, game, plugins, ownership, settings
+    case conversations, house, memory, mind, history, drafts, jobhunt, game, prs, plugins, ownership, settings
 
     var title: String {
         switch self {
@@ -15,6 +15,7 @@ enum DrawerPage: String, Hashable, CaseIterable {
         case .drafts:   return "草稿信箱"
         case .jobhunt:  return "求职 · JD 库"
         case .game:     return "游戏"
+        case .prs:      return "PR"
         case .plugins:  return "插件商店"
         case .ownership: return "归属"
         case .settings: return "设置"
@@ -31,6 +32,7 @@ enum DrawerPage: String, Hashable, CaseIterable {
         case .drafts:   return "envelope"
         case .jobhunt:  return "briefcase"
         case .game:     return "gamecontroller"
+        case .prs:      return "arrow.triangle.pull"
         case .plugins:  return "puzzlepiece.extension"
         case .ownership: return "key"
         case .settings: return "gearshape"
@@ -49,17 +51,12 @@ struct DrawerPanel: View {
         VStack(alignment: .leading, spacing: 0) {
             // 顶部放 TA 的名字——这是 TA 的空间，不是功能列表的标题。
             // 下沉一段（眠眠真机反馈：贴着状态栏太高），大约落在原第二行菜单的位置。
-            // 可点：切到下一个角色的菜单（多角色循环）。
+            // 切角色统一走聊天页顶栏的下拉，这里只显示名字。
             Button { onTapName?() } label: {
                 HStack(spacing: 7) {
                     Text(agentName)
                         .font(.title3.bold())
                         .foregroundStyle(.primary)
-                    if onTapName != nil {
-                        Image(systemName: "arrow.2.squarepath")
-                            .font(.caption.weight(.semibold))
-                            .foregroundStyle(.secondary)
-                    }
                 }
                 .contentShape(Rectangle())
             }

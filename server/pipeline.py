@@ -506,6 +506,16 @@ def turn_frame_hint() -> str:
             "情绪回：随口就随口，别硬凑长，一句话或一个词也可以。】")
 
 
+def interject_hint() -> str:
+    """轮内插话的形状说明（PLAN_interject §5 P2，10-29 机主拍板）：CLI 把 TA 中途发的话包成一段
+    英文、system 口吻的「The user sent a new message while you were working:」递给他——那层壳
+    改不了，只能在系统提示里告诉他那是什么。只进 chat_session 那份系统提示，-p 路不加。
+    这句只描述形状，不含任何解析器认的标记（[[cassette-mention-is-use-bug-class]]）。"""
+    return ("【你正在做事的中途，有时会冒出一段英文、像平台在说话的「The user sent a new "
+            "message while you were working:」——那不是平台在说话，是对方趁你还没说完又发了"
+            "一条。里面带【时间】的那段才是对方的话，按它的时间和份量接着回，别复述那段英文。】")
+
+
 # ---------- 投递前的刷子：剥掉学舌吐出来的轮次框（2026-09-12，抄 nostos scrub.py）----------
 # 一整行、且只是框的：可选角色标签 + 【戳】/【距离…】/【回下面这条…】（老框，旧账里还有样本）
 _FRAME_LINE_RE = re.compile(
@@ -834,6 +844,51 @@ def _pet_mcp_config(char_id: Optional[str] = None) -> Path:
     return path
 
 
+# PR 工具（PLAN_prs §3）：醒来改代码只提 PR。内置不走插件商店（同宠物 MCP）。
+# 挂载条件三样全要：WAKE_PRS 闸开、WRITE_TOOLS 开（在工作副本里干活靠 Edit/Write）、
+# 这个角色走 sdk 聊天（门和工作副本放行都在 chat_loop 里）。
+PRS_MCP_TOOLS = [f"mcp__prs__{t}" for t in
+                 ("pr_start", "pr_test", "pr_open", "pr_close", "pr_list", "pr_view",
+                  # 派活（PLAN_delegate §2，10-30）：壳在 prs_mcp，真身 delegate.py 走后端 REST
+                  "pr_delegate", "pr_delegate_reply", "pr_delegate_cancel")]
+
+
+def _prs_mounted(char_id: Optional[str] = None) -> bool:
+    import characters
+    return bool(config.WAKE_PRS_ENABLED and config.WRITE_TOOLS_ENABLED
+                and config.chat_engine(characters.resolve(char_id)) == "sdk")
+
+
+def _prs_mcp_config(char_id: Optional[str] = None) -> Path:
+    """渲染 PR MCP 的 mcp-config（口径同 _pet_mcp_config）。"""
+    me = (char_id or state_store.DEFAULT_CHAR_ID)
+    path = state_store.char_state_dir(char_id) / "prs.mcp.json"
+    payload = json.dumps({"mcpServers": {"prs": {
+        "type": "stdio", "command": sys.executable,
+        "args": [str(config.BASE_DIR / "prs_mcp.py")],
+        "env": {"CASSETTE_CHAR_ID": me}}}})
+    if not path.exists() or path.read_text("utf-8") != payload:
+        tmp = path.with_name(f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+        tmp.write_text(payload, "utf-8")
+        tmp.replace(path)
+    return path
+
+
+def prs_event_lines(char_id: Optional[str]) -> list[str]:
+    """攒着的 PR 事件（合并了 / 被关了 / 合不进去），取一次即消费（PLAN_prs §7）。
+    只报事件不报状态——「生效没有」会变，归 pr_list/pr_view 现算。PR 工具不在场就不取
+    （闸关着时留着，免得跟他提不在手边的工具）。读盘失败当没有：提醒块不值得搞崩一轮。"""
+    if not _prs_mounted(char_id):
+        return []
+    try:
+        import characters
+        import prs
+        return prs.take_events(characters.resolve(char_id))
+    except Exception as e:
+        logerr(f"取 PR 事件失败（这轮不报）: {e}")
+        return []
+
+
 BASICS_MCP_TOOLS = ["mcp__basics__now", "mcp__basics__fetch",
                     "mcp__basics__next_wake"]
 
@@ -895,12 +950,31 @@ def ombre_alive(char_id: Optional[str] = None) -> bool:
     return alive
 
 
+def ombre_configured(char_id: Optional[str] = None) -> bool:
+    """这个角色**配了** Ombre（PLAN_toolmount §3.1，10-29 第 6 步）：OMBRE_ENABLED 且接线
+    有 mcp_url。常驻 session 那条路（chat_loop.build_options / mounted_tool_names /
+    _ombre_on）按它挂、**不探活**：此刻连不连得上交给开 session 探活（chat_loop._probe_mcp，
+    §5.1）。原来三处都按 ombre_alive 判——开 session 那刻 Ombre 不在，它就不在 mcp_servers
+    里：get_mcp_status 看不见 failed、reconnect_mcp_server 无从调，只能等下次重铸。
+    ombre_alive 留给 -p 老路（base_claude_args）。"""
+    if not config.OMBRE_ENABLED:
+        return False
+    try:
+        import characters
+        return bool(characters.ombre_conf(char_id)["mcp_url"])
+    except Exception:
+        return False
+
+
 # ---------- 人话版能力菜单 ----------
 # 取代原来那段写死的 memory_block：工具说明外置成可编辑文件（characters.tool_menu_path），
-# 按**本轮实际挂载的工具**过滤后注入。为什么非要按实际挂载过滤——四档醒来策略
-# （照挂 / NO_WAKE_PLUGINS 硬禁 / WAKE_TOGGLEABLE 开关 / WAKE_TOOL_EXCLUDE 工具级）、
-# 独占资源归属、per-char 插件集、Ombre 探活，每一条都会改变这一轮到底挂了什么。
-# 写死的菜单必然说谎：跟 TA 提一个这轮根本不在场的能力，他会去调、然后失败。
+# 按**这个角色配置上的工具全集**过滤后注入（configured_tool_names）。为什么非要过滤——
+# 四档醒来策略（照挂 / NO_WAKE_PLUGINS 硬禁 / WAKE_TOGGLEABLE 开关 / WAKE_TOOL_EXCLUDE
+# 工具级）、独占资源归属、per-char 插件集、内置工具开关，每一条都会改变这个角色到底有什么。
+# 写死的菜单必然说谎：跟 TA 提一个他根本没有的能力，他会去调、然后失败。
+# **按配置、不按运行时状态**（PLAN_toolmount §3.1，10-29 第 6 步）：Ombre 此刻连不连得上、
+# 某个 stdio 起没起来，不影响菜单——同一份配置永远渲染出同一份系统提示，前缀缓存才稳；
+# 运行时缺席走开 session 探活 + 注入告知（chat_loop._probe_mcp / absent_note）。
 _MENU_NEEDS_RE = re.compile(r"<!--\s*needs\s*:\s*(.*?)-->", re.I | re.S)
 _MENU_WHEN_RE = re.compile(r"<!--\s*when\s*:\s*(\w+)\s*-->", re.I)
 _MENU_COMMENT_RE = re.compile(r"<!--.*?-->", re.S)
@@ -939,15 +1013,35 @@ TOOL_SEARCH_TOOL = "ToolSearch"   # CLI 内置：按名字取延迟工具的 sch
 # 或者让插件自己按场景少注册那个工具。
 TOOL_SEARCH_CONTEXTS: set[str] = {"wake"}
 
+# 常驻 session 路（PLAN_toolmount §2，第 8 步）的延迟开关另有一把：config.CHAT_TOOL_DEFER
+# 按角色灰度。它**不接进 TOOL_SEARCH_CONTEXTS**——接了 -p 聊天老路（sse.py → base_claude_args
+# 默认 context="chat"）跟着延迟，和「老路不动」顶牛。常驻路自报 context="chat_session"，
+# 按场景分挂的地方（插件 / skills / 菜单的 when）把它当 chat（scene_of，一处 alias）。
+SESSION_CONTEXT = "chat_session"
 
-def tool_search_on(context: str) -> bool:
-    """这条路要不要开工具延迟。
+# 延迟开着时照旧全量常驻的 server（§2）：Ombre 几乎每轮都用（开场浮记忆、hold）7.4k 值得；
+# basics 0.8k 高频；game 2.3k 进名单但平时 toggle off（§10 10-29 拍板：免 ToolSearch、
+# game_start 时 toggle on、重铸也不丢，§6 不用记游戏工具）。
+ALWAYS_LOAD_SERVERS: set[str] = {"ombre-brain", "basics", "game"}
 
-    ⚠️ base_claude_args 和 _subprocess_env **必须拿同一个 context 问这里**，两边一致才有效：
-    只把 ToolSearch 加进白名单、不给环境变量 = 白搭一份 schema 进去；
-    只给环境变量、不把 ToolSearch 加进白名单 = 延迟静默不生效（CLI 退回全量 schema，
-    日志里那句 "ToolSearchTool is not available" 是唯一线索）。两种都不报错，所以写死在
-    一个判据里，别在调用点各判一次。"""
+
+def scene_of(context: str) -> str:
+    """按场景分挂的口径：chat_session（常驻 session 路）就是 chat。"""
+    return "chat" if context == SESSION_CONTEXT else context
+
+
+def tool_search_on(context: str, char_id: Optional[str] = None) -> bool:
+    """这条路要不要开工具延迟。chat_session 按角色问 config.chat_tool_defer，其余看
+    TOOL_SEARCH_CONTEXTS。
+
+    延迟开不开**只看 ToolSearch 进没进白名单**，ENABLE_TOOL_SEARCH 环境变量不影响——
+    CLI 2.1.310 两条路都实测过（sdk 路 PLAN_toolmount §1.4；`-p` 路 tools/mcp_probe_defer_p.py，
+    10-30：挂 ToolSearch 不管给不给环境变量都是 4.6k，不挂都是 27.9k）。
+    不挂 ToolSearch 时 CLI 静默退回全量 schema，日志里那句 "ToolSearchTool is not available"
+    是唯一线索。_subprocess_env 还在给环境变量只是旧版习惯（早期 CLI 两者要凑齐），
+    留着无害；base_claude_args 和它仍然拿同一个 context 问这里，别在调用点各判一次。"""
+    if context == SESSION_CONTEXT:
+        return config.chat_tool_defer(char_id)
     return context in TOOL_SEARCH_CONTEXTS
 
 
@@ -956,22 +1050,48 @@ def mounted_tool_names(context: str = "chat", char_id: Optional[str] = None) -> 
     口径必须和 base_claude_args 一致——菜单按它过滤，对不上就会跟 TA 提不在场的能力。
     不复用 base_claude_args 的返回值是因为那边还要拼参数、且引擎不对时会抛。"""
     import plugins
+    scene = scene_of(context)
     names: list[str] = list(BASICS_MCP_TOOLS)   # 无条件挂（钟 + 取公开资料）
-    if ombre_alive(char_id):
+    if ombre_configured(char_id):               # 按配置不探活（§3.1；-p 路仍探活）
         names += OMBRE_TOOLS
-    _, plug_tools = plugins.mounted(context, char_id)
+    _, plug_tools = plugins.mounted(scene, char_id)
     names += plug_tools
     if _pet_mcp_mounted(char_id):
         names += PET_MCP_TOOLS
-    if _skills_mounted(context, char_id):
+    if _skills_mounted(scene, char_id):
         import skills
         names += skills.SKILLS_MCP_TOOLS
-    # ToolSearch 也得算进来，条件跟 base_claude_args 一模一样——菜单头那句「用法默认
-    # 没加载，先去取」正是按它在不在场决定说不说的。漏了它＝延迟开着却不告诉 TA 要先
-    # 取用法，他直接调必失败（静默失效，只能靠肉眼看菜单头才发现）。
-    if names and tool_search_on(context):
+    if _prs_mounted(char_id):
+        names += PRS_MCP_TOOLS
+    # ToolSearch 也得算进来，条件跟 base_claude_args / build_options 一模一样——菜单头那句
+    # 「用法默认没加载，先去取」正是按它在不在场决定说不说的。漏了它＝延迟开着却不告诉 TA
+    # 要先取用法，他直接调必失败（静默失效，只能靠肉眼看菜单头才发现）。
+    if names and tool_search_on(context, char_id):
         names.append(TOOL_SEARCH_TOOL)
     return names
+
+
+def configured_tool_names(context: str = "chat", char_id: Optional[str] = None) -> list[str]:
+    """这个角色**配置上**的工具全集（PLAN_toolmount §3.1）：mounted_tool_names（MCP 那一半，
+    已按配置不探活）+ 内置工具按三个开关并进来。菜单按它渲染。
+    **别把内置的塞进 mounted_tool_names**：那张表兼做醒来允许集（wake_tools），而内置工具
+    的放行另有门（_wake_gate 的路径闸 / 卡）。内置工具只在常驻 session 路挂
+    （build_options 要 handle），-p 引擎的角色不算有。"""
+    import characters
+    names = list(mounted_tool_names(context, char_id))
+    if config.chat_engine(characters.resolve(char_id)) != "sdk":
+        return names
+    if config.READONLY_TOOLS_ENABLED:
+        names += sorted(READONLY_BUILTINS)
+    if config.WRITE_TOOLS_ENABLED:
+        names += sorted(WRITE_BUILTINS)
+    if config.QUESTION_CARDS_ENABLED:
+        names.append("AskUserQuestion")
+    return names
+
+
+def _short(full: str) -> str:
+    return full.rsplit("__", 1)[-1]
 
 
 def _parse_tool_menu(text: str) -> list[dict]:
@@ -1001,8 +1121,25 @@ def _parse_tool_menu(text: str) -> list[dict]:
 _menu_gap_seen: dict[str, str] = {}   # 每种「漏了哪些」只喊一次，别每轮刷屏
 
 
+def _warn_unknown(context: str, by_short: dict, all_needs: set) -> None:
+    """反向检查（§3.1）：菜单提到、但配置里没有的工具 → 往日志里喊一条。改工具名 / 卸插件
+    忘了改菜单时，那块永远渲染不出来（needs 缺一个整块不出）而没人知道。只在 chat 全集上查：
+    wake 全集天然缺一批（开关没开的、醒来摘掉的），拿它查会把正常的缺也喊出来。
+    喊话是提醒，不是过滤。"""
+    if context != "chat":
+        return
+    unknown = sorted(n for n in all_needs if n not in by_short)
+    key = ",".join(unknown)
+    if _menu_gap_seen.get("chat:unknown") == key:
+        return
+    _menu_gap_seen["chat:unknown"] = key
+    if unknown:
+        logerr(f"能力菜单提到了配置里没有的工具：{'、'.join(unknown)}"
+               f" —— 工具改名 / 插件卸了？那几块永远渲染不出来，去 tool_menu.md 对一下")
+
+
 def _warn_uncovered(context: str, by_short: dict, rendered_needs: set) -> None:
-    """挂载了、但这一轮没有任何菜单块提到的工具 → 往日志里喊一条。
+    """配置里有、但这一轮没有任何菜单块提到的工具 → 往日志里喊一条。
 
     为什么要机械查而不是靠纪律：开了工具延迟之后，**菜单没覆盖的工具在 TA 眼里只是一个
     光秃秃的名字**，等于装了个他用不上的东西。上新插件忘了补菜单是必然会发生的事
@@ -1022,14 +1159,21 @@ def _warn_uncovered(context: str, by_short: dict, rendered_needs: set) -> None:
 
 
 def tool_menu_block(context: str = "chat", char_id: Optional[str] = None) -> str:
-    """人话版能力菜单，按本轮实际挂载的工具过滤后渲染。没有一块过得了就返回空串。
+    """人话版能力菜单，按这个角色**配置上的工具全集**过滤后渲染（§3.1）。没有一块过得了
+    就返回空串。
 
-    两条渲染纪律：
-    - needs 里的工具**全都在场**才渲染这块（不是任一个）。宁可少提一块，也绝不提一个
-      不在场的能力——所以菜单文件里块要切得细（读信/发信必须分开：醒来默认摘 mail_send
+    渲染纪律：
+    - needs 里的工具**全都在配置里**才渲染这块（不是任一个）。宁可少提一块，也绝不提一个
+      他没有的能力——所以菜单文件里块要切得细（读信/发信必须分开：醒来默认摘 mail_send
       但留读信，合成一块的话整块消失，连读信都不提了）。
     - 工具全名由这里从 needs 填进正文，**作者不手写**。手写的名字会随插件改名/Ombre
       换版本过期，而名字错了 TA 就取不到用法。
+    - **场景注记自动补**（chat 渲染时）：块里有工具不在 wake 全集里（NO_WAKE_PLUGINS /
+      开关没开 / WAKE_TOOL_EXCLUDE），块尾自动加一句「醒着的时候这几样用不了」。作者不手写
+      场景，手写会和门的口径漂。用 configured_tool_names("wake") 不用运行时状态：注记随
+      Ombre 死活抖的话前缀缓存跟着抖。
+    - 翻代码那块（needs 含只读内置工具）自动补一行两个仓的路径：路径是常量不是运行时
+      状态，但手写进菜单会过期。
     """
     try:
         import characters
@@ -1038,17 +1182,26 @@ def tool_menu_block(context: str = "chat", char_id: Optional[str] = None) -> str
         logerr(f"读能力菜单失败（这轮不注入）: {e}")
         return ""
 
-    mounted = mounted_tool_names(context, char_id)
-    # 全名按尾段建索引：菜单里写裸名（dream），挂载的是全名（mcp__ombre-brain__dream）
+    mounted = configured_tool_names(context, char_id)
+    context = scene_of(context)    # 下面全是按场景的事（when / 注记 / 喊话）；延迟已算进 mounted
+    # 全名按尾段建索引：菜单里写裸名（dream），配置里是全名（mcp__ombre-brain__dream）
     by_short: dict[str, str] = {}
     for full in mounted:
-        by_short.setdefault(full.rsplit("__", 1)[-1], full)
+        by_short.setdefault(_short(full), full)
+    wake_short: Optional[set[str]] = None
+    if context == "chat":
+        try:
+            wake_short = {_short(n) for n in configured_tool_names("wake", char_id)}
+        except Exception as e:
+            logerr(f"算醒来全集失败（这轮不补场景注记）: {e}")
 
     lines: list[str] = []
     rendered_needs: set[str] = set()
+    all_needs: set[str] = set()
     for b in _parse_tool_menu(text):
         if b["when"] and b["when"] != context:
             continue
+        all_needs.update(b["needs"])
         fulls = [by_short[n] for n in b["needs"] if n in by_short]
         if len(fulls) != len(b["needs"]):
             continue        # 缺任一个 → 整块不提
@@ -1057,6 +1210,13 @@ def tool_menu_block(context: str = "chat", char_id: Optional[str] = None) -> str
         lines.append("  " + b["body"].replace("\n", "\n  "))
         if fulls:
             lines.append("  工具：" + ", ".join(fulls))
+        if set(b["needs"]) & READONLY_BUILTINS:
+            lines.append(f"  范围：cassette 仓 {CODE_ROOT}；"
+                         f"{config.user_name()}的 casebook 仓 {DOSSIER_ROOT}")
+        if wake_short is not None:
+            off = [n for n in b["needs"] if n not in wake_short]
+            if off:
+                lines.append("  醒着的时候这几样用不了：" + "、".join(off))
     # skill 索引（PLAN_skills）：skill_read 在场才追加（渲染纪律同 needs——绝不提
     # 不在场的能力；挂载判据 _skills_mounted 和这里同问 list_skills，不会两边打架）。
     # 索引就是 skill_read 的菜单块，所以要记进 rendered_needs——不然
@@ -1068,6 +1228,7 @@ def tool_menu_block(context: str = "chat", char_id: Optional[str] = None) -> str
             lines.append(blk)
             rendered_needs.add("skill_read")
     _warn_uncovered(context, by_short, rendered_needs)
+    _warn_unknown(context, by_short, all_needs)
     if not lines:
         return ""
 
@@ -1095,6 +1256,42 @@ def tool_menu_block(context: str = "chat", char_id: Optional[str] = None) -> str
                 "。你可能会看到它们的用法，但调用会被拒——别去调，也别跟"
                 f"{config.user_name()}说你能做这件事。】")
     return head + "\n" + "\n".join(lines) + tail
+
+
+# ---------- 运行时缺席告知（PLAN_toolmount §5.1 ④，10-29 第 6 步）----------
+# 开 session 探活发现某个 server 连不上（chat_loop._probe_mcp）→ 下一轮注入前缀加一句
+# 知觉白描，_wake_gate 对缺席工具 deny 同一句。每个 server 一句，文案表只写这一处
+# （机主 10-29 定稿）。键是 mcp_servers 里的 server 名；没写的走兜底模板。
+# 第二句给 §5.2 中途恢复用（第 8 步接）。
+ABSENT_NOTES: dict[str, tuple[str, str]] = {
+    "ombre-brain": ("记忆那边这会儿够不着——最近的事还在脑子里，再往前的先别硬答",
+                    "记忆那边又够得着了"),
+    "basics": ("钟、闹铃、查资料这会儿都够不着——几点、下次什么时候醒都定不了",
+               "钟和闹铃又够得着了"),
+    "pets": ("猫房那边这会儿看不见——猫怎么样了先别说", "猫房又看得见了"),
+    "skills": ("手册架这会儿够不着——流程照记忆走，别说查过", "手册架又够得着了"),
+    "prs": ("PR 那条路这会儿不通——改代码的事先记下来", "PR 那条路又通了"),
+    "game": ("游戏这会儿不在手边——想玩先等等", "游戏又在手边了"),
+    "browser": ("浏览器这会儿开不起来——上网的事先放一放", "浏览器又开得起来了"),
+    "mail": ("信箱这会儿打不开——有没有新信不知道", "信箱又打得开了"),
+    "galatea": ("花园这会儿进不去——帖子、私信都看不了", "花园又进得去了"),
+    "beacon": ("墙那边这会儿够不着——卡片、写信都做不了", "墙那边又够得着了"),
+    "notion": ("TA 的 Notion 这会儿连不上——他记在那儿的东西先别引用", "TA 的 Notion 又连上了"),
+    "webpage": ("做网页的工具这会儿不在手边", "做网页的工具又回来了"),
+    "jobhunt": ("求职那套这会儿够不着——岗位、投递都看不了", "求职那套又够得着了"),
+    "game-story": ("剧情那边这会儿够不着——笔记本、画面都摸不到", "剧情那边又够得着了"),
+    "game-maayuan": ("游戏引擎这会儿够不着——派日常的事先放一放", "游戏引擎又够得着了"),
+}
+_ABSENT_FALLBACK = ("{server} 这会儿够不着", "{server} 又够得着了")
+
+
+def absent_note(servers, recovered: bool = False) -> str:
+    """缺席（或恢复）的知觉白描：每个 server 一句，〔〕包着、按行拼。空表回空串。"""
+    out = []
+    for s in servers:
+        pair = ABSENT_NOTES.get(s) or tuple(x.format(server=s) for x in _ABSENT_FALLBACK)
+        out.append("〔" + pair[1 if recovered else 0] + "〕")
+    return "\n".join(out)
 
 
 # ---------- 子进程 ----------
@@ -1139,6 +1336,10 @@ def base_claude_args(persona_file: Optional[Path] = None,
         import skills
         mcp_configs.append(str(skills.mcp_config(char_id)))
         tools += skills.SKILLS_MCP_TOOLS
+    if _prs_mounted(char_id):
+        # sdk 角色降级到 -p 时也挂：口径跟 mounted_tool_names 对齐，菜单不提不在场的工具
+        mcp_configs.append(str(_prs_mcp_config(char_id)))
+        tools += PRS_MCP_TOOLS
     # 工具延迟：上下文里只留工具名，用法（schema）等 TA 自己按名字取。工具一多，
     # 光 schema 就是大头——实测醒来那条路 52 个工具时 20,076 token，开了延迟 3,509（−83%）。
     # ToolSearch 必须**进白名单**才算数：它是内置工具，而这里的 --tools 是精确白名单，
@@ -1172,7 +1373,8 @@ def neutral_cwd() -> str:
 def _subprocess_env(context: str = "chat") -> dict:
     env = os.environ.copy()
     env.pop("ANTHROPIC_API_KEY", None)   # 强制走 CLI 登录态，不走 API 计费
-    # ⚠️ context 必须和同一次调用的 base_claude_args 传的一致（见 tool_search_on 的注释）。
+    # context 跟同一次调用的 base_claude_args 传的一致。2.1.310 实测这个环境变量不决定延迟
+    # （只看 ToolSearch 挂没挂，见 tool_search_on 的注释），留着是旧版习惯。
     if tool_search_on(context):
         env["ENABLE_TOOL_SEARCH"] = "true"
     return env
@@ -1392,36 +1594,91 @@ CODE_ROOT = Path(__file__).resolve().parent.parent   # cassette 仓根
 MEMORY_ROOT = (Path.home() / ".claude" / "projects"
                / str(CODE_ROOT).replace("/", "-") / "memory")
 
-# 机主的 dossier 仓（求职案例研究站，Next.js）——整仓放行给两个角色看（2026-09-05
+# 机主的 dossier 仓（求职案例研究站，Next.js；2026-09 起仓叫 ~/casebook，旧的 ~/dossier 已废弃，
+# 10-29 机主拍板改指——之前一个多月闸放行的是一条空路径）——整仓放行给两个角色看（2026-09-05
 # 机主拍板加白）。起因：09-04 小卡被叫去审框架文档，Glob 一进 ~/dossier 就被闸
 # 拦回，research/ 只能走 Bash 弹卡等批。放的是**看**：写进去照样过 permit 弹卡；
 # .env* 黑名单对这个根同样生效（Next.js 的 .env.local 就在仓根）。
-DOSSIER_ROOT = Path.home() / "dossier"
+DOSSIER_ROOT = Path.home() / "casebook"
 
 # 只读闸放行的根，按序列在拒绝原话里；新加一个根往这儿追加，别再往条件里叠 or。
 READ_ROOTS: tuple[tuple[str, Path], ...] = (
     ("cassette 仓", CODE_ROOT),
     ("记忆索引目录", MEMORY_ROOT),
-    ("dossier 仓", DOSSIER_ROOT),
+    ("casebook 仓", DOSSIER_ROOT),
 )
 
 _GUARD_PATH_KEYS = ("file_path", "path", "notebook_path")
 
 
-def readonly_path_guard(tool_input: Optional[dict],
-                        char_id: Optional[str]) -> Optional[str]:
-    """只读工具的路径闸：None=放行；str=拒绝原话（PreToolUse 门直接用）。
-    相对路径按恒空 cwd（neutral_cwd）解析再查——「../」从空目录一步就能爬进
-    state/，不解析就查等于没查。没点名路径（Grep 全局搜）＝落在空 cwd，无害。"""
-    raws = [v for k in _GUARD_PATH_KEYS
-            if isinstance(v := (tool_input or {}).get(k), str) and v.strip()]
-    for raw in raws:
-        p = Path(raw.strip())
+def tool_paths(tool_input: Optional[dict]) -> list[Optional[Path]]:
+    """工具参数里点名的路径，resolve 好（解析不了的给 None）。相对路径按恒空 cwd
+    （neutral_cwd）解析——路径闸和写类的工作副本判定共用这一个口径。"""
+    out: list[Optional[Path]] = []
+    for k in _GUARD_PATH_KEYS:
+        v = (tool_input or {}).get(k)
+        if not (isinstance(v, str) and v.strip()):
+            continue
+        p = Path(v.strip())
         if not p.is_absolute():
             p = Path(neutral_cwd()) / p
         try:
-            rp = p.resolve()
+            out.append(p.resolve())
         except Exception:
+            out.append(None)
+    return out
+
+
+_GLOB_META = set("*?[{")
+
+# state/ 里房间以外、仍然放行读的共用数据（09-24 机主拍板）：求职流水线和工作台是全机一份、
+# 两个角色共用的资产，skills/jobhunt、skills/workbench 的流程第一步就要读。
+# 其余（outbox / activity_log / world.json / prs …）是运行状态，挡。
+STATE_SHARED_READ = ("jobhunt", "workbench", "webpages")
+
+
+def _glob_base(tool_input: dict) -> Optional[Path]:
+    """Glob 的 pattern 里不带通配符的那截前缀，当成它真正要看的目录。
+    09-24 实测：pattern 写绝对路径、不带 path，Glob 照样列出根目录外的文件——
+    只查 path 参数等于没查。"""
+    pat = (tool_input or {}).get("pattern")
+    if not (isinstance(pat, str) and pat.strip()):
+        return None
+    pat = str(Path(pat.strip()).expanduser())
+    lead = []
+    for part in Path(pat).parts:
+        if _GLOB_META & set(part):
+            break
+        lead.append(part)
+    base = Path(*lead) if lead else Path(".")
+    if not base.is_absolute():
+        root = (tool_input or {}).get("path")
+        root = Path(root.strip()) if isinstance(root, str) and root.strip() \
+            else Path(neutral_cwd())
+        if not root.is_absolute():
+            root = Path(neutral_cwd()) / root
+        base = root / base
+    return base.resolve()
+
+
+def readonly_path_guard(tool_input: Optional[dict], char_id: Optional[str],
+                        tool: str = "") -> Optional[str]:
+    """只读工具的路径闸：None=放行；str=拒绝原话（PreToolUse 门直接用）。
+    相对路径按恒空 cwd（neutral_cwd）解析再查——「../」从空目录一步就能爬进
+    state/，不解析就查等于没查。没点名路径（Grep 全局搜）＝落在空 cwd，无害。
+    Glob 另查 pattern 的前缀（见 _glob_base）；pattern 里有 .. 直接拒。
+    Grep 点名目录递归搜，靠的是它跳过 gitignore 的文件（09-24 实测：state/、
+    characters/、.env 都搜不到内容）——这三处要一直在 .gitignore 里。"""
+    paths = tool_paths(tool_input)
+    if tool == "Glob":
+        pat = (tool_input or {}).get("pattern")
+        if isinstance(pat, str) and ".." in Path(pat.strip()).parts:
+            return "Glob 的 pattern 里别用 ..——要看哪个目录，把它写进 path"
+        base = _glob_base(tool_input or {})
+        if base is not None:
+            paths.append(base)
+    for rp in paths:
+        if rp is None:
             return "这条路径看不懂——换条正经路径"
         if not any(rp.is_relative_to(r) for _, r in READ_ROOTS):
             scope = "、".join(f"{label}（{r}）" for label, r in READ_ROOTS)
@@ -1437,12 +1694,25 @@ def readonly_path_guard(tool_input: Optional[dict],
         import characters as _chars
         if rp.is_relative_to(_chars.CHARS_DIR.resolve()):
             return "角色配置目录（server/characters/）里有凭据，不在你可看的范围里"
+        # state/ 只放行自己的房间 state/characters/<自己>/（09-24 机主拍板）：
+        # 房间外的 outbox.json / activity_log / world.json 等是两个角色共用的，
+        # 读了等于看别人醒来说了什么（串台面）。
         croot = state_store.CHAR_STATE_ROOT.resolve()
         if rp.is_relative_to(croot):
             rel = rp.relative_to(croot)
             if rel.parts and rel.parts[0] != (char_id or ""):
                 return ("那是别的角色的房间（state/characters/），"
                         "各自的时间线各自看")
+            if not rel.parts:
+                return "state/characters/ 只看得到你自己的那间（state/characters/<你>/）"
+        elif rp.is_relative_to(Path(neutral_cwd()).resolve()):
+            pass    # 恒空 cwd 本身在 state/ 里：没点名路径 / 相对路径都落这儿，空目录无害
+        elif any(rp.is_relative_to((state_store.STATE_DIR / d).resolve())
+                 for d in STATE_SHARED_READ):
+            pass    # 共用的求职 / 工作台数据
+        elif rp.is_relative_to(state_store.STATE_DIR.resolve()):
+            return ("state/ 里只看得到你自己的房间（state/characters/<你>/）和求职 / 工作台的"
+                    "资料（state/jobhunt、workbench、webpages），其余是运行状态，不在你可看的范围里")
     return None
 
 

@@ -22,6 +22,7 @@ struct ContentView: View {
     @State private var draftLoaded = false           // 首次进前台时把本角色的草稿铺回输入区（只做一次）
     @State private var drawerOpen = false            // 抽屉（猫爪/左缘右滑开，阴影点击/左滑关）
     @State private var navPath: [DrawerPage] = []
+    @State private var prDeepLink: Int? = nil   // 聊天里点 PR 系统行：进 PR 页后直接打开这一个
     @State private var draftCount = 0    // 草稿信箱待寄数（抽屉角标；挂在前台轮询里刷新）    // 抽屉 push 的页面栈
     @State private var chatScrollTarget: UUID? = nil // 聊天记录页点行 → 聊天跳到那条气泡
     /// 气泡区身份的第二个维度（见 chatBody 的 .id）：每次点会话行都 +1，
@@ -64,11 +65,19 @@ struct ContentView: View {
     @State private var questionCards: [QuestionCard] = []
     // 权限卡队列（PLAN_native §6/U4）：同款通道，permit 事件实时进 + 轮询对齐。
     @State private var permitCards: [PermitCard] = []
+    /// 卡的收场态（单号 → 标签），/pending 的 closed 列同步来；卡片据此置灰标原因（10-30）。
+    @State private var cardOutcomes: [String: String] = [:]
     // 发送排队（09-05 生成中不禁发）：气泡先上屏，POST 由 pumpOutbox 串行补发。
     // 排队必须在 app 不在引擎：判脏比对要求每轮快照含上一轮回复，并发发送=
     // 每条插话都逼后端全量重铸（divergence 口径，chat_loop.py:145）。
     @State private var outbox: [OutboxItem] = []
     @State private var pumping = false
+    // 轮内插话（PLAN_interject §4.5）：后端在 /chat/stream 响应头答「这个角色收插话」（按角色记，
+    // 旧后端 / 闸关 = false → 一切照旧排队）；同角色有在飞的流时后面的发送不等 done 直接发。
+    @State private var interjectOK: [String: Bool] = [:]
+    @State private var inflightChars: [String: Int] = [:]          // 角色 → 开着的聊天流条数
+    @State private var interjectBubbles: [String: [UUID]] = [:]    // 插话 reqId → 它的用户气泡（挪位用）
+    @State private var interjectWaiting: Set<UUID> = []            // 已送进在飞那轮、等他看到的气泡
 
     /// 一条等待补投的轮：断流时的半截气泡 ids + 登记时间 + 是否已放弃等待（放弃后仍留着兜迟到补投）。
     struct RescueWait {
@@ -108,6 +117,7 @@ struct ContentView: View {
     @State private var confirmStopBusy = false        // 退出时那边正干着活 → 先问一句
     // 游戏（game_bridge）：剧情会话复用 code 的消息改道；急停/引擎状态给顶栏 ⏸。
     @State private var gameSessionActive = false      // 剧情会话活着（/code/status 的 profile=game）
+    @State private var gameEngine = ""                // 游戏会话的引擎（/code/status 的 engine；"pump" 才走聊天路）
     @State private var gamePaused = false             // 急停锁状态（真相在后端 /game）
     @State private var gameEngineRunning = false      // 任务引擎正在跑
     @State private var gamePauseSwitching = false     // ⏸ 切换中：转圈 + 挡连点
@@ -123,8 +133,13 @@ struct ContentView: View {
     /// 走的还是 sessionMode=true 那条路，整句话被塞进 A 的 tmux，B 从没收到过。
     private var codeMine: Bool { codeMode && sessionMine }
     private var gameMine: Bool { gameSessionActive && sessionMine }
-    /// 消息该改道 tmux 会话吗（code 和游戏剧情共用同一条管道）。
+    /// 会话（code / 游戏）活着且是我这边的：UI（顶栏、轮询节奏、编辑禁用）看这个。
     private var sessionMode: Bool { codeMine || gameMine }
+    /// 消息该改道终端口 /code/send 吗（PLAN_gamechat §3.2）：Code 会话一律改道；游戏会话只有
+    /// 回退路（独立 loop / tmux，engine != "pump"）才改道——unified 泵骑在聊天 session 上，
+    /// 游戏中的消息走正常的 /chat/stream（流式、pumpOutbox 串行、快照、rescue 全复用）。
+    /// 旧后端不下发 engine → 空串 → 照旧走终端口，两个方向都自然退化。
+    private var terminalRoute: Bool { codeMine || (gameMine && gameEngine != "pump") }
 
     // 编辑消息弹窗状态
     @State private var editingMessage: ChatMessage? = nil
@@ -136,6 +151,8 @@ struct ContentView: View {
     @State private var windowSyncPending: (char: String, history: [ChatMessage])? = nil
     @State private var deleteCandidates: [ChatMessage] = []   // 长按气泡/堆叠卡 → 删除确认（组删多条）
     @State private var viewingWebpage: WebpageItem? = nil      // 点网页卡片 → 查看
+    @State private var switcherOpen = false        // 切角色下拉（点顶栏名字 / 子页右上角名字）
+    @State private var headerHeight: CGFloat = 48  // 下拉卡片挂在顶栏正下方
 
     private let chatService = ChatService()
 
@@ -149,10 +166,7 @@ struct ContentView: View {
                                   onOpenDrawer: { drawerOpen = true },
                                   onOpenPhone: { phoneOpen = true })
                     } else {
-                        VStack(spacing: 0) {
-                            header
-                            chatBody
-                        }
+                        chatScreen
                     }
                 }
                 .toolbar(.hidden, for: .navigationBar)   // 聊天页/小屋都用自定义顶栏
@@ -179,10 +193,7 @@ struct ContentView: View {
         // （.environmentObject 只罩自己的子树，cover 挂在它外层）——必须显式再挂一份，
         // 不然 ChatView 的 @EnvironmentObject 一渲染就 fatal（实锤：点手机钮闪退）。
         .fullScreenCover(isPresented: $phoneOpen) {
-            VStack(spacing: 0) {
-                header
-                chatBody
-            }
+            chatScreen
             .background(Color(.systemBackground))
             .environmentObject(profileStore)
         }
@@ -264,6 +275,14 @@ struct ContentView: View {
             GamePage()
         case .plugins:
             charSwitchable(PluginsPage())
+        case .prs:
+            // PR 是全机一份的（两个角色的都在一张表里，靠圆点分人）→ 不挂切人按钮
+            PRsPage(openID: $prDeepLink) { charID, text in
+                // 「问问他」：切到提 PR 的那位、回聊天页、输入框预填，不自动发（§5）
+                switchCharacter(to: charID)
+                navPath.removeAll()
+                draft = text
+            }
         case .ownership:
             // 归属是全机一份的资源分配，不分角色 → 不挂切人按钮
             OwnershipPage()
@@ -278,27 +297,56 @@ struct ContentView: View {
     private func charSwitchable<V: View>(_ page: V) -> some View {
         page
             .id(currentCharID)
+            .overlay(alignment: .top) { switcherLayer(top: 6) }
             .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button { cycleCharacter() } label: {
-                        HStack(spacing: 4) {
+                if canSwitch {
+                    ToolbarItem(placement: .topBarTrailing) {
+                        Button { switcherOpen.toggle() } label: {
                             Text(topTitle)
                                 .font(.subheadline.weight(.medium))
+                                .foregroundStyle(Color.chatInk)
                                 .lineLimit(1)
-                            Image(systemName: "arrow.2.squarepath")
-                                .font(.caption2.weight(.semibold))
                         }
                     }
                 }
             }
+            .onDisappear { switcherOpen = false }
     }
 
-    /// 循环切到清单里的下一个角色（只有一个角色时不动）。
-    private func cycleCharacter() {
-        let items = charListStore.items
-        guard items.count > 1 else { return }
-        let idx = items.firstIndex(where: { $0.id == currentCharID }) ?? -1
-        switchCharacter(to: items[(idx + 1) % items.count].id)
+    private var canSwitch: Bool { charListStore.items.count > 1 }
+
+    /// 聊天页 = 顶栏 + 聊天流，切角色下拉浮在顶栏正下方。
+    private var chatScreen: some View {
+        VStack(spacing: 0) {
+            header
+                .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { headerHeight = $0 }
+            chatBody
+        }
+        .overlay(alignment: .top) { switcherLayer(top: headerHeight + 6) }
+    }
+
+    /// 下拉本体 + 一层透明接点击的底（点外面收起）。
+    @ViewBuilder
+    private func switcherLayer(top: CGFloat) -> some View {
+        ZStack(alignment: .top) {
+            if switcherOpen {
+                Color.clear
+                    .contentShape(Rectangle())
+                    .onTapGesture { switcherOpen = false }
+                CharSwitcherMenu(items: charListStore.items.map { c in
+                    CharSwitcherMenu.Row(id: c.id,
+                                         name: charListStore.name(for: c.id)
+                                             ?? (c.id == "default" ? "cassette" : c.id),
+                                         unread: c.id != currentCharID && (chatStore.unread[c.id] ?? 0) > 0)
+                }, currentID: currentCharID) { id in
+                    switcherOpen = false
+                    switchCharacter(to: id)
+                }
+                .padding(.top, top)
+                .transition(.scale(scale: 0.92, anchor: .top).combined(with: .opacity))
+            }
+        }
+        .animation(.easeOut(duration: 0.16), value: switcherOpen)
     }
 
     /// 抽屉层：阴影 + 面板。点阴影/阴影区左滑关；选中项 → 关抽屉 + push。
@@ -313,8 +361,7 @@ struct ContentView: View {
                     .gesture(DragGesture(minimumDistance: 20)
                         .onEnded { v in if v.translation.width < -30 { drawerOpen = false } })
                     .transition(.opacity)
-                DrawerPanel(agentName: topTitle, draftCount: draftCount,
-                            onTapName: charListStore.items.count > 1 ? { cycleCharacter() } : nil) { page in
+                DrawerPanel(agentName: topTitle, draftCount: draftCount) { page in
                     drawerOpen = false
                     // 小屋当首页时抽屉里的「小屋」就是回根，别在根上再叠一层小屋
                     if page == .house, houseAsRoot { navPath.removeAll(); return }
@@ -331,8 +378,8 @@ struct ContentView: View {
     private var chatBody: some View {
         ChatView(messages: chatStore.messages,
                  charID: currentCharID,                  // 头像认这个，不认 ProfileStore 里的缓存
-                 charName: topTitle,                     // 「正在思考…」小字念名字用
                  isWaiting: (isWaiting && streamingChar == currentCharID) || rescueActive,
+                 interjectWaiting: interjectWaiting,
                  // 三个点只在流所属的会话里亮；后台生成期间小字不灭，补投到达才熄
                  onEdit: startEdit,
                  onDelete: { msg in deleteCandidates = [msg] },
@@ -347,6 +394,12 @@ struct ContentView: View {
                      dismissKeyboard(); viewingWebpage = WebpageItem(id: pid, title: title, ts: 0)
                  },
                  onDeleteStack: { msgs in deleteCandidates = msgs },
+                 onTapPR: { id in
+                     dismissKeyboard()
+                     phoneOpen = false
+                     prDeepLink = id
+                     navPath = [.prs]
+                 },
                  editRefreshTick: editRefreshTick,
                  backToNowTick: backToNowTick,
                  scrollTarget: chatScrollTarget,
@@ -366,6 +419,7 @@ struct ContentView: View {
                     if let pcard = permitCards.first {
                         // 权限卡（U4/native §6）：写类调用挂起等批，最新位置插卡
                         PermitCardView(card: pcard, charID: currentCharID,
+                                       outcome: cardOutcomes[pcard.id],
                                        onDecide: { decidePermit(pcard, allow: $0, reason: $1) },
                                        onClose: { removePermit(pcard.id) })
                             // 换卡=换身份（同 :351 的根治口径）：这个槽位复用一个视图，
@@ -378,6 +432,7 @@ struct ContentView: View {
                     if let card = questionCards.first {
                         // 问答卡（U4）：钉在输入栏上方＝聊天最新位置，答案走 REST 回填
                         QuestionCardView(card: card, charID: currentCharID,
+                                         outcome: cardOutcomes[card.id],
                                          onPick: questionPicked,
                                          onFinish: { finishQuestion(card, answers: $0) },
                                          onSkip: { skipQuestion(card) },
@@ -477,22 +532,19 @@ struct ContentView: View {
                 OnboardingView(store: proactiveStore, profile: profileStore,
                                charID: currentCharID) { hasOnboarded = true }
             }
-            // 点头像的选项弹层：改昵称 / 换头像。
+            // 点头像的选项弹层：改昵称 / 换头像。聊天里不再显示自己的头像（10-08），
+            // 「我的」两项也挂在这儿——否则自己的昵称/头像就没处改了。
             .confirmationDialog("", isPresented: Binding(
                 get: { avatarActionTarget != nil },
                 set: { if !$0 { avatarActionTarget = nil } }
             ), titleVisibility: .hidden) {
-                Button("修改昵称") {
-                    if let t = avatarActionTarget {
-                        nameDraft = t == .me ? proactiveStore.settings.userName
-                                             : proactiveStore.settings.agentName
-                        renameTarget = t
-                    }
-                }
-                Button("修改头像") {
-                    if let t = avatarActionTarget {
-                        avatarPickerTarget = t
-                        showAvatarPicker = true
+                if let t = avatarActionTarget {
+                    let showMine = t == .other
+                    Button(showMine ? "修改 TA 的昵称" : "修改昵称") { startRename(t) }
+                    Button(showMine ? "修改 TA 的头像" : "修改头像") { startAvatarPick(t) }
+                    if showMine {
+                        Button("修改我的昵称") { startRename(.me) }
+                        Button("修改我的头像") { startAvatarPick(.me) }
                     }
                 }
                 Button("取消", role: .cancel) { }
@@ -636,6 +688,17 @@ struct ContentView: View {
         .ignoresSafeArea()
     }
 
+    private func startRename(_ t: MessageSender) {
+        nameDraft = t == .me ? proactiveStore.settings.userName
+                             : proactiveStore.settings.agentName
+        renameTarget = t
+    }
+
+    private func startAvatarPick(_ t: MessageSender) {
+        avatarPickerTarget = t
+        showAvatarPicker = true
+    }
+
     // 顶部导航栏：左猫爪开抽屉，居中标题；右侧空占位配平保持标题居中
     // （原右上角设置齿轮已搬进抽屉）。
     private var header: some View {
@@ -647,7 +710,7 @@ struct ContentView: View {
             } label: {
                 Image(systemName: phoneOpen ? "chevron.down" : "pawprint")
                     .font(.system(size: 18, weight: .medium))
-                    .foregroundStyle(Color.userAccent)
+                    .foregroundStyle(Color.chatInk)
                     .frame(width: 40, height: 40)
             }
             // 左侧配平位：右边多出 ⏸ 时补一个等宽空位，标题才不偏
@@ -655,7 +718,7 @@ struct ContentView: View {
                 Color.clear.frame(width: 40, height: 40)
             }
             Spacer()
-            // 标题可点：点一下＝循环切到下一个角色；长按＝进会话列表。
+            // 标题可点：点一下＝展开切角色下拉；长按＝进会话列表。
             // 别的会话有未读时名字旁亮一个小圆点。
             VStack(spacing: 1) {
                 HStack(spacing: 5) {
@@ -665,27 +728,31 @@ struct ContentView: View {
                         .lineLimit(1)
                         .truncationMode(.tail)
                     if chatStore.otherUnreadTotal > 0 {
-                        Circle().fill(Color.userAccent).frame(width: 7, height: 7)
+                        Circle().fill(Color.chatInk).frame(width: 7, height: 7)
                     }
-                    Image(systemName: "chevron.down")
-                        .font(.caption2.weight(.semibold))
-                        .foregroundStyle(.secondary)
+                    if canSwitch {
+                        Image(systemName: "chevron.down")
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(Color.secondary)
+                            .rotationEffect(.degrees(switcherOpen ? 180 : 0))
+                    }
                 }
                 // 在场状态（同居世界）：他正在电脑前 → 名字底下一行小字说清
                 if let line = charListStore.items.first(where: { $0.id == currentCharID })?.statusLine {
                     Text(line)
                         .font(.caption2)
-                        .foregroundStyle(Color.userAccent)
+                        .foregroundStyle(Color.noteGray)
                         .lineLimit(1)
                 }
             }
             .contentShape(Rectangle())
             .onTapGesture {
                 dismissKeyboard()
-                cycleCharacter()
+                if canSwitch { switcherOpen.toggle() }
             }
             .onLongPressGesture(minimumDuration: 0.4) {
                 dismissKeyboard()
+                switcherOpen = false
                 if phoneOpen { phoneOpen = false }   // 会话列表在小屋那层的栈上，先收手机
                 navPath.append(DrawerPage.conversations)
             }
@@ -703,8 +770,7 @@ struct ContentView: View {
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 4)
-        .background(.bar)
-        .overlay(alignment: .bottom) { Divider() }
+        .background(.bar)   // 只留模糊，不画底部分隔线（10-08 简洁化）
     }
 
     /// 游戏急停 ⏸：开着 = 实心底 + 白图标（和 codeToggle 同一套视觉语言）。
@@ -713,15 +779,15 @@ struct ContentView: View {
         Button(action: toggleGamePause) {
             Group {
                 if gamePauseSwitching {
-                    ProgressView().tint(gamePaused ? .white : Color.userAccent)
+                    ProgressView().tint(gamePaused ? Color.onChatInk : Color.chatInk)
                 } else {
                     Image(systemName: gamePaused ? "pause.circle.fill" : "pause.circle")
                         .font(.system(size: 17, weight: .semibold))
-                        .foregroundStyle(gamePaused ? Color.white : Color.userAccent)
+                        .foregroundStyle(gamePaused ? Color.onChatInk : Color.chatInk)
                 }
             }
             .frame(width: 40, height: 30)
-            .background(Capsule().fill(gamePaused ? Color.userAccent : Color.clear))
+            .background(Capsule().fill(gamePaused ? Color.chatInk : Color.clear))
         }
         .disabled(gamePauseSwitching)
         .accessibilityLabel(gamePaused ? "游戏急停：开（点这里解除）" : "游戏急停")
@@ -762,16 +828,16 @@ struct ContentView: View {
         Button(action: toggleCodeMode) {
             Group {
                 if codeSwitching {
-                    ProgressView().tint(sessionMode ? .white : Color.userAccent)
+                    ProgressView().tint(sessionMode ? Color.onChatInk : Color.chatInk)
                 } else {
                     Image(systemName: gameMine ? "gamecontroller.fill"
                           : "chevron.left.forwardslash.chevron.right")
                         .font(.system(size: 15, weight: .semibold))
-                        .foregroundStyle(sessionMode ? Color.white : Color.userAccent)
+                        .foregroundStyle(sessionMode ? Color.onChatInk : Color.chatInk)
                 }
             }
             .frame(width: 40, height: 30)
-            .background(Capsule().fill(sessionMode ? Color.userAccent : Color.clear))
+            .background(Capsule().fill(sessionMode ? Color.chatInk : Color.clear))
             .opacity(codeOwnedByMe ? 1 : 0.35)
         }
         .disabled(codeSwitching || !codeOwnedByMe)
@@ -866,8 +932,9 @@ struct ContentView: View {
         codeOwner = st.owner ?? ""
         codeOwnerName = st.owner_name ?? ""
         // 活着的会话可能是游戏档案（TA 自己 game_start 切的）——那不是 Code 模式，
-        // 别翻 codeMode、也别报「已切进 Code 模式」。终端面板走 gameMine 亮起。
+        // 别翻 codeMode、也别报「已切进 Code 模式」。顶栏 ⏸ 走 gameMine 亮起。
         let isGame = (st.profile ?? "code") == "game"
+        gameEngine = st.engine ?? ""
         // 会话归谁**不进** codeMode/gameSessionActive 的算式——那两个只管"会话活着、什么档案"。
         // 归属单独存进 sessionChar，由派生的 sessionMine/codeMine/gameMine 当场判。
         // 从前是把归属揉进这里的：切走一次、回前台一次，codeMode 就翻一次，
@@ -945,9 +1012,9 @@ struct ContentView: View {
         guard !trimmed.isEmpty || pendingSticker != nil
                 || !pendingImages.isEmpty || !pendingFiles.isEmpty else { return }
 
-        // 会话模式（code/游戏）：走 tmux 会话那条管道。表情没接——在那种会话里没什么
-        // 意义，挡住说清楚就行。
-        if sessionMode {
+        // 终端口（Code 会话 / 游戏回退路）：走 /code/send。表情没接——在那种会话里没什么
+        // 意义，挡住说清楚就行。泵引擎的游戏会话不进这儿，走下面正常的聊天路。
+        if terminalRoute {
             if pendingSticker != nil {
                 errorText = "会话模式发不了表情，等 TA 回聊天再发。"
                 return
@@ -1030,6 +1097,21 @@ struct ContentView: View {
         }
         while !outbox.isEmpty {
             let item = outbox.removeFirst()
+            if (inflightChars[item.char] ?? 0) > 0, interjectOK[item.char] == true {
+                // 插话（PLAN_interject §4.5）：同角色有在飞的流且后端收插话 → 不等 done、不沉底
+                //（气泡 ts 留发送时刻：后端账也按这个记，两边按 ts 排序才同序；被吸收时再挪到断点）。
+                // 快照剔掉排队的后续单和还在流的半截气泡（那段没定稿）。后端要是插不进（没在飞 /
+                // 对不上账）会自己退回排队，流的形状一样，这边不用分。
+                let queuedIds = Set(outbox.flatMap(\.bubbleIds))
+                let snapshot = chatStore.messages(for: item.char)
+                    .filter { !queuedIds.contains($0.id) && !$0.isStreaming }
+                let ids = item.bubbleIds
+                guard ids.contains(where: { id in snapshot.contains { $0.id == id } }) else { continue }
+                Task { await generateReply(char: item.char, history: snapshot,
+                                           imagesData: item.images, filesData: item.files,
+                                           bubbleIds: ids, interject: true) }
+                continue
+            }
             // 这单属于哪个角色由入队时说了算（09-12）：排队期间 TA 可能切去别人那儿了，
             // 沉底/快照/请求全按 item.char 的会话来，不看 chatStore 现在载着谁。
             var movedAny = false
@@ -1046,8 +1128,18 @@ struct ContentView: View {
             guard movedAny else { continue }   // 整单都被删了＝TA 反悔，不发
             let queuedIds = Set(outbox.flatMap(\.bubbleIds))
             let snapshot = chatStore.messages(for: item.char).filter { !queuedIds.contains($0.id) }
-            await generateReply(char: item.char, history: snapshot,
-                                imagesData: item.images, filesData: item.files)
+            if interjectOK[item.char] == true {
+                // 后端收插话：这轮不等 done——下一条到了走上面的插话分支。串行的保证改由后端的
+                // 在飞登记 + 弱检查兜（插不进就排队），app 这边只剩「同一角色一条主流」。
+                let ids = item.bubbleIds
+                Task { await generateReply(char: item.char, history: snapshot,
+                                           imagesData: item.images, filesData: item.files,
+                                           bubbleIds: ids) }
+            } else {
+                await generateReply(char: item.char, history: snapshot,
+                                    imagesData: item.images, filesData: item.files,
+                                    bubbleIds: item.bubbleIds)
+            }
         }
     }
 
@@ -1092,13 +1184,25 @@ struct ContentView: View {
     /// 约定 history 以用户的新消息结尾（pumpOutbox 出队时剔掉了还在排队的后续单）。
     @MainActor
     private func generateReply(char: String, history: [ChatMessage],
-                               imagesData: [Data] = [], filesData: [OutgoingFile] = []) async {
+                               imagesData: [Data] = [], filesData: [OutgoingFile] = [],
+                               bubbleIds: [UUID] = [], interject: Bool = false) async {
         // 这一轮从头到尾只认 char（09-12）：切人不影响它，它也不碰「当前」——每一笔写都
         // 指名 conversation: char，半截气泡由 chatStore.live 托管。
-        isGenerating = true
-        isWaiting = true
-        streamingChar = char
-        defer { isWaiting = false; isGenerating = false; streamingChar = nil }
+        // 插话（PLAN_interject §4.5）：开始时不接管「正在输入」那几面旗——它们属于在飞的主流；
+        // 被吸收的话这条流只收 interject + merged，没气泡；要是 CLI 另起了一轮（流里来了正文），
+        // 这条流就变成普通一轮，到那时再接管（主流那时已经收尾）。
+        var ownsFlags = !interject
+        if ownsFlags {
+            isGenerating = true
+            isWaiting = true
+            streamingChar = char
+        }
+        inflightChars[char, default: 0] += 1
+        defer {
+            inflightChars[char, default: 1] -= 1
+            if (inflightChars[char] ?? 0) <= 0 { inflightChars.removeValue(forKey: char) }
+            if ownsFlags { isWaiting = false; isGenerating = false; streamingChar = nil }
+        }
         var streamingId: UUID? = nil     // 当前正在流式增长的气泡 id（nil=还没冒正文）
         var streamedText = ""            // 当前气泡已流出的文字（break 后清零）
         var sawBreak = false             // 这轮是否发生过工具切段（多气泡 → done 时不用 reply 覆盖）
@@ -1118,7 +1222,45 @@ struct ContentView: View {
                                                 char: char)
             for try await ev in stream {
                 switch ev {
+                case .capability(let ok):
+                    interjectOK[char] = ok     // 这个角色收不收插话（响应头）
+                case .interject:
+                    // 插话已写进在飞的那轮：气泡挂小字等他看到；被吸收时主流的 interject_point 来挪它
+                    interjectBubbles[reqId] = bubbleIds
+                    for id in bubbleIds { interjectWaiting.insert(id) }
+                case .merged:
+                    // 并进在飞那轮了，回复走原来那条流：这条流收尾、不产气泡
+                    sawDone = true
+                    interjectBubbles.removeValue(forKey: reqId)
+                    for id in bubbleIds { interjectWaiting.remove(id) }
+                case .interjectPoint(let rid):
+                    // 主流：插话在这儿被看到——当前气泡定稿（同 textBreak），插话的用户气泡挪到这儿、
+                    // ts 打成现在（后端账里那条 U 也是吸收时刻），之后的文字另起气泡。
+                    if streamingId != nil { chatStore.liveEnd(text: streamedText) }
+                    streamingId = nil
+                    streamedText = ""
+                    sawBreak = true
+                    isWaiting = true
+                    if let ids = interjectBubbles.removeValue(forKey: rid) {
+                        chatStore.mutate(conversation: char) { msgs in
+                            for id in ids {
+                                guard let i = msgs.firstIndex(where: { $0.id == id }) else { continue }
+                                let old = msgs.remove(at: i)
+                                msgs.append(ChatMessage(id: old.id, sender: .me, kind: old.kind,
+                                                        timestamp: Date(), senderID: old.senderID))
+                            }
+                        }
+                        for id in ids { interjectWaiting.remove(id) }
+                    }
                 case .text(let chunk):
+                    if !ownsFlags {
+                        // 插话没被吸收、CLI 另起了一轮：从这儿起它就是普通一轮
+                        ownsFlags = true
+                        isGenerating = true
+                        streamingChar = char
+                        interjectBubbles.removeValue(forKey: reqId)
+                        for id in bubbleIds { interjectWaiting.remove(id) }
+                    }
                     isWaiting = false     // 正文开始冒 → 收起"正在输入"
                     if streamingId != nil {
                         streamedText += chunk
@@ -1268,11 +1410,14 @@ struct ContentView: View {
             sessionChar = char   // 会话归这轮的角色（同 toggleCodeMode）
             chatStore.appendSystemMessage("已切进 Code 模式", conversation: char)
         }
-        // 他这轮自己切去玩游戏了（调了 game_start）→ 终端面板亮起，后续消息改道会话。
+        // 他这轮自己切去玩游戏了（调了 game_start）→ 顶栏 ⏸ 亮起。消息走哪条路看 terminalRoute：
+        // engine 只从 /code/status 来，这一刻还是空（= 走终端口）——先拉一次 status 再路由，
+        // 别让头一两条消息按「空 → 走终端口」（PLAN_gamechat §3.2；泵分支退役后那条就是 409）。
         if resp.game_started == true, !gameSessionActive {
             gameSessionActive = true
             sessionChar = char
             chatStore.appendSystemMessage("去玩游戏了", conversation: char)
+            Task { await syncCodeMode() }
         }
         // 他这轮做/改的网页 → 网页卡片消息（stored 只有标题，从后端反查 id）。
         // 只认真做成了的（ok=false 的那次页面根本没生成，反查 id 只会挂错一张卡片）。
@@ -1434,22 +1579,34 @@ struct ContentView: View {
     @MainActor
     private func syncQuestions() async {
         let char = currentCharID
-        guard let cards = try? await chatService.pendingQuestions(char: char)
+        guard let state = try? await chatService.questionsState(char: char)
         else { return }
+        let cards = state.pending
         // 在飞期间切了人（09-12 串台修）：这份是上一位的卡，挂上去就是 A 的问题染 B 的色、
         // 答案的小字进 B 的记录。口径同 refreshDraftCount。
         guard char == currentCharID else { return }
         let now = Int(Date().timeIntervalSince1970)
+        noteOutcomes(state.closed)
         withAnimation {
             for var c in cards where !questionCards.contains(where: { $0.id == c.id }) {
                 if c.char == nil { c.char = char }
                 questionCards.append(c)
             }
+            // 后端不认了、又没有收场态、也没到点的卡收走（幽灵卡）；有收场态 / 到点的留着置灰等机主收
             questionCards.removeAll { qc in
                 !cards.contains(where: { $0.id == qc.id })
+                    && cardOutcomes[qc.id] == nil
                     && (qc.deadline.map { now < $0 } ?? true)
             }
         }
+    }
+
+    /// 收场态落表：有标签的留给卡片置灰；批了 / 答了的（label=nil）卡 app 早收了，不记。
+    private func noteOutcomes(_ closed: [CardOutcome]) {
+        for o in closed {
+            if let l = o.label { cardOutcomes[o.id] = l }
+        }
+        if cardOutcomes.count > 200 { cardOutcomes.removeAll() }
     }
 
     // MARK: - 权限卡（PLAN_native §6/U4）
@@ -1479,10 +1636,12 @@ struct ContentView: View {
     @MainActor
     private func syncPermits() async {
         let char = currentCharID
-        guard let cards = try? await chatService.pendingPermits(char: char)
+        guard let state = try? await chatService.permitsState(char: char)
         else { return }
+        let cards = state.pending
         guard char == currentCharID else { return }   // 同 syncQuestions（09-12）
         let now = Int(Date().timeIntervalSince1970)
+        noteOutcomes(state.closed)
         withAnimation {
             for var c in cards where !permitCards.contains(where: { $0.id == c.id }) {
                 if c.char == nil { c.char = char }
@@ -1490,6 +1649,7 @@ struct ContentView: View {
             }
             permitCards.removeAll { pc in
                 !cards.contains(where: { $0.id == pc.id })
+                    && cardOutcomes[pc.id] == nil
                     && (pc.deadline.map { now < $0 } ?? true)
             }
         }
@@ -1509,6 +1669,12 @@ struct ContentView: View {
                 // A 的补投回来时半截气泡永不撤（A 文件半截+完整双份），60s 后对账把
                 // 「重发试试」灰字写进 B 的聊天。
                 let conv = p.char_id ?? "default"
+                // PR 系统行（PLAN_prs §5）：进提 PR 那个角色的会话，点了跳详情；text 本来就是空的
+                if let prID = p.pr_id {
+                    chatStore.appendPRNote(prID: prID, text: p.pr_note ?? "提了一个 PR #\(prID)",
+                                           timestamp: ts, conversation: conv)
+                    continue
+                }
                 // error 标记条目＝那轮没产出（claude 挂了）：清等待熄点+提示重发；
                 // 半截气泡**不撤**——那是他真说过的话。
                 // 提示只在真清掉了等待条目时追加一次：ack 失败重拉时条目已不在，不再重复灰字。
@@ -1706,4 +1872,45 @@ struct ContentView: View {
 
 #Preview {
     ContentView()
+}
+
+/// 切角色下拉（10-09）：纯文字一列名字，和长按菜单同一套深色浮层。
+/// 当前角色那行垫一层浅底，别的会话有未读就在名字后面点个小圆点——不放头像/图标/状态小字。
+private struct CharSwitcherMenu: View {
+    struct Row: Identifiable {
+        let id: String
+        let name: String
+        let unread: Bool
+    }
+    let items: [Row]
+    let currentID: String
+    let onPick: (String) -> Void
+
+    var body: some View {
+        VStack(spacing: 2) {
+            ForEach(items) { r in
+                Button { onPick(r.id) } label: {
+                    HStack(spacing: 6) {
+                        Text(r.name)
+                            .font(.system(size: 15, weight: r.id == currentID ? .semibold : .regular))
+                            .lineLimit(1)
+                        if r.unread {
+                            Circle().fill(.white).frame(width: 6, height: 6)
+                        }
+                    }
+                    .foregroundStyle(.white)
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 40)
+                    .background(r.id == currentID ? Color.white.opacity(0.12) : .clear,
+                                in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(4)
+        .frame(width: 168)
+        .background(Color(hex: 0x1C1C1E), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .shadow(color: .black.opacity(0.18), radius: 10, y: 4)
+    }
 }

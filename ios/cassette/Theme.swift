@@ -46,12 +46,12 @@ struct CharPalette {
 }
 
 /// §1.2 染色的唯一口径（全局只有这一条）：
-/// 浅色模式 → 人物色的 dark 当底 + text_light（白字）；
-/// 深色模式 → 人物色的 light 当底 + text_dark（黑字）。
+/// 浅色模式 → 统一黑底 + text_light（白字）（机主 10-08 拍：右侧气泡/卡片不再用人物色）；
+/// 深色模式 → 人物色的 light 当底 + text_dark（黑字）（深色先不动）。
 /// 适用面只有两个：机主的气泡、要机主动手的卡片（permit 卡/问答卡）。
 enum ChatTint {
     static func fill(_ p: CharPalette, _ scheme: ColorScheme) -> Color {
-        scheme == .dark ? p.light : p.dark
+        scheme == .dark ? p.light : .black
     }
     static func text(_ scheme: ColorScheme) -> Color {
         scheme == .dark ? ChatPalette.dark.textOnLight : ChatPalette.light.textOnDark
@@ -163,7 +163,13 @@ extension Color {
     /// 链接/默认头像；主题色 theme 另存在 ChatPalette 里，暂时无处可用）。
     static var userAccent: Color { IdentityColor.palette(for: "user").base }
 
-    /// 小字提醒/「正在思考」/系统消息的固定灰（§3.4/§3.9）：不随深浅模式换值——
+    /// 聊天页的功能色（机主 10-08 拍）：发送/顶栏按钮/新消息胶囊这些「能点的东西」一律
+    /// 黑白，人物色只留给「这是谁」（头像、小字 logo）。走 label 语义色，深色模式自动反白。
+    static let chatInk = Color(uiColor: .label)
+    /// chatInk 实底上的字/图标色。
+    static let onChatInk = Color(uiColor: .systemBackground)
+
+    /// 小字提醒/系统消息的固定灰（§3.4/§3.9）：不随深浅模式换值——
     /// 它直接坐在背景上，要在浅深两种背景和自定义背景图（蒙版兜底）上都读得清。
     /// 机主 09-01 拍定 #828282（别用 .secondary——那会跟着系统漂）。
     static let noteGray = Color(hex: 0x828282)

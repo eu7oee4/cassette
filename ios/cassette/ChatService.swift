@@ -40,6 +40,8 @@ struct PendingMessage: Decodable, Identifiable {
     let error: Bool?             // true＝那轮没产出（claude 挂了）：清等待+提示重发，不撤半截
     let stored: [StoredMemory]?  // 那轮的工具产物：补渲染 done 独有的（browse 灰字/网页卡片）
     let char_id: String?         // 这条是谁说的（多角色路由）；老条目 nil = 默认角色
+    let pr_id: Int?              // PR 系统行（PLAN_prs §5）：有它就画成可点的系统行，text 是空的
+    let pr_note: String?
 }
 
 /// 发给后端的一条历史消息。
@@ -132,6 +134,39 @@ struct QuestionCard: Codable, Identifiable, Equatable {
     var char: String?                        // pending 拉回来的带；SSE 的不带（就是当前会话角色）
 }
 
+/// 一张卡的收场（/permits/pending、/questions/pending 的 closed 列，近一小时）。
+/// state：allowed / denied / timeout / yielded_chat / yielded_wake / answered / skipped / cancelled。
+struct CardOutcome: Decodable, Equatable {
+    let id: String
+    let char: String?
+    let state: String
+    let ts: Int?
+
+    /// 卡片上置灰那条小标签。nil = 不该标（批了 / 答了的卡 app 自己已经收了）。
+    var label: String? {
+        switch state {
+        case "timeout":      return "已超时"
+        case "yielded_chat": return "已让路，你发送了新消息"
+        case "yielded_wake": return "已让路，他醒来了"
+        case "cancelled":    return "已作废"
+        default:             return nil
+        }
+    }
+}
+
+/// /permits/pending 与 /questions/pending 共用的形状：pending + closed（老后端没 closed → 空）。
+struct CardsState<Card: Decodable>: Decodable {
+    let pending: [Card]
+    let closed: [CardOutcome]
+
+    enum CodingKeys: String, CodingKey { case pending, closed }
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        pending = try c.decode([Card].self, forKey: .pending)
+        closed = (try? c.decode([CardOutcome].self, forKey: .closed)) ?? []
+    }
+}
+
 /// 权限卡（PLAN_native §6 / chatui U4）：TA 的一次写类调用挂起等批。
 /// SSE "permit" 事件带参数原文（detail）；/permits/pending 拉回来的带 title
 /// 没 detail（够拍板用）。批/拒 POST /permits/decide，批了那次调用原地执行。
@@ -141,6 +176,8 @@ struct PermitCard: Codable, Identifiable, Equatable {
     let summary: String?                     // 一行摘要（文件路径/命令首行）
     let detail: String?                      // 参数原文（Bash 命令全文、Edit 的改动）
     let title: String?                       // SDK 生成的整句（pending 拉回来的有）
+    let said: String?                        // 他动手前说的人话（PLAN_prs §4.2，卡片最上面）
+    let note: String?                        // Bash 自带的 description
     let deadline: Int?
     var char: String?
 }
@@ -156,6 +193,11 @@ enum StreamEvent {
     case permit(PermitCard)                  // 权限卡：TA 想动手，等批（U4/native §6）
     case error(String)                       // 出错提示
     case done(ChatResponse?)                 // 结束：附完整 ChatResponse（错误/空回复时为 nil）
+    // 轮内插话（PLAN_interject §4.5）
+    case capability(interject: Bool)         // 响应头到了：后端这个角色收不收插话（X-Interject）
+    case interject(into: String)             // 插话自己的流：已写进在飞的那一轮（rid），等他看到
+    case interjectPoint(rid: String)         // 主流：插话 rid 在这儿被看到——当前气泡定稿、插话气泡挪到这儿
+    case merged(String)                      // 插话自己的流收尾：并进了 rid 那轮，回复走原来那条流
 }
 
 /// 负责和后端通信。用 async/await。
@@ -191,6 +233,8 @@ struct ChatService {
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue(BackendConfig.authKey, forHTTPHeaderField: "X-Auth")
+        // 新包声明支持插话（PLAN_interject §4.5）：后端在响应头用同名字段答「这个角色收插话」。
+        request.setValue("1", forHTTPHeaderField: "X-Interject")
         request.timeoutInterval = 120   // 空闲计时（收到数据就重置）：后端每 25s 一个心跳
                                         // （STREAM_PING_SEC），120s 没动静就是半开连接
                                         // （Mac 睡了/Tailscale 掉了但没 RST）——以前 600s，
@@ -280,6 +324,9 @@ struct ChatService {
                         let detail = (try? JSONDecoder().decode([String: String].self, from: body))?["detail"]
                         throw ChatServiceError.server(detail ?? "HTTP \(http.statusCode)")
                     }
+                    // 响应头先到：这个角色收不收插话（旧后端没这个头 → false → 照旧排队）
+                    continuation.yield(.capability(
+                        interject: http.value(forHTTPHeaderField: "X-Interject") == "1"))
                     for try await line in bytes.lines {
                         guard line.hasPrefix("data: ") else { continue }
                         if let ev = Self.parseStreamEvent(String(line.dropFirst(6))) {
@@ -326,7 +373,11 @@ struct ChatService {
             else { return nil }
             return .permit(card)
         case "error":      return .error(obj["content"] as? String ?? "出错了")
-        case "done":       return .done(try? JSONDecoder().decode(ChatResponse.self, from: data))
+        case "interject":  return .interject(into: obj["into"] as? String ?? "")
+        case "interject_point": return .interjectPoint(rid: obj["rid"] as? String ?? "")
+        case "done":
+            if let into = obj["merged"] as? String { return .merged(into) }
+            return .done(try? JSONDecoder().decode(ChatResponse.self, from: data))
         default:           return nil
         }
     }
@@ -335,9 +386,13 @@ struct ChatService {
 
     /// 待答的卡（回前台对齐用；char 缺省＝全部角色）。
     func pendingQuestions(char: String? = nil) async throws -> [QuestionCard] {
+        try await questionsState(char: char).pending
+    }
+
+    /// 待答的卡 + 近一小时收场了的卡的收场态（10-30：让路 / 超时 / 答了，卡片据此置灰标原因）。
+    func questionsState(char: String? = nil) async throws -> CardsState<QuestionCard> {
         let data = try await perform(authedRequest("GET", "/questions/pending", char: char))
-        struct Resp: Decodable { let pending: [QuestionCard] }
-        do { return try JSONDecoder().decode(Resp.self, from: data).pending }
+        do { return try JSONDecoder().decode(CardsState<QuestionCard>.self, from: data) }
         catch { throw ChatServiceError.badResponse }
     }
 
@@ -358,9 +413,13 @@ struct ChatService {
 
     /// 待批的写类调用（回前台对齐用；char 缺省＝全部角色）。
     func pendingPermits(char: String? = nil) async throws -> [PermitCard] {
+        try await permitsState(char: char).pending
+    }
+
+    /// 待批的卡 + 近一小时收场了的卡的收场态（口径同 questionsState）。
+    func permitsState(char: String? = nil) async throws -> CardsState<PermitCard> {
         let data = try await perform(authedRequest("GET", "/permits/pending", char: char))
-        struct Resp: Decodable { let pending: [PermitCard] }
-        do { return try JSONDecoder().decode(Resp.self, from: data).pending }
+        do { return try JSONDecoder().decode(CardsState<PermitCard>.self, from: data) }
         catch { throw ChatServiceError.badResponse }
     }
 
@@ -478,6 +537,9 @@ struct ChatService {
         let cwd: String        // 会话默认工作目录，显示用
         let busy: Bool?        // TA 正在跑活吗（只有 probeBusy 时才是真值）
         let profile: String?   // 活着的是哪个档案：code / game（游戏剧情会话共用这套路由）
+        /// 游戏会话骑在哪个引擎上（PLAN_gamechat §3.1）：pump = unified 泵（骑在聊天 session 上，
+        /// 游戏中的消息走 /chat/stream）；loop / tmux = 回退路，只能走终端口。旧后端没有 → nil → 走终端口。
+        let engine: String?
         // 「电脑上的会话」这样独占资源现在归谁（后端 plugins.EXCLUSIVE 的 tmux）。
         // 会话全机只有一个，不归当前角色时按钮要禁掉——不禁的话按下去只吃一个 409。
         let owner: String?
@@ -570,6 +632,16 @@ struct ChatService {
 
     // MARK: - 内部请求工具
 
+    /// 这台设备的 id（X-Device）：后端 outbox 按设备记 ack，模拟器和真机各领各的
+    /// （10-13：模拟器开着时把醒来消息抢先 ack 掉，手机只剩 Bark）。装一次生成一次。
+    static let deviceID: String = {
+        let key = "cassette.deviceID"
+        if let id = UserDefaults.standard.string(forKey: key) { return id }
+        let id = UUID().uuidString
+        UserDefaults.standard.set(id, forKey: key)
+        return id
+    }()
+
     // internal：MemoryPage 等功能页的服务扩展也走这两个（统一鉴权/错误翻译，别另起一套）
     // 统一追加当前角色（?char=）：设置/心流/记忆/插件这些角色态端点一处全覆盖；
     // 全局端点（/pending /code/* 等）后端不声明该参数、FastAPI 直接忽略，无害。
@@ -587,6 +659,7 @@ struct ChatService {
         var req = URLRequest(url: url)
         req.httpMethod = method
         req.setValue(BackendConfig.authKey, forHTTPHeaderField: "X-Auth")
+        req.setValue(Self.deviceID, forHTTPHeaderField: "X-Device")
         req.timeoutInterval = timeout
         if let jsonBody {
             req.setValue("application/json", forHTTPHeaderField: "Content-Type")

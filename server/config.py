@@ -6,6 +6,9 @@ from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
 
 BASE_DIR = Path(__file__).resolve().parent
+# 读 .env 之前的环境快照：app 上按「重启后端」时新进程用它起（PLAN_prs §6.2）。
+# load_dotenv 不覆盖已有变量——新进程要是继承这个进程的 env，改过的 .env 重启了也不生效。
+BOOT_ENV = dict(os.environ)
 load_dotenv(BASE_DIR / ".env")
 
 # X-Auth 共享密钥：app 与后端各持一份。不配则后端拒绝所有请求（fail closed）。
@@ -115,6 +118,56 @@ READONLY_TOOLS_ENABLED = os.environ.get("READONLY_TOOLS", "0") == "1"
 # 拨开=写类 schema 挂载+审批通路生效。默认关，两段拨闸：先 READONLY_TOOLS
 # 实测 schema token，稳了再拨这个（上电硬前置：iOS 权限卡先做出来，§6）。
 WRITE_TOOLS_ENABLED = os.environ.get("WRITE_TOOLS", "0") == "1"
+
+# 醒来改代码只提 PR（PLAN_prs）：拨开=PR 工具（prs_mcp）挂进 sdk 聊天 session、
+# 本角色工作副本（.worktrees/<char>/）里的写类直接放行不弹卡。前提是 WRITE_TOOLS
+# 也开着（在副本里干活用的就是 Edit/Write）。默认关。（10-29 起醒来轮也弹卡，
+# 「关着时 wake 轮写类照样拒」那条退役——关着只是副本不放行、照样弹卡。）
+WAKE_PRS_ENABLED = os.environ.get("WAKE_PRS", "0") == "1"
+
+# 派活提 PR（PLAN_delegate §2 / §8 第 2 条，10-30）：他挑模型写说明、后端起一次性 session 去改。
+# 白名单（fable 是别名 → claude-fable-5-1）；日上限按发起的轮分两档，先这么定、跑一周看实际再调。
+DELEGATE_MODELS = os.environ.get("DELEGATE_MODELS", "haiku,sonnet,opus,claude-fable-5-1")
+DELEGATE_DAILY = int(os.environ.get("DELEGATE_DAILY", "5"))
+DELEGATE_DAILY_WAKE = int(os.environ.get("DELEGATE_DAILY_WAKE", "2"))
+# 灰度（§7 第 5 步）：逗号分隔的角色 id，只这些角色能派；空 = 都能。先只给 cass 开一周。
+DELEGATE_CHARS = {s.strip() for s in os.environ.get("DELEGATE_CHARS", "").split(",") if s.strip()}
+
+# 工具延迟 + 常驻（PLAN_toolmount §2，10-30 第 8 步）：sdk 聊天 session 挂 ToolSearch，
+# 工具用法（schema）按名字取、常驻名单（pipeline.ALWAYS_LOAD_SERVERS）照旧全量。
+# 同一把闸也管「轮间隙 toggle」那个口子（§5.2 / §10）：game 平时 toggle off、插件在 app 里
+# 开关走 toggle、关着的插件也挂上随即 toggle off。
+#   "0" / 空（默认）= 关：一切照旧全量，回退一行；"1" = 全角色；"cass,default" = 只这些角色。
+# 只管常驻 session 路（context="chat_session"）；-p 老路（wake.py / cohabit）口径照旧
+# （pipeline.TOOL_SEARCH_CONTEXTS）。先给 cass 开几天看 ToolSearch 频率。
+CHAT_TOOL_DEFER = os.environ.get("CHAT_TOOL_DEFER", "0").strip()
+
+
+def chat_tool_defer(char_id) -> bool:
+    """这个角色的常驻聊天 session 开不开工具延迟（含轮间隙 toggle 口子）。"""
+    v = CHAT_TOOL_DEFER
+    if v in ("", "0", "false", "off"):
+        return False
+    if v in ("1", "true", "on", "all"):
+        return True
+    return bool(char_id) and char_id in {s.strip() for s in v.split(",") if s.strip()}
+
+
+# 轮内插话（PLAN_interject §4 / P2–P4）：TA 在他一轮没说完时发的话，直接写进在飞的聊天
+# session（CLI 在下一个工具边界吸收；没有边界就自己另起一轮）。"0" / 空 = 关：一切照旧排队；
+# "1" = 全角色；"cass" = 只这些角色（灰度先开一个，看一周重铸 / rescue 次数）。
+# 同时要 app 新包在请求头声明支持（X-Interject），两边都要有，旧包一行不变。
+INTERJECT = os.environ.get("INTERJECT", "0").strip()
+
+
+def interject_on(char_id) -> bool:
+    v = INTERJECT
+    if v in ("", "0", "false", "off"):
+        return False
+    if v in ("1", "true", "on", "all"):
+        return True
+    return bool(char_id) and char_id in {s.strip() for s in v.split(",") if s.strip()}
+
 
 # 问答卡（PLAN_chatui §3.5/U4）：AskUserQuestion 挂进 sdk 聊天 session（不进
 # allowed_tools → 每问一卡，can_use_tool 挂起等机主作答，updated_input 回填）。

@@ -26,7 +26,7 @@ struct ConversationsPage: View {
                         if let line = c.statusLine {
                             Text(line)
                                 .font(.footnote)
-                                .foregroundStyle(Color.userAccent)
+                                .foregroundStyle(Color.noteGray)
                                 .lineLimit(1)
                         }
                         let preview = chatStore.preview(for: c.id)
@@ -41,15 +41,15 @@ struct ConversationsPage: View {
                     if let n = chatStore.unread[c.id], n > 0, c.id != currentID {
                         Text("\(n)")
                             .font(.caption2.bold())
-                            .foregroundStyle(.white)
+                            .foregroundStyle(Color.onChatInk)
                             .padding(.horizontal, 7)
                             .padding(.vertical, 3)
-                            .background(Capsule().fill(Color.userAccent))
+                            .background(Capsule().fill(Color.chatInk))
                     }
                     if c.id == currentID {
                         Image(systemName: "checkmark")
                             .font(.footnote.weight(.semibold))
-                            .foregroundStyle(Color.userAccent)
+                            .foregroundStyle(Color.chatInk)
                     }
                 }
                 .contentShape(Rectangle())

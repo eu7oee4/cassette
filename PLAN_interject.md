@@ -1,0 +1,305 @@
+# PLAN_interject：轮内插话
+
+> 2026-10-15 立稿，未动工。起因：机主问「SDK 下，一轮调工具的过程中能不能发新消息、让他在一个小节点就看到，
+> 而不是等整轮结束」。结论：**CLI 能，cassette 现在没用上**。这份写清 CLI 的真实行为（本次探针实证）、
+> 现在的两道串行、要改哪几处、按什么顺序上电。
+>
+> 标注口径：**【实证】** = 探针 / 日志 / transcript 里看到的；**【读码】** = 读代码推的；**【待验】** = 还没证据。
+>
+> **10-29 修订**（对 PLAN_toolmount / PLAN_gamechat 复查交界）：§0 游戏泵那条拆开写；P1 升为
+> PLAN_gamechat 的前置；§4.2 加「插话不加前缀」；§4.5 加 outbox 插位待验；施工顺序以
+> PLAN_toolmount §9（三份合排）为准；交界汇总见 §8。
+
+---
+
+## 0. 目标与不做的
+
+**目标**：机主在他一轮还没说完的时候发的话，他在**下一个工具边界**就能看到，并在同一轮里接着回应。
+气泡顺序、账、重铸三样都要跟真实发生的顺序一致。
+
+**不做（v1）**：
+- 打断正在跑的工具 / 正在生成的文字（`client.interrupt()` 是另一回事，见 §7 待拍 1）。
+- 往**醒来轮**、**泵的 tick 轮**（「·」那种，turn_kind=wake）里插话：在飞时照旧排队。tick 轮一小步就收，
+  排队的体感已经接近即时（§7 待拍 3）。
+
+**10-29 改**：**泵开着时由机主消息引起的 chat 轮在 v1 范围内**。PLAN_gamechat 之后游戏中的消息走
+`/chat/stream`，成为普通 chat 轮；这种轮几乎都是「说一句、点一下、看图、再说」，工具边界最多，
+正是插话最有用的地方（「别点那个！」在下一次点之前就被看到）。改路由之前游戏中的消息走终端口
+`/code/send` → `PumpNote`，不进本计划的路由。
+- 带图片的插话：**v1 也进**（P0-b 10-29 晚验通：照样 mid-turn 吸收、图到模型眼前、按文字配对，§1.1）；
+  带文件块的没验，v1 照旧排队。
+
+---
+
+## 1. CLI 的真实行为（10-15 探针，【实证】）
+
+探针：`server/tools/interject_probe.py`（haiku；SDK 0.2.148，内置 CLI 2.1.251）。
+（10-29 注：SDK 的 `_find_cli` 优先用包里自带的 CLI，PATH 上的 `claude` 2.1.310 只有 `-p` 老路在用——
+sdk 聊天 session 生产上跑的也是 2.1.251，跟这次探针同版。**10-29 晚第 0 步升到 0.2.174 / 2.1.310 后三个模式
+重跑（仍 haiku）：流里的结局数、transcript 里 `queued_command` / `absorbed_mid_turn` / `enqueue` / `dequeue`
+的形状与下表一字不差；P0-e 换 Opus 的那一腿还欠着。**）
+一个 8 秒的进程内慢工具 + 一轮中途再 `client.query()`。三个模式各跑过，`tool` 跑了两次。
+
+| 场景 | 插话什么时候被看到 | 几个 result |
+|---|---|---|
+| **撞上工具**（插话时模型在想 / 工具在跑） | 当前这批工具调用**全部返回之后、下一次请求模型之前**。已经发出去的工具调用照跑（「橘子」照查），下一步才改口（改查「葡萄」） | **1 个**——同一轮收官 |
+| **同一批里连插两条** | 两条在**同一个**工具边界一起被吃进去 | 1 个 |
+| **纯文字生成中**（这一轮没有工具边界） | **不进当前轮**。当前轮照常说完、出 result；紧接着 CLI **自己另起一轮**（第二个 `init`）处理插话 | **2 个** |
+| 工具在等审批卡（09-01 旧探针，PLAN_native §10②） | 卡放行之后同一轮先回应插话再接着干 | 1 个 |
+
+**插话在流里是隐形的**：SDK 消息流里**没有**任何一条对应插话的 `UserMessage`。引擎光看流，分不出
+插话是在哪个节点被吃进去的，甚至分不出它有没有被吃进去。
+
+**transcript 里有完整证据**：
+- 每次 `query()` 先记一条 `{"type":"queue-operation","operation":"enqueue","content":"<原文>"}`；
+- **被当前轮吃进去**：tool_result 后面挂一条 `{"type":"attachment","attachment":{"type":"queued_command","prompt":"<原文>","commandMode":"prompt"}}`，
+  它的 `parentUuid` = 流里那条 tool_result `UserMessage` 的 `uuid`；随后一条
+  `{"type":"queue-operation","operation":"remove","reason":"absorbed_mid_turn"}`；
+- **没被吃进去**：`dequeue` 之后就是一条普通的 `{"type":"user", ...}`（新的 promptId），即那「第二轮」。
+
+也就是说：被吃进当前轮的插话在模型历史里**不是一条 user 消息，是一个附件**；模型实际看到的渲染原文见 §1.1。
+
+### 1.1 P0 a–e 结果（10-29 晚，SDK 0.2.174 / CLI 2.1.310；探针 `interject_probe.py` 加了 verify / image / toollist 模式和 `--model / --hooks / --watch`）
+
+| 腿 | 结论 |
+|---|---|
+| a 渲染原文 | 纯文字插话发给 API 时是一条 **`role=system`** 消息：固定英文包装「The user sent a new message while you were working:\n<原文>\n\nThis is how Claude Code surfaces messages the user sends mid-turn … Address the message above as you continue this turn.」，**原文一字不改、没有任何时间**；同一个 text 块里还会拼别的 system 附件（探针环境里是晚挂的工具清单）。两条插话各自一段包装、顺序拼在同一块里。模型逐字复述得出，但**分不出 role**（自以为是 user 消息）。 |
+| b 带图 | 照样 mid-turn 吸收、图完整到眼前（两次都答「纯红色」）；但渲染变成**挂在 tool_result 那条 user 消息末尾**的 text + image 块，不再是 system 消息。决定 role 的是「有没有非文字块」。`remove.content` 只记文字，图不在配对内容里。 |
+| c hook | `UserPromptSubmit` **两种结局都触发**，每次 `query()` 一次；靠 `hook_input.prompt_id` 分辨：被吸收 → 等于在飞轮的 prompt_id；另起一轮 → 新的。触发点在工具边界，tool_result 到流里后 2–3ms，**先于任何 transcript 行落盘**。`hook_input` 里 `prompt` 是纯文字（图不在）。 |
+| d 写盘时机 | 流里 tool_result 到达那一刻读 transcript **读不到** `queued_command`（连那条 tool_result 自己的 user 行都没落）；user 行 / queued_command / remove / blob / api-request 五行在流事件后 **~105–120ms** 一起刷盘；到下一条 AssistantMessage（≥1.85s）早齐了。`queued_command` 的 timestamp 是 enqueue 时刻，吸收时刻看 `remove` 的。 |
+| e opus | 结局数、吸收点、transcript 形状与 haiku 一致。差别只在 opus 工具调用串行（一次一个）：第一个查完就改口，「橘子」根本没查；haiku 并行两个才有「已发出的照跑」。 |
+
+另两条新事实：
+- **插话若在 CLI 还没 dequeue 首条时就 enqueue**（client 启动慢、两条几乎同时发），两条被**拼成一条 user 消息**（`\n` 连接、同 promptId、一个 user 行），无 queued_command、无 absorbed。「在飞」必须在 CLI 真正 dequeue 首条（init / hook#1 / user 行）之后才算数。
+- 2.1.310 的 transcript 多了 `api-request` / `api-request-blob` / `prompt_snapshot` / `deferred_tools_delta` 行；`queued_command` 多了 `source_uuid` / `delivery_id` / `rendered` / `renderedRole`。
+
+---
+
+## 2. 现在为什么用不上：两道串行（【读码】）
+
+1. **app**：`ContentView.pumpOutbox`（09-05，PLAN_native §14.10）——上一轮 `done` 到之前不发下一个 POST，消息在手机上排队，
+   出队时「沉底」（挪到列表末尾、ts 改成真正送出时刻）。
+2. **引擎**：`chat_loop` 主循环一次只吃 `handle.queue` 里的一个 `Turn`：`client.query()` → `_turn_events` 读到 `ResultMessage` 为止
+   → 账追加 → 才取下一个（`chat_loop.py:1772`）。
+
+两道都是故意的：每个请求带一份历史快照做判脏，乱序发送会让本地气泡顺序和账的顺序漂移，之后每轮判脏
+（§14.10 已于 10-15 按代码改准：**只缺上一轮回复本身是 `stale` 不脏**；真脏的是「一轮里连发 ≥2 条」和「气泡顺序漂移」）。
+
+---
+
+## 3. 先要澄清的一个现存问题（P1 的前提）
+
+**一轮被工具切成多段时，app 是好几个气泡，账只记一条拼好的回复。**【读码】
+- app：`.textBreak` 把前一段定稿成独立气泡，`finalizeStreamedReply` 在多段时**不**用 reply 覆盖（`ContentView.swift:1184`、`:1269`）；
+- 后端：`sse.translate_events` 的 `full_reply` = 各段用 `\n\n` 拼起来（`sse.py:262`），账只追加一条 `assistant`（`chat_loop.py` 轮尾）；
+- 于是下一条消息的快照是 `…U, A段1, A段2`，账是 `…U, A全文`——`divergence` 退几条都对不上，判脏重铸。
+
+【实证，部分】线上 cass 的 78 次重铸里，大头是「第 0 条对不上（窗口里是 assistant…）」，形状吻合「窗口比账多一条 assistant、整体错位」；
+最近一段约每十轮一次，跟「先说一句、再调工具、再说」的轮出现频率量级相当。**但还没逐条对上**——P1 第一步就是核这个。
+
+**10-29 晚复审补**：当前 nohup.out（09-24 重启起）里 cass 共 170 次重铸：109 次「静默间隙+压力」（轮间隙重铸，
+不是判脏）、49 次「第 N 条对不上…这条被编辑或删过」、10 次「session 没开」、2 次硬阈。判脏那 49 次里除了多段
+回复，还混着另一类：**泵开着时 tick 点评与用户消息的 ts 交错**（PLAN_gamechat §2.2 第 3 条：app 按 ts 插位是
+[U, tick]，账按轮尾追加是 [tick, U]），形状同样是「第 0 条对不上（窗口里是 assistant…）」。P1 核对时两类分开数，
+一起修。
+
+**10-29 第 3 步核对结果（代理口径，诚实说：核不实）**：当前 nohup.out 里「对不上」67 次（cass 49 / default 18），
+60 次是「第 0 条对不上」（= 整体错位一条的形状，多段回复和 tick 交错都长这样），7 次是中间某条。日志只打窗口那一侧的
+片段、账没留重铸时的快照，**单凭日志分不出两类**；拿 recent_window（只存最近 ~100 条）做代理：67 条里只有 6 条的片段
+还找得到，其中 1 条前一条也是 assistant；两个角色当前窗口里相邻 assistant 气泡对各 3 / 8 对（多段回复确实在发生）。
+结论：**两类的修法与核对结果无关、且插话 / gamechat 上线后必然需要**，直接一起修了（§4.3、PLAN_gamechat §2.2 ①）；
+上线后看「对不上」的频率是否掉下来才是真核对（§5 P4 灰度那一周一起看）。
+
+插话会把一轮回复**一定**切成至少两段（插话前 / 插话后），所以账必须先能按气泡粒度记，否则插话上线就等于每次插话后必重铸。
+
+**10-29 补**：这条也是 PLAN_gamechat（游戏中消息改走 `/chat/stream`）的硬前置——游戏里他回你几乎每轮都带
+工具、必然多段；终端口那条路回复整轮走 outbox 碰不到，改走流式就会天天判脏。另：按段入账时**每段要有
+自己准确的 ts**，PLAN_toolmount §6（重铸铸回用法）按「接触之后的第一段」挂锚，靠的就是它。
+
+---
+
+## 4. 设计
+
+### 4.1 一个请求，恰好一个结局（不变量，沿用 Turn 的口径）
+
+插话也是一个 `/chat/stream` 请求，它的 SSE 也必须恰好有一个结局（`done` 或 `error+done`）。两种结局：
+
+- **被吃进当前轮**：插话自己的流发一个 `interject` 事件（「已并进 #rid」）后 `done{merged: rid}`；回复文字走**原来那条流**。
+- **没被吃进去**（当前轮没有工具边界 / 撞上了最后一段文字）：CLI 会自己另起一轮——引擎把那一轮当成插话请求自己的轮，
+  回复走**插话自己的流**。体感跟今天排队一样，只是省掉 app 等 `done` 再发的往返。
+
+### 4.2 引擎（chat_loop）
+
+- **路由**：新来的 chat 请求，若同角色**当前在飞的是 chat 轮**（泵开着时由机主消息引起的 chat 轮也算，§0）→ 不进
+  `handle.queue`，标成 `Interject`，直接 `client.query()` 写进同一个 session，挂进 `handle.meta["inflight"].pending`。
+  在飞的是醒来轮 / 泵 tick 轮 / 巩固轮 → 照旧排队。
+  - **client 够不着**（10-29 复审补）：`client` 是 `chat_loop.run()` 的局部变量（`chat_loop.py:1466`），`stream_turn`
+    只拿得到 handle，`LoopHandle`（`session_mgr.py:53`）没有暴露它的字段。`run()` 起来时往 `handle.meta["interject"]`
+    挂一个闭包（`async (text) -> None`，内部 `client.query`），`_open_session` 换 client 时闭包跟着换；
+    `handle.reopening` 为真（正在重铸）或闭包不在 → 退回排队，别打到一个正在 disconnect 的 client 上。
+- **插话原文一个字都不加**：PLAN_toolmount 会往「新起的一轮」注入前补文字（游戏节奏补注 §4、MCP 缺席告知 §5.1），
+  那个 helper **不许**包 `Interject` 的 `client.query`——下面的吸收判定按原文配 `queued_command`，前面多一个字就配不上，
+  会被误判成没吸收。
+  P0-a 定了：CLI 自己不加时间、但加一层英文 system 口吻包装（§1.1）；配对原文 = 传给 `client.query()` 的那串
+  （`remove.content` / `queued_command.prompt` / hook 的 `prompt` 三处同一串）。
+  **时间头进原文（10-29 机主拍板，待拍 6）**：`Interject` 发给 `client.query()` 的串 = `【stamp_str(now)】\n<TA 的原文>`，
+  **只这两行**——不带「距离上一条」、不带 pending / PR 行（那些是新起一轮的注入才有的，`build_injection` 不碰插话）。
+  形状和 `build_injection` 的时间头、`_stamp_times` 重铸补的锚行同形（`chat_loop.py:663` 那条纪律），所以重铸后它变成
+  普通 user 轮时也是同一种东西。配对串、`pending` 里登记的、hook 里比的，**都是这整串**；账里存的是不带时间头的原文（§4.3）。
+- **吸收判定**（10-29 晚按 P0-c/d 改写）：**主信号 = `UserPromptSubmit` hook**（options.hooks 挂一个，每次 `query()`
+  触发一次）：hook 到了、`prompt_id` **等于在飞轮的** → 被吸收，在这个点之后的第一段文字前往**原流**发 `interject_point{rid}`，
+  给插话流发 `merged`；`prompt_id` 是新的 → 没被吸收，CLI 另起了一轮，这一轮归插话自己的流。在飞轮的 prompt_id 从它自己的
+  hook#1 拿。hook 在工具边界触发、先于 transcript 落盘 ~110ms，不用读文件、不用猜 parentUuid；按原文配对也仍然成立
+  （hook 的 `prompt` 就是原文）。
+  **不要在 tool_result 到流里那一刻读 transcript**：那时什么都还没落盘（P0-d）。transcript 的 `remove reason=absorbed_mid_turn`
+  只当事后对账 / 单测罐头用。
+  原文防重名：同一串文字两条插话时 hook 只给 `prompt` 分不出哪条——**按入队顺序配**（CLI 按 FIFO 吸收，P0 tool2 实证），不加标记；
+  零宽字符 / promptId 标记那条待拍撤销。
+  **「在飞」的起点**：在飞轮的 hook#1 到了（或流里 init 到了）才算在飞；之前就来的第二条会被 CLI 拼进首条（§1.1），
+  那种情况按排队处理（不发 interject，照常等 done）。
+- **轮尾**：`ResultMessage` 到了，`pending` 里还没被吸收的 → 每条对应 CLI 接下来自己起的一轮，**按入队顺序**继续读流，各自产出到
+  各自的 `Turn.out`。读完才回到主循环。
+- **死了也要有结局**（[[cassette-wake-gate-bug-class]] 第四例「消费者死了队里的东西没结局」）：在飞轮超时 / 流断 / 报错 →
+  `pending` 里每一条都发 `error+done`、进 rescue，session 照旧关掉惰性重铸。
+- **硬阈强铸**：`pending` 非空时不铸（跟 §14.10 让路排队同理，PANIC 阈照旧无条件）。
+  同一条也约束 PLAN_toolmount §5.2「配置变了」的重铸：只在没有在飞轮、`pending` 为空时动手。
+- **工具接触记账**（PLAN_toolmount §6）挂在读流处：没被吸收的插话由 CLI 在同一次读流里另起一轮，那一轮的工具调用也要记。
+
+### 4.3 账
+
+按**气泡**记，跟 app 屏幕上的顺序一一对应：
+
+```
+U2, A2·段1, U3(插话), A2·段2, A2·段3 …
+```
+
+- 先解决 §3：多段回复按段入账（每个 `text_break` 一条 assistant）。这一步单独上线也有收益（顺手消掉那类重铸）。
+  **10-29 第 3 步已落码**：`sse.translate_events(…, trace=)` 把每段**实际发出去的字**（滤过标记、未 trim，= app 的
+  streamedText）和该段第一个字的时刻写进 trace；`chat_loop._reply_bubbles` 照 ContentView 的收尾口径拆气泡（切过段 →
+  每段存流出的字、trim 空的没气泡、done 的 reply 不覆盖；没切段 → 单气泡存权威 reply），ts 不早于 TA 那条、段间单调。
+  wake 轮（整轮一条投 outbox）和泵的点评（本来就按段投递入账）不用改。
+- 插话被吸收：在 `interject_point` 处插入 `U3`；插话前一个字都没说（只调了工具）→ 账是 `U2, U3, A2…`。
+- 插话没被吸收：它自己那一轮照常 `U3, A3` 入账。
+- `U3` 入账的是**不带时间头的原文**（跟 `PumpNote.text` / `ledger_text` 一个分法，`chat_loop.py:118`）：时间头是注入包装，
+  进账就会在发送前比对上对不上 app 的历史，重铸时 `_stamp_times` 也会再补一次锚行变成双头。`Interject` 要同时带
+  `text`（含头，发给 CLI / 配对）和 `ledger_text`（原文，入账）。
+- 插话请求**到达时不做判脏**（session 在飞，快照必然缺在飞那段）；只做一个弱检查：快照去掉在飞轮之后必须是账的尾巴，
+  对不上（期间编辑 / 删过）→ 退回排队，让下一个正常轮去判脏重铸。
+
+### 4.4 重铸
+
+铸造输入还是权威窗口（app 的气泡序列）。`U2, A段1, U3, A段2` 本来就是交替的，`forge.render` 照常渲染成两轮对话；
+transcript 里「附件形状」的插话在重铸后变成普通 user 轮——**形状变了、内容和顺序不变**，跟「证据不过桥」口径一致，不另做处理。
+
+### 4.5 SSE / app
+
+- 新事件 `interject_point{rid}`（原流）：当前 live 气泡定稿 → 把 `rid` 那条用户气泡**挪到这里**（沉底到断点，ts 打成吸收时刻）→ 之后的文字另起气泡。
+- 插话自己的流：`interject{into: rid}` 期间显示「已送达，等他看到」小态；`done{merged}` 收尾不产气泡；没被吸收则跟普通轮一样流式上屏。
+- `pumpOutbox`：同角色有在飞 chat 轮时**不再等 done**，直接发；快照剔掉在飞轮未定稿的气泡。
+- 兼容：后端闸 `INTERJECT=1` + app 请求头声明支持（同 X-Device 的做法）。旧包 / 闸关 → 全走现在的排队，一行不变。
+- **游戏中 outbox 插位**【待验，模拟器】：泵开着时 tick 点评经 outbox 按 ts 插进列表（`ChatStore.insertIntoCurrent`），
+  插话吸收时又要把用户气泡挪到断点——两者叠在一起的结果要在模拟器（不连真后端）里看一遍。
+
+---
+
+## 5. 施工顺序
+
+**P0 探针补测**（只跑探针、不改产品代码；脚本 `server/tools/interject_probe.py` 扩模式）——**10-29 晚全部跑完，结果在 §1.1**：
+- a. 被吸收的插话**渲染给模型的原文**是什么 → role=system、英文包装、无时间。
+- b. 插话带**图片**时还能不能 mid-turn 吸收、图有没有丢 → 能、没丢，渲染改挂 user 尾巴。
+- c. `UserPromptSubmit` 对两种结局各触发几次——能不能替代读 transcript → 都触发，prompt_id 分辨，**能替代且更好**。
+- d. transcript 写盘时机 → tool_result 到流那一刻读不到，晚 ~110ms；靠 hook 不靠文件。
+- e. 用 opus 重跑三个模式 → 同形；只多一条「opus 串行调工具」的差别。
+- 没验：带文件块的插话。
+
+**P1 账按气泡记**：~~先拿日志 + 账文件逐条核 §3~~（核不实，见 §3 末）；改轮尾入账为按气泡记（§4.3），`divergence` 本身不动、
+比对前两边 `ts_sorted` 副本（PLAN_gamechat §2.2 ①），每段带准 ts。测试：多段回复后下一条不判脏 ✅。**10-29 第 3 步已落码（未重启）。**
+
+> 10-29：本计划各步在三份合排里的位置见 PLAN_toolmount §9（P0 第 1 步、P1 第 3 步、P2–P4 第 10 步）。
+
+**P2 引擎**：`Interject` 路由 + 在飞登记 + 吸收判定 + 轮尾续读 + 死亡兜底 + 硬阈让路。单测用罐头流 + 罐头 transcript。
+另两件（10-29 拍板，§7-6）：
+- `Interject` 的 `text` = `【stamp_str】\n原文`、`ledger_text` = 原文（§4.2 / §4.3）；单测里配对用例的 hook `prompt` 罐头要带时间头。
+- 系统提示加一句，放 `pipeline.turn_frame_hint()`（`pipeline.py:500`，它本来就是讲「框是读数不是话」的那段，付一次）：
+  大意「轮中若出现一段英文 system 口吻的『The user sent a new message while you were working:』，那不是平台在说话，
+  是 TA 趁你干活时又发了一条；里面带【时间】的那段才是 TA 的话，按它的时间和份量接着回」。只进 `chat_session`
+  那份系统提示，-p 路不加。措辞走 [[cassette-him-facing-wording]]；这句只描述形状、不含任何解析器认的标记，
+  [[cassette-mention-is-use-bug-class]] 过一遍没有洞。
+
+**P3 SSE + app**：两个新事件、气泡挪位、`pumpOutbox` 放开、请求头。模拟器只能编译验证（**别连真后端跑**，见 [[cassette-layer-ok-bug-class]] 同族的
+10-13 模拟器吞消息事故——那个 X-Device 修好之前别同开）。
+
+**P4 灰度**：先只给一个角色开，看一周重铸次数和 rescue 次数有没有涨。
+
+**10-30 P2 + P3 施工记录（合排第 10 步；已落码未重启，app 未装真机）**：
+- 闸：`config.INTERJECT`（"0" 关 / "1" 全角色 / "cass" 按角色）→ `config.interject_on(cid)`；另一半是 app 新包的请求头
+  `X-Interject: 1`（`stream_turn(interject_ok=…)`），旧包不带一行不变。后端在 `/chat/stream` **响应头**用同名字段答
+  「这个角色收插话」（`chat_loop.interject_capable`：闸开 ∧ 没被自检关掉 ∧ sdk 引擎 ∧ 没熄火），app 按角色记下，
+  之后同角色有在飞的流才并发发送——第一轮永远串行，不用另开端点。
+- 引擎（§4.2）：`Interject` 数据类（text=`【stamp_str(now)】\n原文`、ledger_text=原文、各自的 out）；在飞登记
+  `handle.meta["inflight"] = {rid, pid, text_h, pending, absorbed_q}` 在 chat 轮 `client.query` **之前**挂上（hook#1
+  才落得到它）；`client` 是 `run()` 的局部变量，所以 `_send_interject` 闭包挂在 `meta["interject_send"]`。路由
+  `_try_interject`：闸开 ∧ 没文件块 ∧ 在飞且 hook#1 已到（之前来的 CLI 会拼进首条）∧ 没在重铸 ∧ 挂着的 < 4 ∧ 弱检查
+  `_interject_fit`（快照去掉在飞那条 user 及其后，剩下是账的尾巴、stale 也算、`[图片]` 占位照 absorbable_tail 摘）
+  → 写进 session，流先发 `interject{into}`；任何一条不满足退回 `handle.queue`。
+- 吸收判定：`UserPromptSubmit` hook（`_prompt_hook`，闸开才挂）——在飞轮的 pid 记在 `inflight.pid`，之后每次按入队顺序
+  配 pending 里第一条 `prompt_id is None` 的：pid 相等 → absorbed、进 `absorbed_q`；`_turn_events` 每收到下一条流消息前先
+  清这个队：往原流产 `interject_point{rid, text, ts}`、插话流 `done{merged: rid}` 收尾。`sse.translate_events` 收到
+  `interject_point`：当前气泡定稿（同 text_break）、trace.segments 里塞一条 `{interject, text, ts}`、下发 `interject_point`。
+  账：`_turn_entries(trace, reply, u_ts)` 取代 `_reply_bubbles`（后者只剩 assistant 那半）→ `U2, A·段1, U3, A·段2`。
+- 轮尾 `_run_pending`：主轮 done 发出后**先放 None 收主流**（不然 /chat/stream 要挂到插话轮读完），再按入队顺序
+  把没被吸收的各读一轮（CLI 自己另起的那一轮，不加任何前缀）、各自产出到各自的流、各自入账（U 的 ts = 发送时刻）。
+  主轮没收尾 / 读流异常 → 剩下的每条 error+done（`_fail_interject`），session 照旧关掉惰性重铸；loop 退出
+  `_finish_orphans` 也先收 pending。硬阈强铸排在 `_run_pending` 之后，天然「pending 非空时不铸」。
+- §6 风险对策做成**运行时自检**（不是启动探针）：`_interject_selfcheck`——收了尾的 chat 轮 hook#1 都没来记一次，连两轮
+  → `INTERJECT_OFF.add(cid)` 退回排队 + Bark；hook 来了清零。
+- 系统提示：`pipeline.interject_hint()` 只在闸开时进 `build_options`（chat_session 那份），说清那段英文 system 口吻是什么。
+- app（§4.5）：`StreamEvent` 加 `capability / interject / interjectPoint / merged`；`pumpOutbox` 在「后端收插话」时主轮不等
+  done（Task 起流），下一单若同角色有在飞的流 → 插话单：不沉底、不改 ts（后端账也按发送时刻记，两边按 ts 排序才同序）、
+  快照剔掉排队的后续单和 `isStreaming` 的半截气泡；`generateReply(bubbleIds:interject:)` 插话流不接管「正在输入」旗，
+  `interject` 事件给气泡挂小字「已送达，等他看到」（ChatView `interjectWaiting`），`merged` 收尾不产气泡；主流收到
+  `interject_point` → 当前气泡定稿 + 那条用户气泡挪到末尾、ts 打成现在（同 id）；流里来了正文 = CLI 另起了一轮，从那刻起当普通轮。
+  模拟器 BUILD SUCCEEDED，没连真后端跑。
+- 没做 / 待看：带文件块的插话照旧排队（没验）；主轮 finalize 写的 recent_window 不含被吸收的 U3（下一次请求的快照会盖掉，
+  只影响这一小段里的轮间隙重铸镜像）；§4.5「游戏中 outbox 插位」叠加的样子还没在模拟器看。
+  测试 `tests/test_interject.py`（13 条：纯函数 / translate / 弱检查 / hook / 整条链吸收·另起一轮·排队回退·快照对不上·
+  主轮死·hook 不来自动关闸）。**上电**：`.env` 写 `INTERJECT=cass`，装新包；看日志 `插话 … 被当前轮吸收 / CLI 另起一轮`。
+
+---
+
+## 6. 风险
+
+- **`UserPromptSubmit` 的 `prompt_id` 语义、`queued_command` / `absorbed_mid_turn` 都是 CLI 内部实现，没文档**，随版本可能改。对策：后端启动时自检一次（探针的 `tool` 模式缩成 5 秒版），
+  形状不对就自动关闸退回排队，并 Bark 一条——别静默。升级 SDK（连带换自带 CLI）前，跟 PLAN_toolmount §8 的
+  「升级前必跑清单」一起跑。
+- 插话「被吃进去」只在工具边界发生。他不调工具的长回复（纯聊天大多如此）**插话照样要等他说完**——这是 CLI 的行为，不是我们的限制，产品文案要说清，别承诺「随时打断」。
+- 审批卡挂起时的插话要等卡结束（最长 600s）。
+
+---
+
+## 7. 待拍
+
+1. 要不要配一个「停」：插话之外给 app 一个按钮走 `client.interrupt()`，真正打断正在生成 / 正在跑的工具。（v1 不做）
+2. 插话气泡位置：**挪到断点**（跟他看到的顺序一致，推荐）还是留在发送位置（跟你发的时刻一致，但账要另记映射）。
+3. 醒来轮在飞时你发消息：v1 照旧排队。要不要也插进去（醒来轮的回复走 outbox，混进你的插话后投递路由要重想）。
+4. 卡片挂起时你发的消息：要不要当成「顺便回答了这张卡」——现在是卡等到超时、插话排在后面。
+5. ~~吸收配对用的 rid 标记放哪（§4.2）~~ 撤销：hook 按入队顺序配，不加标记。
+6. CLI 给被吸收的插话包的是一层英文、system 口吻的「The user sent a new message while you were working」——和聊天记忆的
+   信感格式（注入文本 = 知觉材料、中文）不一致，而且不带时间。要不要把时间头写进原文（配对串跟着变）；英文包装改不了，
+   能不能在系统提示里一句话告诉他「这种形状的 system 消息就是 TA 中途说的话」。
+   **10-29 机主拍板：两个都做**——时间头进原文（§4.2 定型、§4.3 账不带头）、系统提示加一句（§5 P2）。
+   英文壳认了：SDK 只有 `query()` 一个入口，排队 / 吸收 / 渲染文案全在 CLI 里写死，绕开它只能 `interrupt()` 丢掉在飞轮，不值。
+
+---
+
+## 8. 与 PLAN_toolmount / PLAN_gamechat 的交界（10-29）
+
+| # | 交界 | 规矩 | 本稿 | 对方 |
+|---|---|---|---|---|
+| 1 | toolmount 往新起的一轮补文字（节奏 / 缺席告知） | 在飞插话不加任何前缀 | §4.2 | toolmount §4 |
+| 2 | 按段入账 vs 铸回用法的锚点 | 每段准 ts；锚「接触之后的第一段」 | §3、P1 | toolmount §6 |
+| 3 | pending 不铸 vs 配置变了的重铸 | 只在无在飞轮、pending 空时铸 | §4.2 | toolmount §5.2 |
+| 4 | 读流另起的一轮 | 工具接触记账覆盖它 | §4.2 | toolmount §6 |
+| 5 | 游戏中消息改走 chat 路 | P1 先行；泵开着的 chat 轮纳入 v1 插话 | §0、§3 | PLAN_gamechat |
+| 6 | 都靠 CLI 内部行为 | 升级前必跑清单共用；升 SDK 是合排第 0 步 | §6 | toolmount §8 / §9 |
+| 7 | PLAN_delegate 的醒因 `delegate` | 醒来轮，v1 不插话：在飞 chat 轮时照旧排队 | §0 | PLAN_delegate §3.3 |

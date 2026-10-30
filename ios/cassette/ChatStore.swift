@@ -202,6 +202,16 @@ final class ChatStore: ObservableObject {
         }
     }
 
+    /// PR 系统行（PLAN_prs §5）：进提 PR 那个角色的会话，点了跳详情。纯 UI，不发回后端。
+    func appendPRNote(prID: Int, text: String, timestamp: Date, conversation: String) {
+        let msg = ChatMessage(sender: .me, kind: .prNote(prID, text), timestamp: timestamp)
+        if conversation == conversationID {
+            append(msg)
+        } else {
+            insertIntoFile(stamped(msg, conv: conversation), conv: conversation, bumpUnread: false) { _ in false }
+        }
+    }
+
     /// 追加一条小字提醒（§3.4：靠左、logo 前缀、固定灰）。纯 UI：显示在聊天里，不发回后端。
     /// senderID 不传＝当前会话角色（TA 做的事，带 TA 的 logo）；机主自己的动作
     /// （答题/批权限）传 "user"——机主符号待定（§8），现在渲染成无 logo 的素小字。

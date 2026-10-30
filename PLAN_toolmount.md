@@ -1,0 +1,580 @@
+# Plan：工具挂载改延迟 + 固定菜单 + 开场探活 + 重铸留用法
+
+> 2026-10-29 机主与 Claude Code 会话定稿。**设计文档，业务代码一行没动**；
+> 只新增了四个探针工具（§8），数字全部出自它们的实测。
+> 起点是「系统提示里的游戏节奏每轮都占 token」，顺藤摸出来：工具 schema 才是大头
+> （每轮固定 ~36k），菜单与挂载在 session 内永不对账，Ombre 开场没连上整条
+> session 失忆。
+> 同日补：与 PLAN_interject、PLAN_gamechat 的交界见 §11；§9 是三份合排的施工顺序。
+> 同日晚复审（对照代码 + CLI changelog 2.1.252→2.1.310）：改了 §1.4 / §2 / §3.1 / §3.2 / §3.3 / §4 /
+> §4.1 / §5.1 / §5.2 / §6 / §8 / §9 / §11；PLAN_delegate 并入合排（§9 第 0 步升 SDK、第 7 步派活）。
+
+---
+
+## 0. 一句话
+
+**sdk 聊天 session 开工具延迟；Ombre / basics 常驻，其余延迟；每个角色一份固定菜单；
+开 session 时对 MCP 探活并把缺席如实告诉他；重铸时把最近用过的工具用法铸回去。**
+
+| | 现在 | 改后 |
+|---|---|---|
+| MCP schema | 全量常驻，~36.1k tok / 请求 | Ombre+basics 常驻 ~8.2k，其余按需取 |
+| 每请求固定开销（cass，Opus 估） | ~54.8k | ~26.5k（18.3k 全延迟基线 + Ombre 7.4k + basics 0.8k） |
+| 软阈 100k 里留给对话的 | ~45k | ~73k |
+| 菜单 | 按开 session 那刻的挂载过滤渲染 | 每角色固定一份，按配置渲染，不随运行时状态变 |
+| MCP 没连上 | 静默缺席整条 session，没人知道 | 开场探活 + 重连一次 + 注入告知 + 门拒同话 |
+| 重铸后 | 全量 schema 天然都在 | 最近用过的工具用法铸回 transcript，没铸上的他自己再取一次 |
+| 游戏节奏 | 常驻系统提示 | game_start 返回值带上 + 重开后首轮补注 |
+| 收尾格式「◆」 | 常驻系统提示 | 删 |
+
+## 1. 实测依据（10-29，agent-sdk 0.2.148 / **SDK 自带 CLI 2.1.251**；§1.6 是同日晚升到 0.2.174 / 2.1.310 后的复测）
+
+> ⚠️ 两个 CLI：SDK 的 `_find_cli` 先找包里自带的 `_bundled/claude`（2.1.251，`_cli_version.py`），
+> 找不到才用 PATH 上的 `claude`（2.1.310）。所以 sdk 聊天 session 和本稿全部探针跑的都是 **2.1.251**；
+> `-p` 老路（wake.py / cohabit / forge_regress 的 CLI 腿）跑的是 2.1.310。下文 `alwaysLoad` 的说明原文
+> 是从 2.1.310 二进制里 strings 出来的，行为实测在 2.1.251 上——两版都有这个字段。
+
+### 1.1 体量（`mcp_probe.py`，cass 真实系统提示，`get_context_usage`）
+
+| | 全量 | 延迟 |
+|---|---|---|
+| 系统提示 | 13,626 | 13,626 |
+| 内置工具 | 5,041 | 4,650（+426 延迟） |
+| MCP 工具 | 36,099 | 0（36,100 延迟） |
+| **合计** | **54,774** | **18,284** |
+
+按 server：galatea 11,330（26 个）、browser 7,843、ombre-brain 7,449、jobhunt 2,369、
+game 2,298、notion 1,692、prs 914、basics 756、mail 701、webpage 480、skills 191。
+
+### 1.2 开场状态（`mcp_probe.py`）
+
+- `connect()` ~1.4s 返回；首拍 10/12 已 connected。
+- **galatea 返回后还 pending 2.4–2.6s**（两次一致）；game（进程内）+0.2s 才出现。
+- 定下来之后每个 server 实给工具与预期**全部对上**（这次 Ombre 在线，掉线情形未测）。
+
+### 1.3 toggle / 名单（`mcp_probe.py --ask`）
+
+- stdio/http server：toggle off → `disabled`、名单里消失、**模型答 NONE**；on → 回来、
+  模型报得出全名。延迟模式下名单是活的。
+- **进程内 SDK server（game）不吃 toggle**：off 静默空操作（仍 connected、14 个都在），
+  on 抛 `SDK servers should be handled in print.ts`。
+- ToolSearch 取过一次，同一份 transcript 里第二次直接调，不再取。
+- ⚠️ toggle off→on 之后再调：Sonnet 先重取一次再调（成）；**Opus 三次都返回
+  `API Error: Opus 5's safeguards flagged this message`**（换过措辞照旧，前四轮正常）。
+  原因不明 → **生产不用 toggle**（§5.3）。
+
+### 1.4 按 server / 按工具控制延迟（`mcp_probe_defer.py`）
+
+- MCP 配置 `alwaysLoad: true` → 整个 server 常驻：http（ombre）、stdio（basics）、
+  **进程内 sdk（game）都生效**（SDK 把除 instance 外的键原样传给 CLI）。
+- 单工具 `_meta["anthropic/alwaysLoad"] = true` → 只钉那一个（stdio/http 可用；
+  SDK 的 `@tool` 只生成 maxResultSizeChars 的 _meta，进程内工具做不了单工具级）。
+- **延迟开不开看 ToolSearch 挂没挂，不看环境变量**（SDK 路 / 2.1.251 实测）：不设 `ENABLE_TOOL_SEARCH`、只挂
+  ToolSearch → 全部 MCP 延迟。与 `pipeline.tool_search_on` docstring 的说法相反（§7）。
+- 「默认全量只延迟几个」的写法 = 挂 ToolSearch + 要常驻的 server 设 `alwaysLoad: true`；
+  单给某个 server 设 `false` 做不到。
+- ⚠️ CLI 里这段说明带 `@internal` 标记——**不是公开契约**，升级可能变（§8 探针兜）。
+- ⚠️ **`alwaysLoad` 的语义在 2.1.285 / 2.1.287 改过**（changelog：`alwaysLoad: false` 从「不认」改成
+  「整个 server 延迟」；opt-out 的工具保持延迟）。第 1 步在 2.1.310 上复测（§1.6）：server 级 `false` 仍然看不出
+  独立效果（D4 = D1 逐字节同；不挂 ToolSearch 时 false 也不延迟），上一条「做不到」两版都成立；
+  **生效的 opt-out 是 server `true` + 某个工具 `_meta["anthropic/alwaysLoad"] = false`**（那一个延迟、其余常驻）。
+  本稿设计只用 server 级 true。
+
+### 1.5 重铸能不能留住用法（`forge_toolref_probe.py`）
+
+目标工具 `probe_echo(zq_token_7)`——参数名猜不到，第一次就传对 = schema 真在眼前。
+
+| | Sonnet | Opus |
+|---|---|---|
+| 对照：resume 不带 tool_reference | 猜成 `{"hello":…}`，校验报错 | 拒调：「只有名字没有 schema」 |
+| 铸进 `ToolSearch → tool_result[tool_reference]` | **一次传对，成** | **一次传对，成** |
+
+- transcript 里取用法的形状：assistant `tool_use{name: ToolSearch, input: {query:
+  "select:X", max_results: 1}}` → user `tool_result{content: [{type: tool_reference,
+  tool_name: X}]}`。CLI resume 时从 transcript 恢复已加载集，伪造的也认。
+- 没取用法的延迟工具，模型**只有名字没有参数**；无参工具瞎调能成，有参的必错——
+  所以兜底「他自己再取一次」是真兜底（Opus 实测会先去取，不硬猜）。
+- ⚠️ resume 后、首轮之前 `get_context_usage` 不可信（totalTokens=1、isLoaded 全 False）。
+  **2.1.310 改善了一半**（§1.6）：totalTokens 首轮前已是真值、`_meta` 钉住的工具 isLoaded=True、逐工具 tokens 行
+  都在；只有铸进去的 tool_reference 首轮前仍报 isLoaded=False（调用照样一次传对）。§6 的 token 表可以在
+  resume 后直接读，不必等首轮；isLoaded 仍不能当「铸没铸上」的判据。
+- 铸的位置要照实：测试里 ToolSearch 挂在一句编的话上，Opus 当场指出「那时我只加载了
+  schema，并没有真正调用过」——他会对照上下文。
+
+### 1.6 第 0 步复测（10-29 晚，agent-sdk 0.2.174 / CLI 2.1.310，§8 清单八条腿全绿）
+
+| 项 | 2.1.251（上面各节） | 2.1.310 |
+|---|---|---|
+| 体量：全量 / 延迟 合计 | 54,774 / 18,284 | **55,348 / 18,696**（系统提示 13,628；内置工具 5,367 / 4,974+428；MCP 36,343 / 84+36,257） |
+| galatea 开场 pending | 2.4–2.6s | **3.07s**（两次一致）；game +0.2s 同 |
+| 挂载对账 | 全对上 | 全对上（12 个 server） |
+| alwaysLoad 按 server（http / stdio / 进程内 sdk）、单工具 `_meta` | 生效 | 生效（D1 同形：ombre 7,457 + basics 757 + game 2,299 常驻） |
+| 「只挂 ToolSearch 不设环境变量 = 全延迟」 | 是 | 是（D2 同形） |
+| **进程内 sdk server（game）toggle** | **不吃**（off 空操作、on 抛错） | **吃了**：off→disabled、名单 0 行、total −3.2k；on→connected、14 行回来；**on 之后真调 `game_notes_read` 成**（第 1 步复核） |
+| **toggle off→on 后 Opus 再调** | 3/3 撞 `safeguards flagged` | **3/3 不撞**（§1.6 一次 + 第 1 步两次），且 Opus 不重取、直接调——toggle 前后同一个 request shape，已加载集没清 |
+| `reconnect_mcp_server` 之后 Opus 再调 | 未测 | 3/3 不撞；reconnect 对活着的 server 返回 None ~0.35s，已加载集不清 |
+| 铸进 tool_reference 后 resume 一次传对 | sonnet / opus 都成 | 都成；一条 tool_result 多个 tool_reference 也成（§6）；resume 后首轮前 `totalTokens` 已是真值 5,089（不再是 1），`_meta` 钉住的工具 isLoaded=True，只有铸进去的那个首轮前仍 False |
+| Ombre 死端口开场 | 未测 | 首拍即 `failed`（不经 pending），`error='ECONNREFUSED: …'`，**status 里没有 `tools` 键**；`reconnect_mcp_server` **抛** `Exception: ECONNREFUSED`；其余 11 个照常，basics 可调；`get_context_usage` 里 ombre 0 行 |
+| alwaysLoad opt-out | 未测 | server `true` + 单工具 `_meta anthropic/alwaysLoad:false` → 那一个延迟、其余常驻（生效）；server 级 `false` 两版都看不出区别（D4=D1 逐字节同、D5 无效果） |
+| forge_regress A–D2 | 全绿 | 全绿 |
+| 插话三模式 + transcript 形状 | §1 of PLAN_interject | 同形：tool 1 次 `absorbed_mid_turn`、tool2 2 次、text 2 个 result 无吸收 |
+| 派活：四模型 + 门 + 桩 | 全通；Fable 打 `unrecognized_model` | 全通；**Fable 不再警告**；别名现落到 haiku/sonnet/opus 5.5 |
+
+- 数字差在内置工具（+393，新版多了几个内置 schema）和 MCP（+244），结论不变：延迟省的还是 ~36k。
+- 「单给一个 server 设 false」**两版都做不到**（第 1 步 D4/D5 实测）：ToolSearch 一挂就是全延迟，不挂就全常驻，server 级 false 没有独立效果。有效的 opt-out 是「server true + 工具 `_meta` false」。
+- galatea 开场 pending 不是稳定值：3.07 / 4.88 / 2.85s 都见过；§5.1 的 10s 上限够。Ombre 死掉时首拍即 failed，等待全在 galatea。
+- **§5.3 翻案**（第 1 步复核满足自定条件）：toggle 在 2.1.310 上可用——stdio / http / 进程内 sdk 都吃，Opus 回来不撞误报、不重取。§5.2「配置变了」改走 toggle，见那节。
+- 2.1.310 transcript 多了 `api-request-shape` / `api-request-blob` / `api-request` 记录（每轮一组，带 version、querySource、shapeHash），发给 API 的原文都在——探针和 §6 的证据以后直接读它。
+
+## 2. 延迟 + 常驻
+
+- `build_options`：sdk 聊天 session 挂 ToolSearch（进 tools；allowed_tools 从 tools 派生，自然在）。
+  环境变量 `ENABLE_TOOL_SEARCH=true` 照给（显式，别依赖 CLI 默认）。
+- **开关怎么接**（复审补）：`tool_search_on(context)` 是一把共用判据——`build_options`
+  （`chat_loop.py:615`）、菜单头那句（`pipeline.py:1119`）、`mounted_tool_names`（`pipeline.py:1017`）、
+  `-p` 聊天路（`sse.py:291` → `base_claude_args` 默认 context="chat"）全问它。新闸**不接进
+  `tool_search_on("chat")`**（接了 -p 老路跟着延迟，和下面「老路不动」顶牛），而是新起一个 context 名
+  `chat_session`：`tool_search_on("chat_session") = CHAT_TOOL_DEFER`；`build_options` 和它调的
+  `tool_menu_block` / `mounted_tool_names` 都传 `"chat_session"`；`plugins.mounted` 这类按场景分挂的地方
+  把 `chat_session` 当 `chat`（一处 alias，别到处 if）。原稿 §3.1 说的「头一句随延迟开关换（现成逻辑）」
+  只有这样接才成立。
+- 常驻名单写在一处（`pipeline.ALWAYS_LOAD_SERVERS = {"ombre-brain", "basics"}`），
+  `_merge_mcp_file` / Ombre dict 组装时给这些 server 的配置加 `alwaysLoad: True`。
+  - Ombre：几乎每轮都用（开场浮记忆、hold），7.4k 值得常驻。
+  - basics：now / fetch / next_wake，0.8k，高频。
+  - **game 进常驻名单但平时 toggle off**（10-29 改拍，§10）：`alwaysLoad: true` 让它免 ToolSearch，
+    开 session 后立刻 toggle off（0 token），game_start 置旗、下个轮边界 toggle on，game_end 同样 toggle off。
+    §6 不记游戏工具。
+- 总闸：`CHAT_TOOL_DEFER=1`（.env，默认先关），关 = 一切照旧全量，回退一行。
+- `-p` 老路（wake.py / cohabit）不动：`TOOL_SEARCH_CONTEXTS` 口径照旧。
+
+## 3. 固定菜单
+
+### 3.1 口径
+
+- 每个角色一份 `characters/<id>/tool_menu.md`（已有），**按配置渲染、不按运行时状态
+  过滤**：「配置」= 这个角色装了、归他、开着的插件 + 配了的 Ombre + 宠物 / skills / PR
+  开关 + 内置工具开关。Ombre 此刻连不连得上、某个 stdio 起没起来，**不影响菜单**——
+  运行时缺席走 §5 的注入告知。
+- 好处：同一份配置永远渲染出同一份系统提示，前缀缓存最稳；运行时状态与系统提示解耦。
+- 渲染器改动（`pipeline.tool_menu_block`）：
+  - 名字表从「本轮实际挂载」换成「这个角色配置上的全集」（`configured_tool_names(context, char_id)`
+    ——各家常量 + 插件 manifest 的工具清单 + 内置工具开关），不探活。
+  - **Ombre 先改成「按配置挂」**（复审补，也是 §5 的前提）：现在 `build_options`（`chat_loop.py:545`）、
+    `mounted_tool_names`（`pipeline.py:1003`）、巩固轮 `_ombre_on`（`chat_loop.py:1527`）三处都按
+    `ombre_alive()` 探活判。开 session 那刻 Ombre 不在，它就**不在 mcp_servers 里**：`get_mcp_status`
+    看不到 failed、`reconnect_mcp_server` 无从调、只能等下次重铸——§5.1 第 2 步整条落空。改法：三处改读
+    「配了没有」（OMBRE_ENABLED 且 `characters.ombre_conf` 有 mcp_url），连不连得上交给 §5。
+    `ombre_alive` 留给 `-p` 老路。
+  - needs 语义不变（全在才渲染）——配置关掉的能力照旧不提。
+  - **场景注记自动补**：块里有工具不在 `configured_tool_names("wake", char_id)` 里（NO_WAKE_PLUGINS /
+    WAKE_TOOL_EXCLUDE / 写类醒来禁用面），渲染时在块尾自动加一句「醒着的时候这几样用
+    不了：…」。作者不手写场景，手写会和门的口径漂。**不用 `mounted_tool_names("wake")`**：它内部也调
+    `ombre_alive`（`pipeline.py:1003`），注记会随 Ombre 死活抖，前缀缓存跟着抖，和这一节「不随运行时
+    状态变」自相矛盾。
+  - 头一句随延迟开关换：开着就说「用法默认没加载，先 ToolSearch select: 取」（现成逻辑）。
+  - `_warn_uncovered` 保留，并加反向检查：菜单提到、但配置里没有的工具 → 日志喊。
+- 维护纪律（写进菜单文件顶部注释）：**上新插件 / 改工具名必须同步改菜单**；日志那两条
+  喊话是提醒，不是过滤。
+
+### 3.2 新增菜单块（**10-29 机主定稿，已照抄进三份菜单文件**：`characters/{default,cass}/tool_menu.md`、`tool_menu.example.md`）
+
+> 10-29 深夜随第 6 步落地时的两处改判（机主拍板）：**醒来轮也能弹卡**（写类 + 问答卡），所以「动手改东西」
+> 「拿不准的事让 TA 选」两块不再写「只在 TA 跟你说话时能用」，改写成「醒着也能弹，但 TA 多半不在：等不到就是没批
+> / 一轮最多一张」。机制见 PLAN_prs §4 改口。翻代码块的两个仓路径由渲染器自动补一行（常量，手写会过期）。
+
+- `## 翻代码和资料 <!-- needs: Read, Grep, Glob -->`：只读范围（cassette 仓 / dossier 仓），
+  .env 不在范围，state/ 只看自己房间 + jobhunt / workbench / webpages。
+- `## 动手改东西 <!-- needs: Edit, Write, NotebookEdit, Bash -->`：一动一卡、卡前说人话、
+  只在 TA 跟你说话时能用。
+- `## 改代码：提一个 PR`（改写现有块）：开头加「你自己醒着时想改代码只有这条路；
+  聊天时改动大也走这条」；「命令跑不了」改成「git 的事全交给这几个工具」（chat 轮
+  Bash 是能弹卡的，原话不准）。
+- `## 拿不准的事让 TA 选 <!-- needs: AskUserQuestion -->`：要停下来等答案才用卡，
+  随口问就直接问；只在 TA 跟你说话时能用。
+- `## 改代码：提一个 PR` 块末尾再加派活那段（PLAN_delegate §4.2 原文；needs 加 pr_delegate,
+  pr_delegate_reply）——**只在 §9 第 7 步 prs 的派活工具真上了之后加**：needs 缺一个整块不渲染，
+  连原来的 PR 说明也一起没了。
+
+内置工具（Read 等）原本不在 `mounted_tool_names` 里、needs 写它们永远不渲染——§3.1 的
+「配置全集」把它们按 READONLY_TOOLS / WRITE_TOOLS / QUESTION_CARDS 三个开关并进去。
+**不要**把它们塞进 `mounted_tool_names`：那张表兼做醒来允许集（wake_tools），
+AskUserQuestion 进去就在醒来轮放行了。
+
+### 3.3 系统提示瘦身（同批）
+
+- 删 `chat_loop.py` 里拼文件工具段 + `_write_paths_text` + 问答卡那段 → 进菜单（§3.2）。
+- 删 `_discipline_block` 调用（`code_addendum_chat.md` 不存在，整段就剩「◆ 结论 ← 出处」
+  一句）。`_capture_capsules` 一并删：它写的行为账 `acts-<cid>.jsonl` 已无读者
+  （`recent_acts` 零调用、`_acts_block` 09-01 已删、`_fold_trace_lines` 读的是段事件账）。
+  存量 203 行留在账里不动。`_fold_trace_lines` 里读 `kind == "capsule"` 那支（`chat_loop.py:1056`、
+  `:1070-1074`）同时成了死代码——段事件账里从来没人写过 capsule，写的一直是行为账——一并删。
+- 删 `system += GAME_RHYTHM_SYSTEM`，改 §4。
+- ⚠️ **分两刀落**（复审改）：「拼文件工具段 + 问答卡那段 → 进菜单」这一刀**不能先于 §3.1**
+  （§9 第 6 步）——§3.2 的块 needs 的是 Read/Edit/AskUserQuestion 这类内置名，只有 §3.1 把内置工具
+  并进名字表之后才渲染得出。中间那段时间 WRITE_TOOLS=1 的 session 没有「卡前先说人话」的指引，而
+  `_await_said` 空返回就拒（`chat_loop.py:413-416`，NO_SAID_MSG），写类调用会整批被退回。所以：
+  **第一刀**（§9 第 2 步）只删 `GAME_RHYTHM_SYSTEM`、`_discipline_block`、`_capture_capsules`；
+  **第二刀**（§9 第 6 步，随固定菜单同批）才删文件工具段 / 问答卡段。
+- 第二刀做完之后 `one_turn_hint` 重新落回系统提示最末——它注释里「排在最尾是有意的」
+  现在是假的（后面还挂着 ~2.5k），那批顺手修好。
+
+## 4. 游戏节奏：拿起游戏时注入
+
+- `_game_story_start_unified` 的返回 `hint` 带上节奏全文（去掉「game_start 之后才算
+  拿到」那句条件，开头改「游戏在手边了，这段时间你的时间按短轮走……」）。调它的那一轮
+  当场看到，第一个「·」之前就懂规矩。
+- 重铸会冲掉它（工具返回不进账）：`_open_session` 里若 `handle.meta["game_pump"]` 在，
+  置 `pump["rhythm_due"] = True`；下一个**新起的轮**（tick / 机主在游戏中发来的消息 / 醒来，
+  哪个先到算哪个）在注入文字前补节奏，发出后清旗。机主的消息现在走终端口成 `PumpNote` 轮，
+  PLAN_gamechat 之后是普通 chat 轮——两种都是新起的一轮，补在注入里、不进账。
+  **新起一轮的 `client.query` 入口今天有三个**：`_pump_round`（`chat_loop.py:1689`，tick / PumpNote）、
+  主循环的 Turn 路（`:1883`，chat / wake）、巩固轮（`:1527`）。用一个 helper 包起来，三处都走它。
+  现成的 `needs_opening` 旗就是「各处手写」的后果：`_open_session` 置位（`:1498`），只在 Turn 路消费
+  （`:1869`）——泵从 client None 重开后它一直悬着，到下一个聊天轮才把 OPENING_NUDGE 塞进去。
+  `rhythm_due` 和 `needs_opening` 一起收进这个 helper；巩固轮不消费任何旗，只透传。
+- ⚠️ **在飞插话（PLAN_interject 的 `Interject`）本 helper 一律不碰**——插话靠自己那串跟 hook / transcript 里
+  `queued_command` 配对，前面多一个字就配不上，会被误判成「没吸收」（§11）。§5.1 的缺席告知同此。
+  插话自带的时间头（interject §4.2，10-29 拍板）是 `Interject` 自己拼的、算在配对串里，不经过这个 helper。
+
+### 4.1 泵开着时的重开统一收口
+
+泵开着时 session 重开有五条路：泵的 N 张段内重铸（`_game_reforge`）、引擎打嗝重开
+（`_pump_round` 里 `client is None`）、chat 路判脏重铸、醒来轮 client None（`chat_loop.py:1822`）、
+§5.2 配置变了的重铸。现在只有第一条带近 K 张图回填（`render_tail`）、重开前的感知白描轮和 shots
+归零，其余什么游戏上下文都不带。PLAN_gamechat 之后 chat 路判脏在游戏里会常态化，这个缺口必须先补。
+
+- `_open_session` 自己判 `handle.meta["game_pump"]`：在就**一律**带上五样——
+  ① 近 K 张图回填（`_game_shot_tail` 挪进来，`_game_reforge` 不再单独传）；
+  ② `rhythm_due` 置位（§4）；③ 取过的用法铸回（§6，做好后接上）；
+  ④ `handle.meta["shots"] = 0`（复审补：现在只有 `_game_reforge` 清，`chat_loop.py:1745`；chat 路判脏
+  重铸不清，冷却 5 分钟一过 loop 顶又触发一次段内重铸，连铸两回）；
+  ⑤ 重开**之前**的感知白描轮（`REOPEN_NOTE_PROMPT`，`:1729`）：`_game_reforge` 有、其余路没有。收成
+  一个 `_pump_note_round()`，泵开着时 `_open_session` 的调用方先调它（判脏路在换 client 前调；引擎
+  打嗝那条 client 已死、跳过）。
+- 不管哪条路触发的重开，带的东西都一样——「某条路漏带一样」这类问题从结构上消失。
+- game_end 后 transcript 里残留那段到下次重铸为止——措辞本就是「拿着游戏的时候」，不清。
+
+**10-29 第 4 步施工记录（已落码，未重启）**：`_open_session(history, catalog)` 去掉 `render_tail` 参数，自己判
+`handle.meta["game_pump"]`：在就 ①铸造材料末尾接 `_game_shot_tail` ②`rhythm_due=True` ④`shots=0`。
+⑤ 抽成 `_pump_note_round()`（client 活着且泵开着才跑 `REOPEN_NOTE_PROMPT`，否则直接 True），三处调用：
+`_game_reforge`（没收尾按死，同旧）、chat 路判脏重铸（换 client 前调，没收尾照样换——铸的是权威窗口）、
+`_consolidate_and_reforge`（泵开着时白描轮**顶替** Ombre 巩固轮，两轮目的相同不连跑）。引擎打嗝 / 醒来 client None
+两条 client 已死，白描自然跳过，图和节奏照带。③ 用法铸回第 9 步已接上（`_merge_tool_loads`，不分泵开不开，哪条路
+重开都带）；§5.2 配置变了的重铸（第 8 步）落码时直接调
+`_open_session` 就全带上，不用另写。测试：GamePumpLoopTest 新增判脏路 / 打嗝路两条，基类 `test_edit_triggers_reforge`
+在泵子类里覆盖成多喂一发白描的版本；678 绿（jobhunt 一条旧账）。
+
+## 5. 开 session 探活
+
+### 5.1 开场
+
+`_open_session` 里 `connect()` 之后：
+
+1. `get_mcp_status()` 每 0.2s 拍一次直到没有 `pending`，超时 10s（galatea 实测 2.85–4.88s 不稳定；
+   连不上的 server 首拍就是 `failed`，不经过 pending）。
+2. `failed` 的逐个 `reconnect_mcp_server` 一次，再拍一次。**对连不上的 server 它是抛异常**
+   （`Exception: ECONNREFUSED: …`，0.01s），不是返回失败——必须 try/except，异常原话就是错误原话。
+3. 用 status 里每个 server 的 `tools` 与配置全集（§3.1）对账，缺的落
+   `handle.meta["absent_tools"]`（按 server 分组 + 错误原话），打日志；缺 Ombre 推 Bark。
+   **`failed` 的 server 没有 `tools` 键**（只有 config/error/name/scope/source/status/transport），按缺键 = 空处理。
+4. 缺席告知：下一轮注入前缀加一句知觉白描（「〔记忆那边这会儿连不上〕」这类，按 server
+   一句，文案表写在一处）；`_wake_gate` 对 absent 工具直接 deny 同一句话——不让他调到
+   CLI 那层去撞一个不在的工具。ToolSearch 取 absent 工具也在门里拦（看 ToolSearch 的 `query`，
+   `select:` 里含 absent 全名就 deny 同一句）——不拦的话他先白跑一跳取 schema、再被拒。
+
+**施工记录（10-29 深夜，第 6 步）**：`chat_loop._probe_mcp(client, options, handle)` 在 `_open_session` 的
+`connect()` 之后调，①–④ 照上面；假 client（没 `get_mcp_status`）直接跳过；探活自身任何异常按「全在」处理不影响
+开 session。缺席落 `handle.meta["absent_tools"] = {server: {"tools": [全名], "error": 原话}}`，
+`absent_note_due` 由 `_turn_prefix` 消费（和开局引子 / 节奏补注同一个口）。文案表 `pipeline.ABSENT_NOTES`
+（机主 10-29 定稿，每 server 两句：缺席 / 恢复，恢复句给 §5.2），没写的走兜底模板。门：`_absent_hit` 在
+`_wake_gate` 最前，直接调 → 拒；ToolSearch `select:` 含缺席全名 → 拒同一句，只认整串全名不做别的匹配。
+轮询上限 `MCP_PROBE_TIMEOUT_SEC`（env，默认 10）。「server 连上了但少工具」（版本漂移）也算缺席。
+
+### 5.2 中途
+
+- 现有 60s 轮间隙看守里加一拍 `get_mcp_status()`（只在空闲时，不在轮中）。**泵开着时那支走不到**
+  （`chat_loop.py:1796-1812` 只在 `pump_on` 为假时进入，泵开着每 2s 走 tick），所以泵分支里每 30 个
+  tick 也拍一次（同一个函数，别写两份）——Ombre 在一局中途掉线不能等到 game_end 才发现：
+  - connected → failed：`reconnect_mcp_server`；还不行就进 absent + 下一轮告知。
+  - absent 里的恢复了（重连成功）：出 absent + 下一轮告知「连上了」。
+- 插件在 app 里开 / 关（10-29 晚按 §5.3 翻案改写）：
+  - **开 session 时就在 mcp_servers 里的 server**（按 §3.1「配置全集」挂，开关只决定 toggle 态）：
+    开关 = `toggle_mcp_server(name, on/off)`，轮间隙做，不换 client、不重铸。off 之后名单里消失、token 归零，
+    on 之后回来、已加载集不清（§1.6）。菜单按配置渲染不变，关掉的那块本来就不渲染。
+  - **开 session 时不在 mcp_servers 里的**（新装的插件、新配的 Ombre）：toggle 没对象，仍走「配置变了」标记 →
+    下一个轮间隙巩固 + 重铸。动手条件：没有在飞的轮、PLAN_interject 的 `pending` 为空；**泵开着时推迟到 game_end**。
+  - 所以 §3.1 挂载时把「装了但关着」的插件也挂上、随即 toggle off，开关才永远有对象。代价：关着的 server 子进程活着。
+- **game 的开关**（10-29 拍板，§10）：同一个「轮间隙 toggle」口子。开 session 后 toggle off；game_start 工具
+  返回时置 `handle.meta["game_toggle"]="on"`，下个轮边界（泵 tick 之间）toggle on；game_end 置 off 同理。
+  泵开着时轮边界就是 tick 间隙，不必等 game_end。toggle 失败（抛异常）→ 打日志、下一拍再试，不堵泵。
+
+**施工记录（10-30，第 8 步；细目在 §9 第 8 步）**：三件事（中途探活 / 插件开关 toggle 或重铸 / game 开关）都落了。
+旗的实际形状是 `meta["mcp_toggle_want"]`（name → on）+ `meta["mcp_off"]`，不是上面写的 `game_toggle`。toggle 口子和
+「关着的插件也挂」都挂在 `CHAT_TOOL_DEFER` 这一把闸上（关 = 一切照旧全量，回退一行）；闸关时插件开关仍走「配置变了 →
+轮间隙重铸」——这条不依赖闸，今天之前 sdk 路上拨插件开关要等下次重铸才生效（plugins.toggle 那句「下一轮即时生效」只对
+-p 路为真）。「泵开着推迟到 game_end」靠 60s 看守只在泵关着时走到这个事实实现，没另写判断。
+
+### 5.3 为什么不用 toggle
+
+**（10-29 晚翻案：2.1.310 上可以用 toggle。）** 原因是 2.1.251 上进程内 server 不吃、stdio/http toggle 回来后
+Opus 稳定撞安全误报（§1.3）。2.1.310 复核：game 吃 toggle 且 on 后真调成；Opus toggle 回来 3/3 不撞、不重取；
+`reconnect_mcp_server` 后 Opus 3/3 不撞（§1.6）。§5.2 已改走 toggle。
+仍不用 toggle 的地方：连不上的 server（toggle 救不了，走 reconnect + 告知）；开 session 时不在配置里的 server。
+
+## 6. 重铸留用法
+
+- **记账**：每轮从流里认两类事件，按角色落 `state/characters/<id>/tool_touch.json`
+  （`{全名: 最后接触 ts}`）：ToolSearch 的 tool_result 里的 tool_reference（取到）、
+  任何 `tool_use`（用到）。**记「最后接触」不记「哪天取的」**——游戏工具取在 game_start
+  后、之后一直在用，按取的时刻挂，一局玩久了那轮滚出窗口，之后每次重铸都得重取。
+  - 记账挂在**读流的地方**，不挂在 `Turn` 收尾——而读流的地方有**两个**：`_turn_events`
+    （`chat_loop.py:918`，chat / wake / 巩固轮）和 `_pump_drain`（`:1570`，所有泵 tick 轮）。tick 轮的
+    游戏工具接触全在后者，只挂前者就一条都记不上（`:1600-1603` 自己留过「第二个调用点漏补」的复盘）。
+    两处都走 `_ToolTrace`，记账就挂在 `_ToolTrace.use` / `.result` 里，天然两处都覆盖。PLAN_interject
+    里插话没被吸收时，CLI 会在同一次读流里自己再起一轮，那一轮的工具接触也因此记上。
+  - 每条记录带**轮来源**：`{全名: {ts, turn_kind, turn_ts}}`，`turn_ts` 醒来轮 = `started_ts`
+    （`wake_sdk.py:221` 投递进历史的 ts 就是它），聊天轮 = 空。锚点靠它（下面）。
+- **铸回**：新函数 `_merge_tool_loads`，与 `_merge_alarm_calls` 同层、同在
+  `_open_session`（`chat_loop.py:1486`）里调——段内重铸 / 引擎打嗝重开 / 漂移重铸三条路
+  一次覆盖。
+  - 按最后接触排序取前 N，**预算按 token 封顶**（暂定 8k）。逐工具 tokens 表在**活 session 首轮之后**
+    用 `get_context_usage` 拍一次、缓存进 `handle.meta`（§1.5：resume 后首轮前它不可信），铸回时只读
+    缓存；没缓存就按 schema 字节 / 4 估。常驻 server 的不铸；当前配置里没有的不铸。
+  - **锚点按轮来源分两条规则**（复审改。原稿一条「不早于接触的第一条 assistant」对醒来轮不成立：
+    `chat_loop.py:1266-1270` 写明醒来轮 assistant 的 ts 是 `started_ts`、在调用**之前**，按「之后第一条」
+    永远跳过本轮落到下一轮，加 120s 容差后等于醒来轮的用法从不铸回）：
+    - 聊天轮（`turn_kind=chat`）：挂到 ts **不早于接触**的第一段 assistant（容差同闹钟）。不用
+      「最近的一条」：PLAN_interject P1 之后一轮拆成多段、中间可能夹着插话，挑最近的会挂到插话之后
+      那段上，铸出来变成「先听到插话、才取的用法」。forge 把工具铸在那条正文**前面**，所以正确的锚
+      是「接触之后的第一段」。前提是 P1 给每段打准 ts（app 侧气泡 ts = 该段第一个字到达时刻，天然在
+      工具返回之后）。
+    - 醒来轮（`turn_kind=wake`）：挂到 ts **等于 `turn_ts`** 的那条 assistant（精确匹配、不要容差；
+      醒来投递的 ts 就是 started_ts，一轮一条）。
+    - 同一条上的合成一次 `select:a,b,c`；那轮已滚出窗口 → 不铸（照实铸、不编时序）。
+    - `_merge_alarm_calls` **不改锚规则**（它的「最近一条」正是为两种 ts 方向写的）；只给闹钟留底也补
+      `turn_kind` / `turn_ts` 两个字段，有字段的走上面两条，老记录照旧走最近一条。
+- **forge 改动**：tools 槽的 `result` 允许 content 列表（现在一律 `str()`）；digest 照
+  json.dumps 走，确定性不变；带 toolUseResult 字段照真 transcript 补。第 1 步实测的三条形状（§1.6）：
+  - 一条 tool_result 里放多个 tool_reference，CLI **原样**发给 API，并自己在后面追加
+    `{"type":"text","text":"Tool loaded."}`（真 ToolSearch 的结果也这样；transcript 记录里没这块，**别铸**）。
+  - 引用一个当前没挂的工具：不崩，发请求时 CLI 把那条改写成 text `[Tool references removed - tools no longer available]`。
+    所以「当前配置里没有的不铸」可以放松成「铸了也无害」，但模型会看见那行并顺嘴指出来，还是别铸。
+  - Ombre 掉线时它的工具不在延迟名单里（`get_context_usage` 0 行），铸回的引用走上一条改写路，无害。
+- **兜底**：没铸上的他自己 ToolSearch 再取——菜单头那句 + CLI 的延迟名单都在，
+  Opus 实测缺 schema 时会先取不硬猜。代价一跳。
+- 游戏工具不进这本账（10-29 拍板走 toggle，§1.4 / §10）：一局里它常驻、重铸也不丢，不用铸回；记账时按 server 名跳过 game。
+  预算里剩的就是最近聊天用过的那几样。
+
+**10-30 第 9 步施工记录（已落码，未重启）**：
+- 记账：`_ToolTrace.use` 记用到、`.result` 在 name=ToolSearch 且 content 是列表时记取到（tool_reference 的 tool_name），
+  都走 `_touch` → `state_store.touch_tools`（只记 `mcp__` 全名、server≠game；轮来源读 `meta.turn_kind` / `meta.turn_ts`）。
+  账 `tool_touch.json` 整文件原子写，只留最近 64 条（更老的本来也在窗口外）。两处读流（`_turn_events` / `_pump_drain`）
+  天然都覆盖。闹钟留底同批补 `turn_kind` / `turn_ts`。
+- 醒来轮的 `turn_ts`：`wake_sdk.enqueue_wake` 的 `_injection` 把 `started_ts` 同时写进 `handle.meta["turn_ts"]`
+  （投递进历史的 ts 就是它），loop 每轮 finally 随 `turn_kind` 一起摘掉；聊天轮为 0。
+- 锚点 `_anchor_index`（闹钟和用法共用）：wake = ts 等于 turn_ts 精确匹配；chat = ts 不早于接触的第一段 assistant；
+  没有 turn_kind 的老闹钟记录照旧最近一条容差 120s。**一处偏离原稿**：chat 规则早侧的容差不能用闹钟那 120s——
+  「不早于接触 − 120s 的第一段」会挑到**上一轮**的回复（他 T 回完、TA T+30 发话、T+40 调工具），所以早侧只容 5s
+  钟差（app 气泡 ts 是手机的钟）、晚侧封顶 600s（一个长轮的时长，超过 = 回复不在窗口里 → 不铸）。
+- 铸回 `_merge_tool_loads(history, cid, allowed, tokens)`：`_open_session` 里紧跟 `_merge_alarm_calls`（同一条上
+  ToolSearch 排在闹钟前：先取到再用）。`allowed = _loadable_tools(options, handle)` = options.tools 里的 mcp__ 全名去掉
+  `ALWAYS_LOAD_SERVERS` / game / `mcp_plug_off`；**options 里没挂 ToolSearch（闸关）= 空集 = 不铸**（session 里没有
+  ToolSearch，铸它的调用是编）。按最后接触倒序、预算 `TOOL_LOAD_BUDGET_TOKENS`（默认 8000）到顶就停；窗口外的不占预算。
+- 逐工具 tokens 表：`_cache_tool_tokens` 在聊天/醒来轮收尾后拍一次 `get_context_usage().mcpTools`（name 是全名，第 1 步
+  探针实证），缓存 `meta["tool_tokens"]` 跨重开留着（schema 大小不随 session 变）；没拍到按 `TOOL_TOKENS_FALLBACK=500`
+  估（原稿「schema 字节 / 4」在 chat_loop 这层拿不到 schema，改成常量）。
+- forge：tools 槽 `result` 允许块列表（逐块校验是 dict 且有 type），照原样进 tool_result content、参与 digest；这条 user
+  事件只有一个 ToolSearch 时补 `toolUseResult{matches, query, total_deferred_tools: 0}`（几个工具合一条时字段没有唯一
+  归属，不补）。"Tool loaded." 那块不铸（§1.6）。
+- 测试基类 `_AlTmpBase`（test_chat_loop）补了 `CHAR_STATE_ROOT` 指临时地——它之前只挪了 activity_log，`_ToolTrace` 的留底
+  一直写进真 state（10-30 实锤 `state/characters/cass/tool_touch.json` 被单测写出来，已删）。
+
+## 7. 顺手修（注释 / 文档与代码对不上的）
+
+- ~~`pipeline.tool_search_on` docstring：「只挂 ToolSearch 不给环境变量 = 延迟静默不生效」
+  ——SDK 路（自带 2.1.251）下相反（§1.4）。`-p` 路（2.1.310）没测，改注释前先用探针补一腿。~~
+  **10-30 补了 `tools/mcp_probe_defer_p.py`（四格，不调模型）**：`-p` 路拿 wake 的真实参数，
+  挂 ToolSearch 不管给不给 `ENABLE_TOOL_SEARCH` 都是 4,652 tok（74 个工具全延迟），不挂都是
+  27,882——跟 sdk 路同一结论，环境变量不决定延迟。docstring 和 `_subprocess_env` 的注释改成真话，
+  环境变量留着不删（无害，旧版习惯）。
+- ~~`chat_loop.py:1380`：「改文件=系统提示变=判脏触发重铸」~~ 第 8 步做「配置变了」时那段注释
+  已经没了，10-30 核过 chat_loop 里再无此说法。
+- ~~`chat_loop.py:536`：「排在最尾是有意的」~~ 第 6 步已改写（现在 755 行附近，注明 §3.3 第二刀后
+  后面不再追加），10-30 核过属实。
+- README：插件「开关即时生效」（README.zh-CN.md）第 8 步落地后在 sdk 路也成立了（拨开关 →
+  下个轮边界 toggle / 60s 看守重铸），那句不用动；架构 / Code 模式 / 醒来四段协议几节整体过时，
+  **仍另起一批改，不在合排里**。
+
+## 8. 探针工具（留作维护工具，`server/tools/`）
+
+| 文件 | 测什么 | 调模型 |
+|---|---|---|
+| `mcp_probe.py` | 开场 pending 时间线、挂载对账、各部分 token、toggle 名单变化 | `--ask` 时 |
+| `mcp_probe_stdio.py` | 上面几个用的 stdio 探针 server（probe_ping / probe_pinned / probe_echo） | — |
+| `mcp_probe_defer.py` | alwaysLoad 按 server / 按工具、ToolSearch 是延迟开关 | `--ask` 时 |
+| `mcp_probe_defer_p.py` | 同一问题在 `-p` 路（wake.py 那种子进程）：ToolSearch × ENABLE_TOOL_SEARCH 四格 | 否 |
+| `forge_toolref_probe.py` | 铸进 tool_reference 后 resume 能否一次传对参数；`--mode single\|multi\|ghost` | `--ask` 时 |
+| `mcp_probe_reconnect.py` | `reconnect_mcp_server` 之后 Opus 调用撞不撞误报、已加载集清不清 | 是 |
+| `mcp_probe_ombre_dead.py` | Ombre 指到死端口时开场 status / reconnect 异常 / 其余 server 对账 | `--ask` 时 |
+| `mcp_probe_toggle.py` | Q5（toggle 回来再调）+ game 进程内 toggle off→on→真调 | 是 |
+
+（`mcp_probe_defer.py` 另有 D3 单工具 opt-out / D4 server false / D5 全量+false，`--only` 选；
+`mcp_probe_stdio.py` 的 probe_echo 常驻带 `_meta anthropic/alwaysLoad:false`。）
+
+**CLI / agent-sdk 升级前必跑清单**（四份计划共用）：`forge_regress.py` + 上表四个 +
+PLAN_interject 的 `interject_probe.py` + PLAN_delegate 的 `delegate_probe.py`。alwaysLoad 是 `@internal`、
+tool_reference 恢复、`queued_command` / `absorbed_mid_turn` 都是 CLI 内部行为，不是公开契约。
+SDK 升级会连带换掉它自带的 CLI（10-29 晚起 2.1.310，与 PATH 同版）——PATH 上的 `claude` 升级不影响 sdk 路，只影响 `-p` 路。
+升级 = 改 `requirements.txt` 的 `claude-agent-sdk` 钉版（0.2.174 = CLI 2.1.310，10-24 发；**第 0 步已做，§1.6**）。
+跑法：别在生产 `.venv` 里直接 pip 升——后端在跑，`_bundled/claude` 换掉后新 session 静默用上新版。
+在别处起一个装新版的 venv 跑清单，全绿再改钉版 + 生产 venv 装 + 一条命令重启。
+**2.1.251 → 2.1.310 的 changelog 里跟本稿直接相关、清单必须盯住的**（复审 10-29 读的，2.1.253–256、
+2.1.297–298 没覆盖到）：
+- 2.1.300「transcript 记录每次请求的系统提示和工具」——伪造件没这些字段，resume 怎么对待看 forge_regress；
+  同版「resume 后已加载的延迟工具不再重复搜」「SDK resume 不再丢最近消息」，§1.5 / §6 要重跑。
+- 2.1.288「不再加载截断的 transcript」——伪造件会不会被判截断。
+- 2.1.281 改了 resume 时重发早先轮次的形状（含 tool-search 情形）。
+- 2.1.285 / 2.1.287 alwaysLoad 语义（§1.4）。
+- 2.1.295 SDK 会话里远程 MCP 掉线后改退避重连（§5 reconnect 的时序，也是「闲置致死」那一类）。
+- 2.1.290 `include_partial_messages` 流断后回复不再悬着（build_options 开着它；「轮内空闲超时」可能有它一份）。
+- 2.1.307 HTTP MCP 连接中断时不再双发、只重试只读 / 幂等（Ombre hold 之前可能被重复写）。
+- 2.1.302 中途 ToolSearch 取过的工具再取不再打穿 prompt cache；2.1.283 SDK 轮提前结束不再丢延迟工具调用。
+- 2.1.257 起 CLI 认识 Fable 5.1 的 ID（PLAN_delegate §1.1 那行 `unrecognized_model` 应消失）。
+探针临时目录要 `realpath`
+（macOS `/var` → `/private/var`，CLI 按真路径找 transcript，已踩过）；跑完清
+`~/.claude/projects/*mcp-probe-*`。
+
+## 9. 施工顺序（四份计划合排：toolmount / interject / gamechat / delegate；10-29 晚复审重排）
+
+0. **升 SDK**（claude-agent-sdk 0.2.148 → 0.2.174，即自带 CLI 2.1.251 → 2.1.310）：单独一步、在一切
+   施工之前。跑 §8 全部清单，全绿才改 `requirements.txt` 钉版；§1 的 token 数字在新版上重测一遍
+   （第 11 步阈值复核要用）。中途不换版。理由见 §8 那张 changelog 清单——2.1.295 / 2.1.307 / 2.1.300 /
+   2.1.290 这几条修的正是本稿要碰的地方，在旧版上施工等于先给已修的 bug 做兜底。
+   **10-29 晚已做**：八条腿全绿（§1.6），钉版已改；剩生产 venv 装新版 + 重启上电。
+   新版带来的两条待复核（toggle）并进第 1 步。
+1. **补测**（只动探针，可并行；全部在新版上跑）——**10-29 晚三组全部跑完**：toolmount 六条见 §1.6（§5.3 翻案、§5.1/§5.2/§6
+   按实改）、interject P0 见 PLAN_interject §1.1（吸收判定改走 hook）、delegate 三腿见 PLAN_delegate §1.4。报告原件在
+   `docs/probes/2026-10-29-step1/`。
+   - toolmount：一条 tool_result 多个 tool_reference；铸一个当前没挂的工具的 tool_reference；
+     `reconnect_mcp_server` 之后 Opus 调用会不会撞 §1.3 的误报；Ombre 停掉时开场对账认不认得出；
+     `alwaysLoad: false` 在新版的行为（§1.4，要在 D1 形状里给某个 server 设 false 才测得出）；
+     §1.3 的 Q5（toggle 回来 Opus 再调）再跑两次、game toggle on/off 之后真调一次工具——都过就翻 §5.3。
+   - interject P0（a–e；e 用 Opus 重跑）。
+   - delegate §6 的三腿。
+2. ~~**系统提示瘦身第一刀**~~ **已落码（10-29 晚，未重启）**：删节奏 / discipline / capsule，节奏改进
+   game_start 返回值 + `rhythm_due`（含 §4 的三入口 helper 和 `needs_opening` 收编）。不依赖延迟。
+   上线后每个角色下一条消息重铸一次。
+   施工记录：`GAME_RHYTHM_SYSTEM` → `GAME_RHYTHM_NOTE` + `game_rhythm_note()`，app 的 `_game_story_start_unified`
+   返回 hint 带全文；`_turn_prefix(handle)` 统一消费 `needs_opening` / `pump["rhythm_due"]`，Turn 路和 `_pump_round`
+   两个入口都走它（第三个入口巩固轮按 §4「不消费任何旗」不调）；`_open_session` 泵开着时置 `rhythm_due`。
+   `_discipline_block` / `_capture_capsules` / `_fold_trace_lines` 的 capsule 支连同 6 条测试一起删，新增 4 条。
+   「上线后重铸一次」不用另做：重启即换 session，新 session 的系统提示就是瘦过的。
+3. ~~**账按气泡记**~~ **已落码（10-29 晚，未重启；interject §4.3 / gamechat §2.2 ① 有施工记录）**：单独上线也能减少现在的重铸；gamechat 和本稿 §6 的锚点都等它。
+   P1 第一步核对时把「tick 点评与用户消息 ts 交错」那类（PLAN_gamechat §2.2 第 3 条）从「多段回复」
+   里分出来，两类一起修。
+4. ~~**泵开着时的重开统一收口**~~ **已落码（10-29 深夜，未重启；施工记录在 §4.1 末）**：图回填 + 节奏补注 +
+   shots 归零 + 感知白描前置全收进 `_open_session` / `_pump_note_round`，用法铸回第 9 步已接上。
+5. ~~**游戏改走 /chat/stream**~~ **已落码（10-29 深夜，未重启、app 未装真机；施工记录在 PLAN_gamechat §5 末）**：
+   后端 `/code/status` 加 `engine` + 终端口泵分支加退役判据日志 → app `terminalRoute` 只在 `send()` 改道（含
+   game_started 到手时先拉一次 status）。剩：观察旧包日志 → 两周后退役终端口泵分支（§3.3）。
+6. ~~**固定菜单 + 开场探活同批**~~ **已落码（10-29 深夜，未重启）**（toolmount §3.1 / §3.2 / §3.3 第二刀 / §5.1）：菜单摘掉 `ombre_alive`
+   过滤的同一批**必须**带上缺席告知 + 门拒，否则中间 Ombre 掉线菜单在说谎（`pipeline.py:1067-1070`
+   自己定的「绝不提不在场的能力」）。§5.2 中途探活可以放到第 8 步。
+   施工记录：
+   - §3.1：`pipeline.ombre_configured`（OMBRE_ENABLED 且接线有 mcp_url）替掉三处 `ombre_alive`（`build_options` /
+     `mounted_tool_names` / `_ombre_on`）；`ombre_alive` 只剩 `-p` 老路（`base_claude_args`）。
+     `pipeline.configured_tool_names(context, char_id)` = `mounted_tool_names` + 内置工具按三个开关（只对 sdk 引擎的角色）；
+     内置的**不进** `mounted_tool_names`（它兼做 wake_tools）。`tool_menu_block` 按它渲染；chat 渲染时块尾自动补
+     「醒着的时候这几样用不了：…」（对 `configured_tool_names("wake")`，不碰运行时）；翻代码块自动补「范围：两个仓路径」。
+     `_warn_unknown` 反向喊话（菜单提到、chat 全集里没有），只在 chat 上查。三份菜单文件头注释写了维护纪律。
+   - §3.3 第二刀：`build_options` 删文件工具段 + `_write_paths_text` + 问答卡段（工具照挂），`one_turn_hint` 重新真的在最末。
+   - §5.1：见 §5.1 末施工记录。
+   - **醒来轮也弹卡**（10-29 机主拍板，不在原稿里）：`_write_route` 不再按轮拒（工作副本直放 / 别人副本与 .git 拒 / 其余 ask）、
+     `_permit_gate` 醒来档超时 `permits.WAKE_TIMEOUT_SEC` / `questions.WAKE_TIMEOUT_SEC`（env，默认 1800）、卡标 `wake`；
+     `_wake_gate` 放行 AskUserQuestion（闸是卡本身）；`_said_feed` 醒来轮也认领人话；**TA 来了让路**：`stream_turn` /
+     `inject_pump_user` 入口调 `_yield_wake_cards` → `permits/questions.yield_wake` 把该角色醒来轮的卡按拒收掉
+     （原话 `YIELD_MSG`），醒来轮收尾、聊天轮接上。跨后端重启不保留（卡是内存态，permits 卷首）；要永久保留走 PLAN_proposals。
+     PLAN_prs §0 / §4 已改口。测试：`tests/test_toolmount_step6.py`（17 条）+ 旧测改 6 条。
+7. ~~**派活**（PLAN_delegate 第 1–4 步）~~ **已落码（10-30，未重启、app 未装真机；施工记录在 PLAN_delegate §7.1）**：
+   prs 的派活工具上了，§3.2 的派活菜单段已补进 PR 块；app PR 页加了派活区。
+   **同批（10-30 机主拍板）已落码**：醒来轮的卡让路补第二种触发（`wake_sdk.enqueue_wake` 入队时
+   `_yield_wake_cards(cid, "wake")`，原话 `YIELD_MSG_WAKE`）+ 收场态账（`permits/questions._closed`，近一小时，
+   `/permits/pending` `/questions/pending` 多 `closed` 列）+ app 卡片置灰标「已让路，你发送了新消息」/
+   「已让路，他醒来了」/「已超时」（`CardOutcome.label`，ContentView `cardOutcomes`）。测试 `tests/test_cards_closed.py`。
+   上电前 `.env` 写 `DELEGATE_CHARS=cass`（灰度）。
+8. ~~**延迟 + 常驻**（toolmount §2）+ **§5.2 中途探活 / 配置变了的重铸 / game 开关**~~ **已落码（10-30，未重启）**：`CHAT_TOOL_DEFER` 默认关，
+   cass 先开跑几天看 ToolSearch 频率。预期：第 9 步接上之前，游戏里每次段内重铸（70 张）之后开头
+   多一跳取用法，正常现象，别当 bug 修。
+   施工记录：
+   - §2：`config.CHAT_TOOL_DEFER`（"0" 关 / "1" 全角色 / "cass,default" 按角色）→ `config.chat_tool_defer(cid)`；
+     `pipeline.tool_search_on(context, char_id)` 对 `SESSION_CONTEXT="chat_session"` 问它、其余照旧问
+     `TOOL_SEARCH_CONTEXTS`（-p 老路一字没动）；`pipeline.scene_of` 把 chat_session 当 chat（插件 / skills / 菜单
+     when 一处 alias）。`build_options` 三处同问（菜单 / tools+allowed / env）；`ALWAYS_LOAD_SERVERS =
+     {ombre-brain, basics, game}` 开闸时加 `alwaysLoad: True`（进程内 sdk 的 game 也只是多一个键，同探针 D1）。
+   - 轮间隙 toggle 口子（§5.2 / §10，同一把闸）：`_want_toggle` 记想做的、`_apply_toggles` 在 loop 顶每个轮边界做
+     （失败打日志下一拍再试，不堵泵）；做成的落 `meta["mcp_off"]`，门 `_off_hit` 按它拒并说人话（game：「下一轮才到手」/
+     「不在手边」；插件：「在 app 里关着」）。`_open_session` 探活后：关着的插件（`plugins.mounted_all` 挂全集、
+     `meta["mcp_plug_off"]` 带名单）+ 泵没开时的 game 随即 off；`start_game_pump` 置 game on、`_pump_close` 置 off；
+     app 的 game_start 返回值在 server 还 off 时补一句「游戏工具下一轮才到手」（`chat_loop.game_tools_pending`）。
+   - §5.2 中途探活：`_probe_mcp` 拆成 `_expected_mcp / _mcp_rows / _absent_of`，`_recheck_mcp` 复用（只拍一次不等
+     pending；off 的 server 不算；pending 维持上一拍判断）；60s 看守 + 泵每 `MCP_RECHECK_TICKS`（默认 30）个 tick 各调一次。
+     新缺席 → 进 absent + `absent_note_due` + 缺 Ombre 推 Bark；恢复 → `absent_recovered_due`（`_turn_prefix` 渲染
+     ABSENT_NOTES 第二句）；缺席还没来得及告知就恢复 → 两句都不说。
+   - 配置变了：`_mount_signature(cid)` =（插件开关表, Ombre 配没配）只读不渲染，开 session 时记 `meta["mount_sig"]`，
+     60s 看守比一次（队列空 = 没有在飞的轮；泵开着不比，推迟到 game_end）。变的插件全在这条 session 里且闸开 → toggle；
+     否则（新装的 / Ombre 接线 / 闸关）→ `_consolidate_and_reforge("配置变了")`，`_open_session` 全带上（§4.1）。
+   - 测试 `tests/test_toolmount_step8.py`（17 条）；`test_chat_loop` 基类桩掉 `_mount_signature`（不读生产开关表）。
+     `.env.example` 补 `CHAT_TOOL_DEFER` / `DELEGATE_CHARS`。**上电顺序**：先 `CHAT_TOOL_DEFER=cass`，看日志里
+     `toggle game → off` 和 ToolSearch 频率，再决定全开。
+9. ~~**重铸留用法**（toolmount §6）~~ **已落码（10-30，未重启；施工记录在 §6 末）**：记账挂 `_ToolTrace`（用到 + 取到，
+   game 不记）→ `state/characters/<id>/tool_touch.json`；`_merge_tool_loads` 在 `_open_session` 里排在闹钟之后铸回
+   `ToolSearch → tool_reference`；锚点两条规则（`_anchor_index`，闹钟记录也补了 `turn_kind`/`turn_ts`）；forge 的
+   tools 槽 result 允许块列表 + ToolSearch 补 `toolUseResult`；token 表首轮之后拍一次缓存。§4.1 ③ 同批接上。
+   测试 `tests/test_toolmount_step9.py`（24 条），全套 756 绿（jobhunt 旧账）。
+10. ~~**插话**（interject P2–P4，含泵开着时的 chat 轮）~~ **P2 引擎 + P3 SSE/app 已落码（10-30，未重启、app 未装真机；
+    施工记录在 PLAN_interject §5 末）**：闸 `INTERJECT`（默认 0，上电先写 cass）+ app 请求头 `X-Interject`，
+    两边都要有。P4 灰度＝上电后看一周重铸 / rescue 次数。
+11. **阈值复核**：基线降 ~28k 后 `CHAT_SOFT/HARD/PANIC_TOKENS` 是否下调（量的是含 schema 的
+    真实上下文），看一周 usage 再定。
+12. ~~顺手修（§7）~~ **已做（10-30，未重启）**：`-p` 路延迟探针补齐并改注释，另两条注释核过已在
+    第 6 / 8 步顺带修掉，README 那句现已成立；README 整体过时的几节仍另起一批。
+
+> 派活提 PR（PLAN_delegate，10-29 立稿）独立于上面各步，可插在任意位置；建议排在第 6 步（固定菜单）之后，
+> 菜单块一次写好。
+>
+> **换真相源（PLAN_truthsource，10-29 立稿）不在合排里**：重铸读回旧 session、手机历史降级成恢复源、判脏改事件。
+> 机主拍板合排照走，灰度跑出「对不上」频率再决定开不开工。它做了之后第 9 步（留用法）大半不用做、第 3 步退成恢复路校验。
+
+## 10. 待拍
+
+- 「配置全集」里插件开关算配置（菜单跟着变、触发重铸）还是算运行时（菜单不变、只告知）？
+  本稿按「算配置」写。
+- §6 的 token 预算 8k（`TOOL_LOAD_BUDGET_TOKENS`）、锚点容差（第 9 步实做：chat 轮早侧 5s 钟差 /
+  晚侧 600s，wake 轮精确，旧闹钟记录 120s）是否合适——上电跑一周再看。
+- ~~缺席告知的文案表（每个 server 一句）由机主写还是先给草稿。~~ **10-29 我给草稿、机主定稿**，在 `pipeline.ABSENT_NOTES`。
+- ~~醒来弹卡挂着时整条 session 被占：TA 的消息到了让路（已做）；他自己的下一次醒来（闹钟 / 来信）排在队里等卡——
+  要不要也让路？~~ **10-30 机主拍板：也让路，并进第 7 步**：醒来轮的卡两种让路——TA 发了新消息 / 他自己的下一次醒来到了，
+  原话分开；app 卡片置灰标「已让路，你发送了新消息」/「已让路，他醒来了」（现在 app 只认 deadline 到点的「已超时」，
+  让路 / 手拒的卡在 app 里原样挂到 deadline，点了报「没有这张待批单」）。后端 pending 轮询或 SSE 带收场态，随第 7 步
+  的 app 版本（PR 页）一起发。
+- game 的 14 个工具是否要在泵开着时临时常驻——原答「不」的理由（进程内 server 不能 toggle）10-29 晚已不成立
+  （§5.3 翻案）。**10-29 机主拍板：做**。game 设 `alwaysLoad: true` + 平时 toggle off（0 token）、
+  game_start 时 toggle on（2.3k 常驻、不用取用法、重铸也不丢）、game_end 时 toggle off。好处是 §6 不用管游戏工具，
+  游戏里每次段内重铸后不再多一跳；代价是 toggle 要在轮间隙做（game_start 在轮内调，置旗、下个轮边界 toggle）。
+  落在 §9 第 8 步（延迟 + §5.2）一起做：开 session 后的 toggle off 和插件开关走同一个「轮间隙 toggle」口子；
+  game_start 那轮本身还是全量用法在手（game_start 返回值 + 它自己取过的），下一轮起 game 常驻。
+
+## 11. 与 PLAN_interject / PLAN_gamechat 的交界
+
+| # | 交界 | 规矩 | 落在哪 |
+|---|---|---|---|
+| 1 | 往 session 里补文字（节奏 §4、缺席告知 §5.1） vs 插话靠原文配对 | 只补在**新起的一轮**的注入里；在飞插话只带自己的时间头，helper 不碰 | 本稿 §4；interject §4.2 |
+| 2 | 铸回用法挂哪条 vs 账按气泡记 | 挂「接触之后的第一段 assistant」，P1 给每段准 ts | 本稿 §6；interject §4.3 |
+| 3 | 配置变了的重铸 vs pending 插话不铸 | 只在无在飞轮、pending 空时铸；泵开着推迟到 game_end | 本稿 §5.2；interject §4.2 |
+| 4 | 都靠 CLI 内部行为 | 升级前必跑清单共用（§8） | 本稿 §8；interject §6 |
+| 5 | 游戏改走 chat 路后判脏常态化 | 先 P1、先 §4.1，再改路由 | PLAN_gamechat §2.2 |
+| 6 | 派活是独立进程 | 不受延迟 / 重铸 / 探活影响；交界只有菜单块（§3.2）和醒因 `delegate`（醒来轮，在飞聊天轮时照 interject 规矩排队） | PLAN_delegate §9；interject §0 |
+
+互相帮忙的两处：延迟模式下每次 ToolSearch 都是一个工具边界，插话被当前轮吸收的机会变多；
+P1 消掉多段判脏后重铸变少，§6 的压力跟着小。

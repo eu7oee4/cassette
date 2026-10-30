@@ -1,0 +1,21 @@
+;; pr_test 的沙箱（PLAN_prs §3，macOS sandbox-exec / Seatbelt）。
+;; 测试跑的是他在工作副本里写的代码、没人看过——不包一层就等于不弹卡的任意代码执行：
+;; 能读 .env / char.json / gh token、能改主目录、能往外发。
+;; 口径：读写都走白名单。读 = 系统 + Python + venv + 本工作副本 + 本次临时目录；
+;; 写 = 本工作副本 + 本次临时目录；网络全关（测试全部离线，本机后端也不许连）。
+;; 元信息（stat）全局放行：Python 启动要一路 stat 上级目录，只泄「存在/大小」，读不到内容。
+;; 参数（prs._run_suite 下发，全部是 realpath）：VENV、WT（工作副本根）、TMP（本次临时目录）。
+(version 1)
+(deny default)
+(allow process-exec process-fork signal sysctl-read mach-lookup ipc-posix-shm iokit-open)
+(allow file-read-metadata)
+(allow file-ioctl)
+(allow file-read*
+  (subpath "/System") (subpath "/usr") (subpath "/bin")
+  (subpath "/Library/Frameworks/Python.framework")
+  (subpath "/private/etc") (subpath "/private/var/db/timezone") (subpath "/dev")
+  (literal "/") (literal "/private") (literal "/var")
+  (subpath (param "VENV")) (subpath (param "WT")) (subpath (param "TMP")))
+(allow file-write*
+  (subpath (param "WT")) (subpath (param "TMP"))
+  (literal "/dev/null") (literal "/dev/tty") (regex #"^/dev/fd/"))

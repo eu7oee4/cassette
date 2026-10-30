@@ -39,7 +39,7 @@ from typing import Optional
 for _k in ("MM_CODE_SEGMENTS", "CCC_HOOK_ENABLE", "CCC_SERVER_URL", "CCC_AUTH_TOKEN"):
     os.environ.pop(_k, None)
 
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -208,6 +208,10 @@ async def _lifespan(_app: FastAPI):
     session_mgr.set_event_loop(asyncio.get_running_loop())   # SDK 常驻 loop 的过桥
     characters.ensure_layout()   # 默认角色目录补齐（state 侧旧布局迁移在 state_store import 时已做）
     world.ensure_world()         # 大房子：注册表 + world.json 补齐（幂等，存在不覆盖）
+    import prs
+    prs.settle_rollback()        # 上一次重启起不来、看守退回了哪些 PR：标「已退回」+通知提的人（PLAN_prs §6.2）
+    import delegate
+    asyncio.get_running_loop().create_task(_delegate_sweep(delegate))   # 在跑的派活 resume 一次（PLAN_delegate §3.2）
     if config.COHABIT_ENABLED:
         # 同居世界上电（C4 之前默认关）：事件钩子 + 单 worker（醒来并发=1 的执行锁）。
         cohabit_queue.install()
@@ -228,9 +232,22 @@ async def _lifespan(_app: FastAPI):
     threading.Thread(target=_mail_watcher, daemon=True, name="mail-watcher").start()
     threading.Thread(target=_forge_ops_probe, daemon=True, name="forge-ops-probe").start()
     threading.Thread(target=_activity_sweep, daemon=True, name="activity-sweep").start()
+    # 启动的最后一步：记下这次加载的提交——既是 PR「生效没有」的锚，也是「上一次正常起来的
+    # 代码」（起不来的进程走不到这儿）。然后清掉已经验过活的合并分支（PLAN_prs §6.2/§10.4）。
+    prs.record_live_head()
+    threading.Thread(target=prs.cleanup_branches, daemon=True, name="pr-branch-cleanup").start()
     yield
     for t in tasks:
         t.cancel()
+
+
+async def _delegate_sweep(delegate) -> None:
+    try:
+        done = await delegate.sweep_on_start()
+        if done:
+            logerr(f"派活启动扫尾：{done}")
+    except Exception as e:
+        logerr(f"派活启动扫尾失败: {e}")
 
 
 app = FastAPI(title="cassette backend", lifespan=_lifespan)
@@ -607,7 +624,8 @@ def finalize_chat_reply(reply: str, stored: list[dict], req: ChatRequest,
 # ---------- 路由 ----------
 @app.get("/health")
 def health():
-    return {"ok": True, "forge_ops_ok": not _FORGE_OPS}
+    # pid：重启看守认的是「我起的那个进程在答」，旧进程没死透还占着端口时答的不算（PLAN_prs §6.2）
+    return {"ok": True, "forge_ops_ok": not _FORGE_OPS, "pid": os.getpid()}
 
 
 @app.get("/characters")
@@ -663,8 +681,11 @@ def chat_active(x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
 
 
 @app.post("/chat/stream")
-async def chat_stream(req: ChatRequest, x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
-    """流式聊天：SSE 逐字回复。协议见 sse.py。"""
+async def chat_stream(req: ChatRequest, x_auth: Optional[str] = Header(default=None, alias="X-Auth"),
+                      x_interject: Optional[str] = Header(default=None, alias="X-Interject")):
+    """流式聊天：SSE 逐字回复。协议见 sse.py。
+    X-Interject（PLAN_interject §4.5）：新包声明支持插话；后端在响应头用同名字段回「这个角色
+    收插话」，app 据此才并发发送。旧包不带 → 一切照旧排队。"""
     verify_auth(x_auth)
     cid = _resolve_char(req.char_id)
     prompt, handle_to_id, ctx = _prepare_chat(req, cid)   # 校验在流开始前，能正常返 4xx
@@ -698,7 +719,8 @@ async def chat_stream(req: ChatRequest, x_auth: Optional[str] = Header(default=N
                 injection=chat_loop.build_injection(req.messages, cid,
                                                     extra_hints=ctx["hints"]),
                 finalize=finalize, images=req.images, file_blocks=file_blocks,
-                catalog=ctx["catalog"]).__aiter__()
+                catalog=ctx["catalog"],
+                interject_ok=(x_interject or "").strip() == "1").__aiter__()
             first = await it.__anext__()
         except StopAsyncIteration:
             first = None
@@ -785,6 +807,9 @@ async def chat_stream(req: ChatRequest, x_auth: Optional[str] = Header(default=N
                     if state["done_delivered"]:
                         return
                     final = state["final"] or {}
+                    if final.get("merged"):
+                        # 插话被在飞轮吸收：回复走的是原来那条流（它自己有 rescue），这条没东西可补
+                        return
                     text = (final.get("reply") or "").strip()
                     stickers = final.get("sticker_sends") or []
                     if text or stickers:
@@ -836,11 +861,14 @@ async def chat_stream(req: ChatRequest, x_auth: Optional[str] = Header(default=N
             yield sse.sse({"type": "error", "content": "连接中断了，大模型那边出了点问题。"})
             yield sse.sse({"type": "done"})
 
-    return StreamingResponse(gen(), media_type="text/event-stream", headers={
+    headers = {
         "Cache-Control": "no-cache",
         "Connection": "keep-alive",
         "X-Accel-Buffering": "no",
-    })
+    }
+    if chat_loop.interject_capable(cid):
+        headers["X-Interject"] = "1"
+    return StreamingResponse(gen(), media_type="text/event-stream", headers=headers)
 
 
 # ---------- 窗口同步（app 侧历史变了但不生成）----------
@@ -969,15 +997,34 @@ class AckIn(BaseModel):
 
 
 @app.get("/pending")
-def get_pending(x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
+def get_pending(x_auth: Optional[str] = Header(default=None, alias="X-Auth"),
+                x_device: Optional[str] = Header(default=None, alias="X-Device")):
     verify_auth(x_auth)
-    return {"items": state_store.outbox_pending()}
+    _drain_pr_notices()
+    return {"items": state_store.outbox_pending(x_device)}
+
+
+def _drain_pr_notices() -> None:
+    """PR 的聊天页系统行（PLAN_prs §5）：prs 子进程排的队转进 outbox。text 留空——旧版 app
+    只认 text/表情，空的整条跳过，不会把它当成他说的话上屏；新版认 pr_id 画成可点的系统行。
+    不进模型消息史：outbox 只管下发，app 侧系统行发历史时整条滤掉。"""
+    import prs
+    try:
+        for n in prs.take_app_notices():
+            state_store.outbox_append({
+                "id": uuid.uuid4().hex[:12], "ts": n.get("ts") or int(time.time()),
+                "text": "", "sticker_ids": [], "char_id": n["char"], "delivered": False,
+                "origin": "pr", "pr_id": n["pr_id"],
+                "pr_note": f"{characters.display_name(n['char'])}{n['verb']}：{n['title']}"})
+    except Exception as e:
+        logerr(f"PR 系统行转 outbox 失败: {e}")
 
 
 @app.post("/pending/ack")
-def post_pending_ack(body: AckIn, x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
+def post_pending_ack(body: AckIn, x_auth: Optional[str] = Header(default=None, alias="X-Auth"),
+                     x_device: Optional[str] = Header(default=None, alias="X-Device")):
     verify_auth(x_auth)
-    state_store.outbox_ack(body.ids)
+    state_store.outbox_ack(body.ids, x_device)
     return {"ok": True}
 
 
@@ -1500,10 +1547,16 @@ def code_status(busy: int = 0, x_auth: Optional[str] = Header(default=None, alia
     h = code_bridge.sdk_loop_handle()
     busy_val = ((h.awaiting_user_since is None) if h is not None
                 else (bool(busy) and code_bridge.is_busy()))
+    # engine（PLAN_gamechat §3.1）：会话骑在哪个引擎上。只有 "pump"（unified 泵，骑在
+    # 聊天 session 上）时 /chat/stream 够得着游戏，新包据此把游戏中的消息改走聊天路；
+    # 独立 SDK loop / tmux 回退路仍只能走终端口 /code/send。旧包不读这个字段。
+    engine = (("pump" if getattr(h, "is_pump", False) else "loop")
+              if h is not None else "tmux")
     return {"enabled": config.CODE_MODE_ENABLED, "alive": code_bridge.session_alive(),
             "tmux": code_bridge.tmux_available(), "cwd": config.CODE_CWD,
             "busy": busy_val,
             "profile": code_bridge.active_profile(),
+            "engine": engine,
             "owner": owner, "owner_name": characters.display_name(owner),
             "session_char": code_bridge.session_char()}
 
@@ -1520,7 +1573,9 @@ def permits_pending(char: Optional[str] = None,
     out = permits.pending(char or None)
     for r in out:
         r["char_name"] = characters.display_name(r["char"])
-    return {"pending": out}
+    # closed：近一小时收场了的卡及其收场态（timeout / yielded_chat / yielded_wake / denied / allowed），
+    # app 据此把还挂着的卡置灰标原因（10-30 机主拍板：「已让路，你发送了新消息」/「已让路，他醒来了」）。
+    return {"pending": out, "closed": permits.closed(char or None)}
 
 
 @app.post("/permits/decide")
@@ -1536,6 +1591,202 @@ def permits_decide(inp: PermitDecideIn, char: Optional[str] = None,
     return r
 
 
+class PRMergeIn(BaseModel):
+    force: bool = False          # 测试没过时 app 二次确认「强行合并」才带
+
+
+class PRCloseIn(BaseModel):
+    reason: str = ""
+
+
+class DelegateIn(BaseModel):
+    char: str
+    slug: str
+    model: str
+    brief: str
+
+
+class DelegateReplyIn(BaseModel):
+    char: str
+    slug: str
+    answer: str
+
+
+class DelegateCancelIn(BaseModel):
+    char: str
+    slug: str
+    reason: str = ""
+
+
+def _delegate_origin(char_id: str) -> str:
+    """派活从哪种轮发起（日上限分两档，PLAN_delegate §3.1）：看他聊天 session 此刻的 turn_kind。"""
+    h = session_mgr.get(char_id, "chat")
+    return "wake" if h is not None and h.meta.get("turn_kind") == "wake" else "chat"
+
+
+@app.post("/prs/delegate")
+def prs_delegate(inp: DelegateIn, x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
+    """派活（PLAN_delegate §3.1）：prs MCP 壳转发来的；runner 在本进程的事件循环上。"""
+    verify_auth(x_auth)
+    import delegate
+    try:
+        return delegate.start(inp.char, inp.slug, inp.model, inp.brief,
+                              origin=_delegate_origin(inp.char))
+    except delegate.PRError as e:
+        raise HTTPException(status_code=409, detail={"error": str(e)})
+
+
+@app.post("/prs/delegate/reply")
+def prs_delegate_reply(inp: DelegateReplyIn,
+                       x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
+    verify_auth(x_auth)
+    import delegate
+    try:
+        return delegate.reply(inp.char, inp.slug, inp.answer)
+    except delegate.PRError as e:
+        raise HTTPException(status_code=409, detail={"error": str(e)})
+
+
+@app.post("/prs/delegate/cancel")
+def prs_delegate_cancel(inp: DelegateCancelIn,
+                        x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
+    """撤回（他自己调，或 app PR 页上机主撤）。"""
+    verify_auth(x_auth)
+    import delegate
+    try:
+        return delegate.cancel(inp.char, inp.slug, inp.reason)
+    except delegate.PRError as e:
+        raise HTTPException(status_code=409, detail={"error": str(e)})
+
+
+def _pr_row(r: dict) -> dict:
+    import characters
+    return r | {"char_name": characters.display_name(r["char"])}
+
+
+@app.get("/prs")
+def prs_list(x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
+    """PR 列表（PLAN_prs §5）：没办完的在前、收口的在后，各按时间倒序。
+    unapplied=合并了但还没在正在跑的代码里生效的个数（页顶「还没重启」那条的数）。"""
+    verify_auth(x_auth)
+    import delegate
+    import prs
+    rows = [_pr_row(r) for r in prs.list_prs()]
+    # 派活（PLAN_delegate §5）：跑着 / 等回答的列在页顶；收口的只给今天的（历史在 PR 记录的 delegated 里）
+    today = prs._now()[:10]
+    dele = [_pr_row(r) for r in delegate.rows()
+            if r["status"] in delegate.ACTIVE or (r.get("ended") or "")[:10] == today]
+    return {"prs": rows, "delegates": dele,
+            "unapplied": sum(1 for r in rows if r["status"] == "merged"
+                             and r["effective"] is False)}
+
+
+@app.get("/prs/{pr_id}")
+def prs_detail(pr_id: int, x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
+    """PR 详情：描述、测试、文件、diff、生没生效，外加此刻合不合得了（blockers，
+    待合并的才算——详情页一打开就能看到挡着的原因，不用等点了才报）。"""
+    verify_auth(x_auth)
+    import prs
+    try:
+        rec = prs.view(pr_id)
+        rec["blockers"] = prs.merge_blockers(pr_id) if rec["status"] == "open" else []
+    except prs.PRError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    return _pr_row(rec)
+
+
+@app.post("/prs/{pr_id}/merge")
+def prs_merge(pr_id: int, inp: PRMergeIn,
+              x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
+    """合并（本地 git merge --no-ff，永不 push）。挡住了 → 409 {error}；测试没过且没带
+    force → 409 {error, needs_force: true, tests}，app 弹「取消 / 强行合并」二次确认。
+    合完不生效，要重启后端（§6.2）。"""
+    verify_auth(x_auth)
+    import prs
+    try:
+        return prs.merge(pr_id, force=inp.force)
+    except prs.NeedsForce as e:
+        raise HTTPException(status_code=409, detail={
+            "error": "测试没过", "needs_force": True, "tests": str(e)})
+    except prs.PRError as e:
+        raise HTTPException(status_code=409, detail={"error": str(e)})
+
+
+@app.post("/prs/{pr_id}/close")
+def prs_close(pr_id: int, inp: PRCloseIn,
+              x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
+    """机主关掉一个 PR（谁的都能关），提 PR 的角色下一轮开头会知道。"""
+    verify_auth(x_auth)
+    import prs
+    try:
+        return prs.close_by_owner(pr_id, inp.reason)
+    except prs.PRError as e:
+        raise HTTPException(status_code=409, detail={"error": str(e)})
+
+
+def _running_now() -> list[str]:
+    """重启会掐断的东西（确认弹窗里列给机主看）。每项各自兜错：探不到就不列，别挡重启。"""
+    import characters
+    import permits
+    import questions
+    out = []
+    for cid in characters.ids():
+        name = characters.display_name(cid)
+        probes = (
+            (lambda: wake.chat_turn_active(cid), f"{name}正在回你的消息"),
+            (lambda: cohabit_queue.executing() == cid, f"{name}正醒着在做事"),
+            (lambda: permits.pending(cid), f"{name}有一张审批卡在等你批"),
+            (lambda: questions.pending(cid), f"{name}有一张问答卡在等你答"),
+            (lambda: (cohabit.game_char() or ("",))[0] == cid, f"{name}在玩游戏（游戏会断，进度在笔记本里）"),
+        )
+        for probe, text in probes:
+            try:
+                if probe():
+                    out.append(text)
+            except Exception:
+                continue
+    try:
+        import delegate
+        out += delegate.running_now()      # 在跑的派活（PLAN_delegate §3.2）
+    except Exception:
+        pass
+    return out
+
+
+class RestartIn(BaseModel):
+    confirm: bool = False        # app 弹过「会掐断这些」的确认才带 true
+
+
+@app.get("/admin/restart")
+def admin_restart_preview(x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
+    """重启前的确认弹窗数据（PLAN_prs §6.2②）：会掐断什么、哪些合并了的 PR 会随这次生效
+    （起不来就一起退回）、现在能不能按。"""
+    verify_auth(x_auth)
+    import prs
+    import restart
+    pend = prs.pending_merges()
+    return {"running": _running_now(),
+            "pending": [{"id": i, "title": prs.get(i).get("title", "")} for i, _ in pend],
+            "blockers": restart.blockers()}
+
+
+@app.post("/admin/restart", status_code=202)
+def admin_restart(inp: RestartIn, request: Request,
+                  x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
+    """重启后端（PLAN_prs §6.2）：预检 import → 起脱离的看守脚本 → 回 202，随后被看守杀掉换新。
+    起不来看守会自动退回这批还没生效的 PR 合并、用退回后的代码再起，结果走 Bark。
+    app 收到 202 后轮询 /health，pid 变了 = 换好了。"""
+    verify_auth(x_auth)
+    import restart
+    if not inp.confirm:
+        raise HTTPException(status_code=400, detail={"error": "先确认（confirm=true）"})
+    try:
+        out = restart.spawn(port=request.scope["server"][1], old_pid=os.getpid())
+    except restart.RestartError as e:
+        raise HTTPException(status_code=409, detail={"error": str(e)})
+    return {"ok": True, "old_pid": os.getpid()} | out
+
+
 @app.get("/questions/pending")
 def questions_pending(char: Optional[str] = None,
                       x_auth: Optional[str] = Header(default=None, alias="X-Auth")):
@@ -1547,7 +1798,7 @@ def questions_pending(char: Optional[str] = None,
     out = questions.pending(char or None)
     for r in out:
         r["char_name"] = characters.display_name(r["char"])
-    return {"pending": out}
+    return {"pending": out, "closed": questions.closed(char or None)}
 
 
 @app.post("/questions/decide")
@@ -1655,8 +1906,12 @@ def code_send(inp: CodeSendIn, char: Optional[str] = None,
     if sdk_handle is not None:
         try:
             if getattr(sdk_handle, "is_pump", False):
-                # PR13 泵：app 游戏态把聊天框消息也走这口（08-31 实锤）——
+                # PR13 泵：旧包游戏态把聊天框消息也走这口（08-31 实锤）——
                 # 包成 PumpNote 轮尾吃掉，账里逐字记 app 历史里的原文。
+                # 新包（PLAN_gamechat §3.2）游戏中的消息走 /chat/stream，不再到这儿；
+                # 这行日志是 §3.3 退役判据：两周没见它就能拆泵分支。
+                print(f"[code_send] 旧包仍在走终端口（char={sdk_handle.char_id}）",
+                      file=sys.stderr)
                 chat_loop.inject_pump_user(sdk_handle.char_id, msg, inp.text or "")
             else:
                 sdk_handle.put_threadsafe(msg)    # SDK loop：进队列，loop 里 query() 注入
@@ -2486,7 +2741,8 @@ def _game_loop_closed(handle) -> None:
 def _game_story_start_unified(cid: str):
     """PR13 泵路径：game_start=拿锁+开段账+置泵——没有新会话、没有重铸、没有
     开场注入（他正在对话里，「游戏到手边」就是工具能用了这件事本身）。
-    翻笔记本的提示走工具返回值（in-band，自然的形状）。"""
+    节奏全文和翻笔记本的提示都走工具返回值（in-band，自然的形状；节奏 10-29 起
+    不再常驻系统提示，PLAN_toolmount §4——重铸冲掉后由 rhythm_due 补）。"""
     if code_bridge.session_alive():
         return {"ok": False, "error": "已经有一个会话开着（code 或游戏），先收摊再拿"}
     holder = game_bridge.acquire_lock("story")
@@ -2499,8 +2755,11 @@ def _game_story_start_unified(cid: str):
         return r
     game_loop.ensure_default_tips()   # 小抄空白才播种（出厂机制事实，机主可改）
     logerr(f"拿到游戏(unified)：char={cid} seg={r.get('seg_id')}")
-    return {"ok": True, "session": "unified",
-            "hint": "游戏在手边了。先 game_notes_read 翻翻剧情本看看上次到哪了。"}
+    hint = chat_loop.game_rhythm_note() + "\n〔先 game_notes_read 翻翻剧情本看看上次到哪了。〕"
+    if chat_loop.game_tools_pending(cid):
+        # §10 轮间隙 toggle：game server 这一轮还 off 着，工具下一轮才到手
+        hint += "\n〔游戏工具下一轮才到手——这句说完目光就能落回屏幕。〕"
+    return {"ok": True, "session": "unified", "hint": hint}
 
 
 def _game_story_start_sdk(inp: GameStoryStartIn):
